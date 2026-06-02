@@ -9,7 +9,8 @@ from typing import AsyncIterator, Callable
 from loongcli.core.llm import LLMClient
 from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress
 from loongcli.core.stream_collector import StreamCollector
-from loongcli.core.compact import Compactor
+from loongcli.core.compact import Compactor, model_context_window
+from loongcli.core.context_collapse import should_collapse, collapse
 from loongcli.core.circuit_breaker import CompactCircuitBreaker
 from loongcli.core.tool_result_manager import ToolResultManager
 from loongcli.tools.base import ToolRegistry
@@ -192,9 +193,12 @@ class AgentLoop:
             self._result_manager.reset_turn()
             collector = StreamCollector()
 
+            level = should_collapse(self._last_prompt_tokens, model_context_window(self.llm.model))
+            api_messages = collapse(self.messages, level) if level > 0 else self.messages
+
             try:
                 async for event in collector.collect(
-                    self.llm.chat_stream(messages=self.messages, tools=tools),
+                    self.llm.chat_stream(messages=api_messages, tools=tools),
                 ):
                     yield event
             except Exception as e:
