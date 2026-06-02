@@ -197,7 +197,7 @@ class Compactor:
             return messages
 
         keep_turns = turns[-KEEP_RECENT_TURNS:]
-        summary = await self._summarize(messages, active_skill)
+        summary = await self._summarize(messages, active_skill, mode=mode)
         logger.info("Compacted %d messages into summary (%d chars)", len(messages), len(summary))
 
         boundary = BOUNDARY_TEMPLATE.format(
@@ -221,10 +221,12 @@ class Compactor:
 
         return _fix_role_alternation(prefix + attachments, kept_messages)
 
-    async def _summarize(self, messages: list[dict], active_skill: str | None = None) -> str:
+    async def _summarize(self, messages: list[dict], active_skill: str | None = None, mode: str = "auto") -> str:
         instruction = COMPACT_INSTRUCTION
         if active_skill:
             instruction += f"\n\n注意：当前正在执行技能 '{active_skill}'，在「活跃技能」部分详细记录进度。"
+        if mode == "auto":
+            instruction += "\n\n不要在摘要中提出新问题或建议用户回答任何内容。摘要应纯粹记录事实，不包含后续提问。"
 
         # Pre-process: clear old reclaimable tool results to reduce token load
         cleaned = micro_compact(list(messages))

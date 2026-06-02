@@ -337,7 +337,7 @@ class TestCompact:
 
         sent = calls[0]["messages"]
         assert sent[-1]["role"] == "user"
-        assert sent[-1]["content"] == COMPACT_INSTRUCTION
+        assert sent[-1]["content"].startswith(COMPACT_INSTRUCTION)
         assert len(sent) == len(msgs) + 1
 
 
@@ -376,6 +376,70 @@ class TestHeavyToolResults:
         for m in result:
             if m["role"] == "tool":
                 assert m["content"] == TOOL_RESULT_PLACEHOLDER
+
+
+# --- Suppress Follow-Up Questions ---
+
+class TestSuppressFollowUp:
+    async def test_auto_mode_adds_suppress(self):
+        calls: list[dict] = []
+
+        async def capture_stream(**kwargs):
+            calls.append(kwargs)
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta.content = "<summary>摘要</summary>"
+            chunk.choices[0].delta.tool_calls = None
+            chunk.choices[0].finish_reason = "stop"
+            chunk.usage = None
+            yield chunk
+
+        llm = MagicMock()
+        llm.chat_stream = capture_stream
+        c = Compactor(llm=llm, threshold=100)
+        await c.compact(_make_messages(15), mode="auto")
+        prompt_text = calls[0]["messages"][-1]["content"]
+        assert "不要" in prompt_text and "提问" in prompt_text
+
+    async def test_manual_mode_no_suppress(self):
+        calls: list[dict] = []
+
+        async def capture_stream(**kwargs):
+            calls.append(kwargs)
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta.content = "<summary>摘要</summary>"
+            chunk.choices[0].delta.tool_calls = None
+            chunk.choices[0].finish_reason = "stop"
+            chunk.usage = None
+            yield chunk
+
+        llm = MagicMock()
+        llm.chat_stream = capture_stream
+        c = Compactor(llm=llm, threshold=100)
+        await c.compact(_make_messages(15), mode="manual")
+        prompt_text = calls[0]["messages"][-1]["content"]
+        assert "后续提问" not in prompt_text
+
+    async def test_exit_mode_no_suppress(self):
+        calls: list[dict] = []
+
+        async def capture_stream(**kwargs):
+            calls.append(kwargs)
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta.content = "<summary>摘要</summary>"
+            chunk.choices[0].delta.tool_calls = None
+            chunk.choices[0].finish_reason = "stop"
+            chunk.usage = None
+            yield chunk
+
+        llm = MagicMock()
+        llm.chat_stream = capture_stream
+        c = Compactor(llm=llm, threshold=100)
+        await c.compact(_make_messages(15), mode="exit")
+        prompt_text = calls[0]["messages"][-1]["content"]
+        assert "后续提问" not in prompt_text
 
 
 # --- Compact Instruction ---
