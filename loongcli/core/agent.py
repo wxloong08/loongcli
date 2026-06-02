@@ -10,6 +10,7 @@ from loongcli.core.llm import LLMClient
 from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress
 from loongcli.core.stream_collector import StreamCollector
 from loongcli.core.compact import Compactor
+from loongcli.core.circuit_breaker import CompactCircuitBreaker
 from loongcli.core.tool_result_manager import ToolResultManager
 from loongcli.tools.base import ToolRegistry
 from loongcli.tools.routing import AgentRole
@@ -63,6 +64,7 @@ class AgentLoop:
         self._last_tool_sig: str = ""
         self._repeat_count: int = 0
         self._result_manager = ToolResultManager()
+        self._compact_breaker = CompactCircuitBreaker()
         self.messages: list[dict] = []
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
@@ -151,14 +153,21 @@ class AgentLoop:
         self._last_tool_sig = ""
         self._repeat_count = 0
 
-        if self.compactor and self.compactor.should_compact(self._last_prompt_tokens, self.messages):
+        if (self.compactor
+                and not self._compact_breaker.is_open
+                and self.compactor.should_compact(self._last_prompt_tokens, self.messages)):
             before = len(self.messages)
             yield CompactStart(message_count=before)
-            active_skill = self._detect_active_skill()
-            self.messages = await self.compactor.compact(
-                self.messages, active_skill=active_skill,
-                mode="auto", pre_tokens=self._last_prompt_tokens,
-            )
+            try:
+                active_skill = self._detect_active_skill()
+                self.messages = await self.compactor.compact(
+                    self.messages, active_skill=active_skill,
+                    mode="auto", pre_tokens=self._last_prompt_tokens,
+                )
+                self._compact_breaker.record_success()
+            except Exception as e:
+                logger.warning("Compact failed: %s", e)
+                self._compact_breaker.record_failure()
             yield CompactNotice(before=before, after=len(self.messages))
 
         if disable_tools:
