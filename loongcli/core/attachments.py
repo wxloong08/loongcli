@@ -1,7 +1,10 @@
 from __future__ import annotations
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from loongcli.plan.store import PlanStore
@@ -57,6 +60,7 @@ def _restore_files(paths: list[str]) -> str:
             budget -= len(content)
             sections.append(f"### {p}\n```\n{content}\n```")
         except Exception:
+            logger.debug("Failed to restore file %s", p, exc_info=True)
             continue
     if not sections:
         return ""
@@ -84,7 +88,8 @@ def _task_status(task_manager) -> str:
     for t in running:
         lines.append(f"- [运行中] {t.id}: {t.prompt[:80]}")
     for t in completed_recent:
-        result_preview = t.result[:120] + "..." if len(t.result) > 120 else t.result
+        result_text = t.result or ""
+        result_preview = result_text[:120] + "..." if len(result_text) > 120 else result_text
         lines.append(f"- [已完成] {t.id}: {result_preview}")
     return "\n".join(lines)
 
