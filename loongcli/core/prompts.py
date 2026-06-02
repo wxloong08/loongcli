@@ -33,7 +33,7 @@ def get_system_prompt(
 
     project_ctx = load_project_context()
     if project_ctx:
-        parts.append(f"# 项目指引 (DSCLI.md)\n以下是项目维护者提供的指引，你必须遵守：\n\n{project_ctx}")
+        parts.append(f"# 项目指引 (LOONG.md)\n以下是项目维护者提供的指引，你必须遵守：\n\n{project_ctx}")
 
     if memory:
         parts.append(_memory_section(memory))

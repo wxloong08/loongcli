@@ -182,7 +182,7 @@ class TUI:
                 f"[bold]{agent.conversation_store.session_id}[/bold]"
             )
         else:
-            title = "[bold cyan]loongcli[/bold cyan] v0.1.0 — DeepSeek Agent CLI"
+            title = "[bold cyan]loongcli[/bold cyan] v0.1.0 — Loong Agent CLI"
 
         lines = [title]
         if status_line:

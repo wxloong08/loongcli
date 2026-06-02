@@ -1,0 +1,14 @@
+{
+    "api_key": "your-api-key",
+    "model": "deepseek-v4-flash",
+    "base_url": "https://api.deepseek.com",
+    "sub_model": "",
+    "thinking": true,
+    "reasoning_effort": "max",
+    "model_max_tokens": "1M",
+    "compact_threshold": 0,
+    "skill_dirs": [],
+    "mcpServers": {},
+    "hooks": {},
+    "models": {}
+}

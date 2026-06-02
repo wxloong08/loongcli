@@ -10,7 +10,7 @@ def test_find_no_files(tmp_path):
 
 
 def test_find_in_current_dir(tmp_path):
-    f = tmp_path / "DSCLI.md"
+    f = tmp_path / "LOONG.md"
     f.write_text("# Project Rules", encoding="utf-8")
     result = find_project_context_files(start=tmp_path)
     assert len(result) == 1
@@ -21,31 +21,31 @@ def test_find_walks_up_to_git_root(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
     (root / ".git").mkdir()
-    (root / "DSCLI.md").write_text("root rules", encoding="utf-8")
+    (root / "LOONG.md").write_text("root rules", encoding="utf-8")
 
     sub = root / "src" / "app"
     sub.mkdir(parents=True)
-    (sub / "DSCLI.md").write_text("app rules", encoding="utf-8")
+    (sub / "LOONG.md").write_text("app rules", encoding="utf-8")
 
     result = find_project_context_files(start=sub)
     assert len(result) == 2
-    assert result[0] == root / "DSCLI.md"
-    assert result[1] == sub / "DSCLI.md"
+    assert result[0] == root / "LOONG.md"
+    assert result[1] == sub / "LOONG.md"
 
 
 def test_find_stops_at_git_root(tmp_path):
     outer = tmp_path / "outer"
     outer.mkdir()
-    (outer / "DSCLI.md").write_text("outer", encoding="utf-8")
+    (outer / "LOONG.md").write_text("outer", encoding="utf-8")
 
     repo = outer / "repo"
     repo.mkdir()
     (repo / ".git").mkdir()
-    (repo / "DSCLI.md").write_text("repo", encoding="utf-8")
+    (repo / "LOONG.md").write_text("repo", encoding="utf-8")
 
     result = find_project_context_files(start=repo)
     paths = [p.name for p in result]
-    assert all(p == "DSCLI.md" for p in paths)
+    assert all(p == "LOONG.md" for p in paths)
     contents = [p.read_text(encoding="utf-8") for p in result]
     assert "outer" not in contents
 
@@ -56,7 +56,7 @@ def test_load_empty(tmp_path):
 
 
 def test_load_single_file(tmp_path):
-    (tmp_path / "DSCLI.md").write_text("use pytest for tests", encoding="utf-8")
+    (tmp_path / "LOONG.md").write_text("use pytest for tests", encoding="utf-8")
     result = load_project_context(start=tmp_path)
     assert "use pytest for tests" in result
 
@@ -65,11 +65,11 @@ def test_load_multiple_files(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
     (root / ".git").mkdir()
-    (root / "DSCLI.md").write_text("global rule", encoding="utf-8")
+    (root / "LOONG.md").write_text("global rule", encoding="utf-8")
 
     sub = root / "pkg"
     sub.mkdir()
-    (sub / "DSCLI.md").write_text("pkg rule", encoding="utf-8")
+    (sub / "LOONG.md").write_text("pkg rule", encoding="utf-8")
 
     result = load_project_context(start=sub)
     assert "global rule" in result
@@ -78,12 +78,12 @@ def test_load_multiple_files(tmp_path):
 
 
 def test_load_skips_empty_file(tmp_path):
-    (tmp_path / "DSCLI.md").write_text("", encoding="utf-8")
+    (tmp_path / "LOONG.md").write_text("", encoding="utf-8")
     result = load_project_context(start=tmp_path)
     assert result == ""
 
 
 def test_load_utf8_chinese(tmp_path):
-    (tmp_path / "DSCLI.md").write_text("# 项目规则\n使用中文注释", encoding="utf-8")
+    (tmp_path / "LOONG.md").write_text("# 项目规则\n使用中文注释", encoding="utf-8")
     result = load_project_context(start=tmp_path)
     assert "使用中文注释" in result

@@ -3,7 +3,7 @@ import os
 import pytest
 from pathlib import Path
 
-from loongcli.core.config import Config
+from loongcli.core.config import Config, parse_token_size
 
 
 def test_defaults():
@@ -77,3 +77,71 @@ def test_sub_model_from_env(tmp_path, monkeypatch):
     monkeypatch.setenv("DSCLI_SUB_MODEL", "deepseek-v4-flash")
     cfg = Config.load(path=p)
     assert cfg.sub_model == "deepseek-v4-flash"
+
+
+class TestParseTokenSize:
+    def test_plain_int(self):
+        assert parse_token_size(131072) == 131072
+        assert parse_token_size(0) == 0
+
+    def test_k_suffix_lower(self):
+        assert parse_token_size("128k") == 128000
+        assert parse_token_size("1k") == 1000
+
+    def test_k_suffix_upper(self):
+        assert parse_token_size("128K") == 128000
+
+    def test_m_suffix(self):
+        assert parse_token_size("1M") == 1_000_000
+        assert parse_token_size("1m") == 1_000_000
+        assert parse_token_size("1.5M") == 1_500_000
+
+    def test_b_suffix(self):
+        assert parse_token_size("2B") == 2_000_000_000
+        assert parse_token_size("0.5B") == 500_000_000
+
+    def test_no_suffix(self):
+        assert parse_token_size("65536") == 65536
+
+    def test_whitespace(self):
+        assert parse_token_size(" 1M ") == 1_000_000
+
+    def test_empty(self):
+        assert parse_token_size("") == 0
+        assert parse_token_size(0) == 0
+
+    def test_zero_value(self):
+        assert parse_token_size("0") == 0
+        assert parse_token_size("0k") == 0
+
+    def test_invalid_raises(self):
+        with pytest.raises(ValueError, match="无法解析"):
+            parse_token_size("abc")
+        with pytest.raises(ValueError, match="无法解析"):
+            parse_token_size("1X")
+
+
+class TestConfigTokenSizeParsing:
+    def test_model_max_tokens_from_string(self, tmp_path):
+        p = tmp_path / "config.json"
+        p.write_text(json.dumps({
+            "api_key": "sk-test",
+            "model_max_tokens": "1M",
+        }), encoding="utf-8")
+        cfg = Config.load(path=p)
+        assert cfg.model_max_tokens == 1_000_000
+
+    def test_compact_threshold_from_string(self, tmp_path):
+        p = tmp_path / "config.json"
+        p.write_text(json.dumps({
+            "api_key": "sk-test",
+            "compact_threshold": "128k",
+        }), encoding="utf-8")
+        cfg = Config.load(path=p)
+        assert cfg.compact_threshold == 128000
+
+    def test_model_max_tokens_zero_means_auto(self, tmp_path):
+        p = tmp_path / "config.json"
+        p.write_text(json.dumps({"api_key": "sk-test"}), encoding="utf-8")
+        cfg = Config.load(path=p)
+        assert cfg.model_max_tokens == 0

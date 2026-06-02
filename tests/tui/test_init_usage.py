@@ -24,7 +24,7 @@ async def test_init_creates_loongcli_md(tmp_path, monkeypatch):
     ctx = _make_ctx()
     cmd = InitCommand()
     await cmd.run([], ctx)
-    f = tmp_path / "DSCLI.md"
+    f = tmp_path / "LOONG.md"
     assert f.exists()
     content = f.read_text(encoding="utf-8")
     assert "项目指引" in content
@@ -34,11 +34,11 @@ async def test_init_creates_loongcli_md(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_init_refuses_if_exists(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "DSCLI.md").write_text("existing", encoding="utf-8")
+    (tmp_path / "LOONG.md").write_text("existing", encoding="utf-8")
     ctx = _make_ctx()
     cmd = InitCommand()
     await cmd.run([], ctx)
-    assert (tmp_path / "DSCLI.md").read_text(encoding="utf-8") == "existing"
+    assert (tmp_path / "LOONG.md").read_text(encoding="utf-8") == "existing"
 
 
 @pytest.mark.asyncio

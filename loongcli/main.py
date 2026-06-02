@@ -9,7 +9,7 @@ from rich.console import Console
 from loongcli.core.config import Config
 from loongcli.core.llm import LLMClient
 from loongcli.core.agent import AgentLoop
-from loongcli.core.compact import Compactor
+from loongcli.core.compact import Compactor, model_context_window, SUMMARY_TOKEN_RESERVE
 from loongcli.core.prompts import get_system_prompt
 from loongcli.core.git_context import collect_git_context
 from loongcli.core.project_context import find_project_context_files
@@ -42,7 +42,7 @@ from loongcli.tui.app import TUI
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="loongcli",
-        description="DeepSeek Agent CLI — 通用 AI Agent 终端工具",
+        description="Loong Agent CLI — 通用 AI Agent 终端工具",
     )
     parser.add_argument(
         "prompt", nargs="?", default=None,
@@ -264,7 +264,14 @@ async def _async_main():
     registry.register(TaskStatusTool(task_manager))
 
     system_prompt = get_system_prompt(model=cfg.model, memory=memory, mcp=mcp, plan_store=plan_store)
-    compactor = Compactor(llm=llm, threshold=cfg.compact_threshold)
+    # Use user-configured threshold or auto-compute: model_max - summary_reserve
+    if cfg.compact_threshold:
+        threshold = cfg.compact_threshold
+    else:
+        max_tokens = cfg.model_max_tokens or model_context_window(cfg.model)
+        threshold = max(0, max_tokens - SUMMARY_TOKEN_RESERVE)
+
+    compactor = Compactor(llm=llm, threshold=threshold)
 
     agent = AgentLoop(
         llm=llm,
@@ -305,7 +312,7 @@ async def _async_main():
                 status_parts.append(git_label)
             ctx_files = find_project_context_files()
             if ctx_files:
-                status_parts.append(f"DSCLI.md: {len(ctx_files)} loaded")
+                status_parts.append(f"LOONG.md: {len(ctx_files)} loaded")
             skill_count = len(skill_registry.list_skills())
             if skill_count:
                 status_parts.append(f"skills: {skill_count}")

@@ -10,11 +10,11 @@ build/
 venv/
 .env
 .loongcli/secrets.yaml
-CLAUDE.md
-docs/
-tasks/
-python313_report.md
 *.log
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+CLAUDE.md
+LOONG.md
+docs/
+tasks/

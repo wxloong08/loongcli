@@ -1,6 +1,8 @@
 # loongcli
 
-A general-purpose AI Agent runtime built from scratch, inspired by Claude Code's architecture. It implements the core systems that power modern AI coding assistants: streaming agent loop, tool orchestration, context management, and plan-driven execution.
+A general-purpose AI Agent runtime built from scratch, inspired by Claude Code's architecture. Independently implemented with streaming agent loop, tool orchestration, context management, and plan-driven execution.
+
+![loongcli demo](assets/demo.gif)
 
 ## Architecture
 
@@ -39,7 +41,7 @@ Streaming ReAct loop with tool calling. Handles the core LLM ↔ tool execution 
 
 Pluggable tool registry with role-based access control:
 
-- **10 built-in tools**: ReadFile, WriteFile, EditFile, Glob, Grep, Shell, Plan, Memorize, Recall, Skill
+- **14 built-in tools**: ReadFile, WriteFile, EditFile, Glob, Grep, Shell, Plan, Memorize, Recall, Skill, Delegate, BatchDelegate, SendMessage, TaskStatus
 - **Role-based routing** — main agent and sub-agents see different tool sets
 - **SubAgent delegation** — spawn child agents with isolated tool access and message-passing
 
@@ -49,7 +51,7 @@ Pluggable tool registry with role-based access control:
 Safety Floor (hardcoded) → Rule Engine (configurable) → User Confirm (interactive)
 ```
 
-Dangerous operations (rm -rf, format, registry edits) are blocked at the floor level. Configurable rules handle medium-risk operations. Everything else prompts for user confirmation.
+Common dangerous command patterns (rm -rf, format, etc.) are blocked at the baseline level. Configurable rules handle medium-risk operations (e.g., writing outside project directory). Read-only tools and in-project writes are auto-allowed. Not a security sandbox — defense-in-depth against accidental damage, not adversarial bypass.
 
 ### Plan-Driven Goal Execution (`/goal`)
 
@@ -61,7 +63,7 @@ Three-phase autonomous execution with human-in-the-loop approval:
 
 ### Context Window Management (`loongcli/core/compact.py`)
 
-Turn-based compaction for million-token context windows:
+Turn-based compaction for long context windows:
 
 - Segments conversation into user turns (user message + all subsequent assistant/tool messages)
 - Keeps the 3 most recent turns intact
@@ -81,9 +83,9 @@ Model Context Protocol support for extensible tool ecosystems:
 ```bash
 pip install -e .
 
-# Configure API key
+# Configure (any OpenAI-compatible API)
 mkdir ~/.loongcli
-echo '{"api_key": "your-deepseek-api-key"}' > ~/.loongcli/config.json
+echo '{"api_key": "your-api-key", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"}' > ~/.loongcli/config.json
 
 # Run
 loongcli
@@ -98,12 +100,17 @@ python -m pytest tests/ -q
 
 500+ unit tests covering core agent loop, tool execution, permission checks, compaction, plan management, goal execution, and TUI rendering.
 
+```
+$ python -m pytest tests/ -q
+514 passed in 43s
+```
+
 ## Project Structure
 
 ```
 loongcli/
 ├── core/           # Agent loop, LLM client, compaction, config, events
-├── tools/          # Tool registry, 10 built-in tools, role routing
+├── tools/          # Tool registry, 14 built-in tools, role routing
 ├── tui/            # Terminal UI, session management, commands
 ├── security/       # Permission checker, safety floor
 ├── mcp/            # MCP client (stdio + HTTP)

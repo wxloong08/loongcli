@@ -182,16 +182,16 @@ class MemoriesCommand(SlashCommand):
 
 class InitCommand(SlashCommand):
     name = "init"
-    description = "在当前目录生成 DSCLI.md 项目配置模板"
+    description = "在当前目录生成 LOONG.md 项目配置模板"
 
     async def run(self, args: list[str], ctx: CommandContext) -> None:
         from pathlib import Path
-        target = Path.cwd() / "DSCLI.md"
+        target = Path.cwd() / "LOONG.md"
         if target.exists():
-            ctx.console.print(f"[yellow]DSCLI.md 已存在: {target}[/yellow]")
+            ctx.console.print(f"[yellow]LOONG.md 已存在: {target}[/yellow]")
             return
-        target.write_text(DSCLI_TEMPLATE, encoding="utf-8")
-        ctx.console.print(f"[green]✓ 已创建 DSCLI.md[/green] — {target}")
+        target.write_text(LOONG_TEMPLATE, encoding="utf-8")
+        ctx.console.print(f"[green]✓ 已创建 LOONG.md[/green] — {target}")
         ctx.console.print("[dim]编辑此文件来配置项目指引，重启 loongcli 后生效[/dim]")
 
 
@@ -278,7 +278,7 @@ class ProCommand(SlashCommand):
         )
 
 
-DSCLI_TEMPLATE = """\
+LOONG_TEMPLATE = """\
 # 项目指引
 
 <!-- loongcli 会自动加载此文件到 Agent 的 system prompt 中 -->

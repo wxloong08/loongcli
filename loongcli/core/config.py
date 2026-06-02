@@ -1,9 +1,28 @@
 from __future__ import annotations
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+def parse_token_size(value: Any) -> int:
+    """Parse human-readable token sizes like '128k', '1M', '1.5M', or plain ints."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    if not isinstance(value, str):
+        return 0
+    value = value.strip().upper()
+    if not value:
+        return 0
+    match = re.match(r'^([\d.]+)\s*(K|M|B)?$', value)
+    if not match:
+        raise ValueError(f"无法解析 token 大小: {value!r}，支持格式如 128k, 1M, 2B")
+    num = float(match.group(1))
+    unit = match.group(2)
+    multiplier = {"K": 1000, "M": 1_000_000, "B": 1_000_000_000}.get(unit, 1)
+    return int(num * multiplier)
 
 
 @dataclass
@@ -11,6 +30,7 @@ class ModelProfile:
     model: str
     api_key: str = ""
     base_url: str = "https://api.deepseek.com"
+    max_tokens: int = 0  # 0 = auto-detect from model name
 
     def effective_api_key(self, fallback: str) -> str:
         return self.api_key or fallback
@@ -22,7 +42,8 @@ class Config:
     model: str = "deepseek-v4-flash"
     sub_model: str = ""
     base_url: str = "https://api.deepseek.com"
-    compact_threshold: int = 800000
+    model_max_tokens: int = 0  # 0 = auto-detect from model name
+    compact_threshold: int = 0  # 0 = auto (model context - 13K summary reserve)
     thinking: bool = True
     reasoning_effort: str = "max"
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -52,6 +73,7 @@ class Config:
                 model=pdata.get("model", name),
                 api_key=pdata.get("api_key", ""),
                 base_url=pdata.get("base_url", "https://api.deepseek.com"),
+                max_tokens=parse_token_size(pdata.get("max_tokens", 0)),
             )
 
         return cls(
@@ -59,7 +81,8 @@ class Config:
             model=os.environ.get("DSCLI_MODEL") or file_data.get("model", "deepseek-v4-flash"),
             sub_model=os.environ.get("DSCLI_SUB_MODEL") or file_data.get("sub_model", ""),
             base_url=os.environ.get("DSCLI_BASE_URL") or file_data.get("base_url", "https://api.deepseek.com"),
-            compact_threshold=int(file_data.get("compact_threshold", 800000)),
+            model_max_tokens=parse_token_size(file_data.get("model_max_tokens", 0)),
+            compact_threshold=parse_token_size(file_data.get("compact_threshold", 0)),
             thinking=file_data.get("thinking", True),
             reasoning_effort=file_data.get("reasoning_effort", "max"),
             skill_dirs=file_data.get("skill_dirs", []),

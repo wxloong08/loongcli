@@ -1,16 +1,31 @@
 from __future__ import annotations
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
-class ConversationStore:
-    """Persists full conversation history per session."""
+def _path_to_slug(project_dir: Path) -> str:
+    raw = str(project_dir.resolve())
+    raw = re.sub(r'[:\\]', '-', raw)
+    raw = re.sub(r'-+', '-', raw)
+    return raw.strip('-')
 
-    def __init__(self, base_dir: Path | None = None):
-        self.base_dir = base_dir or Path.home() / ".loongcli" / "sessions"
+
+def _project_sessions_dir(project_dir: Path | None = None) -> Path:
+    if project_dir is None:
+        project_dir = Path.cwd()
+    slug = _path_to_slug(project_dir)
+    return Path.home() / ".loongcli" / "projects" / slug / "sessions"
+
+
+class ConversationStore:
+    """Persists full conversation history per session, isolated by project."""
+
+    def __init__(self, base_dir: Path | None = None, project_dir: Path | None = None):
+        self.base_dir = base_dir or _project_sessions_dir(project_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.session_id = uuid.uuid4().hex[:12]
         self._meta: dict[str, Any] = {

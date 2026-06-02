@@ -2,11 +2,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-CONTEXT_FILENAME = "DSCLI.md"
+CONTEXT_FILENAME = "LOONG.md"
 
 
 def find_project_context_files(start: Path | None = None) -> list[Path]:
-    """Walk up from start dir to git root (or filesystem root), collecting DSCLI.md files.
+    """Walk up from start dir to git root (or filesystem root), collecting LOONG.md files.
     Returns paths ordered from outermost (user-level) to innermost (closest to CWD).
     """
     found: list[Path] = []
@@ -37,7 +37,7 @@ def find_project_context_files(start: Path | None = None) -> list[Path]:
 
 
 def load_project_context(start: Path | None = None) -> str:
-    """Load and concatenate all DSCLI.md files into a single context string."""
+    """Load and concatenate all LOONG.md files into a single context string."""
     files = find_project_context_files(start)
     if not files:
         return ""
