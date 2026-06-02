@@ -52,6 +52,65 @@ SUMMARY_ACK = "好的，我已了解之前的对话内容。请继续。"
 KEEP_RECENT_TURNS = 3
 TOOL_RESULT_PLACEHOLDER = "[工具已执行，结果见摘要]"
 
+# --- micro_compact: pre-LLM cleanup of old reclaimable tool results ---
+
+RECLAIMABLE_TOOLS = frozenset({"read_file", "shell", "grep", "glob", "write_file", "edit_file"})
+MICRO_COMPACT_KEEP_RECENT = 5
+CLEARED_PLACEHOLDER = "[工具结果已清理，如需内容请重新调用]"
+
+
+def _build_tool_call_index(messages: list[dict]) -> dict[str, str]:
+    """Build mapping from tool_call_id -> tool_name by scanning assistant messages."""
+    index: dict[str, str] = {}
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                tc_id = tc.get("id", "")
+                tc_name = tc.get("function", {}).get("name", "")
+                if tc_id and tc_name:
+                    index[tc_id] = tc_name
+    return index
+
+
+def micro_compact(messages: list[dict]) -> list[dict]:
+    """Clear old reclaimable tool results, keeping the most recent MICRO_COMPACT_KEEP_RECENT.
+
+    Reclaimable tools are those whose results can be re-obtained by calling the tool again
+    (read_file, shell, grep, glob, write_file, edit_file).
+
+    Non-reclaimable tools (delegate, recall, memorize, plan, task_status, send_message, skill, batch_delegate)
+    are NEVER cleared.
+    """
+    if not messages:
+        return messages
+
+    tc_index = _build_tool_call_index(messages)
+
+    # Find positions of all reclaimable tool results
+    reclaimable_positions: list[int] = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") != "tool":
+            continue
+        tc_id = msg.get("tool_call_id", "")
+        tool_name = tc_index.get(tc_id, "")
+        if tool_name in RECLAIMABLE_TOOLS:
+            reclaimable_positions.append(i)
+
+    # If we have fewer than KEEP_RECENT, nothing to clear
+    if len(reclaimable_positions) <= MICRO_COMPACT_KEEP_RECENT:
+        return messages
+
+    # Clear all but the last KEEP_RECENT
+    to_clear = set(reclaimable_positions[:-MICRO_COMPACT_KEEP_RECENT])
+
+    result = []
+    for i, msg in enumerate(messages):
+        if i in to_clear:
+            result.append({**msg, "content": CLEARED_PLACEHOLDER})
+        else:
+            result.append(msg)
+    return result
+
 
 def _segment_turns(messages: list[dict], start: int) -> list[list[dict]]:
     turns: list[list[dict]] = []
@@ -139,7 +198,9 @@ class Compactor:
         if active_skill:
             instruction += f"\n\n注意：当前正在执行技能 '{active_skill}'，在「活跃技能」部分详细记录进度。"
 
-        compact_messages = list(messages) + [
+        # Pre-process: clear old reclaimable tool results to reduce token load
+        cleaned = micro_compact(list(messages))
+        compact_messages = cleaned + [
             {"role": "user", "content": instruction},
         ]
 

@@ -4,6 +4,7 @@ from loongcli.core.compact import (
     Compactor, KEEP_RECENT_TURNS, SUMMARY_MARKER, SUMMARY_ACK,
     COMPACT_INSTRUCTION, TOOL_RESULT_PLACEHOLDER,
     _extract_summary, _segment_turns, _replace_tool_results, _fix_role_alternation,
+    micro_compact, RECLAIMABLE_TOOLS, MICRO_COMPACT_KEEP_RECENT, CLEARED_PLACEHOLDER,
 )
 
 
@@ -375,3 +376,86 @@ class TestHeavyToolResults:
         for m in result:
             if m["role"] == "tool":
                 assert m["content"] == TOOL_RESULT_PLACEHOLDER
+
+
+# --- micro_compact ---
+
+class TestMicroCompact:
+    def test_preserves_recent_reclaimable(self):
+        """Old reclaimable results are cleared, recent ones preserved."""
+        msgs = []
+        for i in range(8):
+            msgs.append({"role": "user", "content": f"q{i}"})
+            msgs.append({"role": "assistant", "content": None, "tool_calls": [
+                {"id": f"tc{i}", "function": {"name": "read_file", "arguments": f'{{"path":"f{i}.py"}}'}}
+            ]})
+            msgs.append({"role": "tool", "tool_call_id": f"tc{i}", "content": f"content of f{i}"})
+            msgs.append({"role": "assistant", "content": f"answer {i}"})
+        result = micro_compact(msgs)
+        tool_msgs = [m for m in result if m["role"] == "tool"]
+        preserved = [m for m in tool_msgs if "content of" in m["content"]]
+        cleared = [m for m in tool_msgs if m["content"] == CLEARED_PLACEHOLDER]
+        assert len(preserved) == MICRO_COMPACT_KEEP_RECENT
+        assert len(cleared) == 3  # 8 - 5 = 3
+
+    def test_never_clears_non_reclaimable(self):
+        """Non-reclaimable tool results (delegate, recall, etc.) are never touched."""
+        msgs = []
+        # 8 delegate calls — all should be preserved
+        for i in range(8):
+            msgs.append({"role": "user", "content": f"q{i}"})
+            msgs.append({"role": "assistant", "content": None, "tool_calls": [
+                {"id": f"tc{i}", "function": {"name": "delegate", "arguments": "{}"}}
+            ]})
+            msgs.append({"role": "tool", "tool_call_id": f"tc{i}", "content": f"subtask result {i}"})
+            msgs.append({"role": "assistant", "content": f"done {i}"})
+        result = micro_compact(msgs)
+        tool_msgs = [m for m in result if m["role"] == "tool"]
+        assert all("subtask result" in m["content"] for m in tool_msgs)
+
+    def test_mixed_reclaimable_and_non_reclaimable(self):
+        """Only reclaimable tools get cleared; non-reclaimable are untouched."""
+        msgs = []
+        # 6 read_file + 3 recall
+        for i in range(6):
+            name = "read_file"
+            msgs.append({"role": "user", "content": f"q{i}"})
+            msgs.append({"role": "assistant", "content": None, "tool_calls": [
+                {"id": f"tc{i}", "function": {"name": name, "arguments": "{}"}}
+            ]})
+            msgs.append({"role": "tool", "tool_call_id": f"tc{i}", "content": f"file {i}"})
+            msgs.append({"role": "assistant", "content": f"a{i}"})
+        for i in range(3):
+            msgs.append({"role": "user", "content": f"recall {i}"})
+            msgs.append({"role": "assistant", "content": None, "tool_calls": [
+                {"id": f"rc{i}", "function": {"name": "recall", "arguments": "{}"}}
+            ]})
+            msgs.append({"role": "tool", "tool_call_id": f"rc{i}", "content": f"memory {i}"})
+            msgs.append({"role": "assistant", "content": f"noted {i}"})
+        result = micro_compact(msgs)
+        # 6 read_file - 5 kept = 1 cleared
+        cleared = [m for m in result if m.get("role") == "tool" and m["content"] == CLEARED_PLACEHOLDER]
+        assert len(cleared) == 1
+        # All recall results preserved
+        recall_msgs = [m for m in result if m.get("role") == "tool" and "memory" in m["content"]]
+        assert len(recall_msgs) == 3
+
+    def test_empty_messages(self):
+        assert micro_compact([]) == []
+
+    def test_no_tool_messages(self):
+        msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        assert micro_compact(msgs) == msgs
+
+    def test_fewer_than_keep_recent_unchanged(self):
+        """If fewer reclaimable results than KEEP_RECENT, nothing changes."""
+        msgs = []
+        for i in range(3):
+            msgs.append({"role": "user", "content": f"q{i}"})
+            msgs.append({"role": "assistant", "content": None, "tool_calls": [
+                {"id": f"tc{i}", "function": {"name": "grep", "arguments": "{}"}}
+            ]})
+            msgs.append({"role": "tool", "tool_call_id": f"tc{i}", "content": f"match {i}"})
+            msgs.append({"role": "assistant", "content": f"found {i}"})
+        result = micro_compact(msgs)
+        assert result == msgs
