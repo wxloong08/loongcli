@@ -452,3 +452,40 @@ def test_default_max_tool_calls():
 
 def test_default_loop_threshold():
     assert LOOP_DETECT_THRESHOLD == 3
+
+
+class TestRebuildSystemPrompt:
+    def test_rebuilds_when_builder_provided(self):
+        registry = ToolRegistry()
+        checker = PermissionChecker()
+        llm = LLMClient(api_key="test")
+        agent = AgentLoop(
+            llm=llm, tool_registry=registry, permission_checker=checker,
+            system_prompt="old prompt",
+            system_prompt_builder=lambda: "new prompt",
+        )
+        assert agent.messages[0]["content"] == "old prompt"
+        agent._rebuild_system_prompt()
+        assert agent.messages[0]["content"] == "new prompt"
+
+    def test_noop_without_builder(self):
+        registry = ToolRegistry()
+        checker = PermissionChecker()
+        llm = LLMClient(api_key="test")
+        agent = AgentLoop(
+            llm=llm, tool_registry=registry, permission_checker=checker,
+            system_prompt="original",
+        )
+        agent._rebuild_system_prompt()
+        assert agent.messages[0]["content"] == "original"
+
+    def test_noop_without_system_message(self):
+        registry = ToolRegistry()
+        checker = PermissionChecker()
+        llm = LLMClient(api_key="test")
+        agent = AgentLoop(
+            llm=llm, tool_registry=registry, permission_checker=checker,
+            system_prompt_builder=lambda: "rebuilt",
+        )
+        agent._rebuild_system_prompt()
+        assert len(agent.messages) == 0

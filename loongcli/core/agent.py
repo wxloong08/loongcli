@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 import re
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from loongcli.core.llm import LLMClient
 from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress
@@ -41,6 +41,7 @@ class AgentLoop:
         role: AgentRole = AgentRole.MAIN,
         hook_manager: HookManager | None = None,
         skill_registry: SkillRegistry | None = None,
+        system_prompt_builder: Callable[[], str] | None = None,
     ):
         self.llm = llm
         self.tool_registry = tool_registry
@@ -54,6 +55,7 @@ class AgentLoop:
         self.task = task
         self.max_tool_calls = max_tool_calls
         self.skill_registry = skill_registry
+        self._system_prompt_builder = system_prompt_builder
         self._last_prompt_tokens = 0
         self.token_usage = {
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
@@ -72,6 +74,13 @@ class AgentLoop:
     def _persist(self):
         if self.conversation_store:
             self.conversation_store.save(self.messages)
+
+    def _rebuild_system_prompt(self):
+        if not self._system_prompt_builder:
+            return
+        if not self.messages or self.messages[0].get("role") != "system":
+            return
+        self.messages[0] = {"role": "system", "content": self._system_prompt_builder()}
 
     @staticmethod
     def _tool_signature(name: str, args: dict) -> str:
@@ -165,6 +174,7 @@ class AgentLoop:
                     mode="auto", pre_tokens=self._last_prompt_tokens,
                 )
                 self._compact_breaker.record_success()
+                self._rebuild_system_prompt()
             except Exception as e:
                 logger.warning("Compact failed: %s", e)
                 self._compact_breaker.record_failure()

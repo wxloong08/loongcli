@@ -283,6 +283,9 @@ async def _async_main():
         task_manager=task_manager,
         hook_manager=hook_manager,
         skill_registry=skill_registry,
+        system_prompt_builder=lambda: get_system_prompt(
+            model=cfg.model, memory=memory, mcp=mcp, plan_store=plan_store,
+        ),
     )
 
     if restored_messages:
