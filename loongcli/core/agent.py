@@ -10,6 +10,7 @@ from loongcli.core.llm import LLMClient
 from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress
 from loongcli.core.stream_collector import StreamCollector
 from loongcli.core.compact import Compactor
+from loongcli.core.tool_result_manager import ToolResultManager
 from loongcli.tools.base import ToolRegistry
 from loongcli.tools.routing import AgentRole
 from loongcli.security.permissions import PermissionChecker, Decision
@@ -61,6 +62,7 @@ class AgentLoop:
         self._tool_call_count = 0
         self._last_tool_sig: str = ""
         self._repeat_count: int = 0
+        self._result_manager = ToolResultManager()
         self.messages: list[dict] = []
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
@@ -165,6 +167,7 @@ class AgentLoop:
             tools = schemas or None
 
         for iteration in range(self.max_iterations):
+            self._result_manager.reset_turn()
             collector = StreamCollector()
 
             try:
@@ -283,7 +286,7 @@ class AgentLoop:
                 self.messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": result,
+                    "content": self._result_manager.process(tool_name, result) if isinstance(result, str) else result,
                 })
 
             if self.task:
