@@ -378,6 +378,24 @@ class TestHeavyToolResults:
                 assert m["content"] == TOOL_RESULT_PLACEHOLDER
 
 
+# --- Compact Instruction ---
+
+class TestCompactInstruction:
+    def test_contains_no_tool_warning_twice(self):
+        assert COMPACT_INSTRUCTION.count("不要调用") >= 2
+
+    def test_contains_all_9_sections(self):
+        for section in ["主要意图", "关键技术概念", "文件与代码", "错误与修复",
+                        "问题解决", "所有用户消息", "待办任务", "当前工作", "下一步"]:
+            assert section in COMPACT_INSTRUCTION
+
+    def test_starts_with_no_tool_warning(self):
+        assert COMPACT_INSTRUCTION.startswith("严禁")
+
+    def test_ends_with_no_tool_warning(self):
+        assert "不要调用任何工具" in COMPACT_INSTRUCTION.split("\n")[-1]
+
+
 # --- Compact Boundary ---
 
 class TestCompactBoundary:
