@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime, timezone
 import logging
 import re
 
@@ -49,6 +50,11 @@ COMPACT_INSTRUCTION = """\
 
 SUMMARY_MARKER = "[对话历史摘要]"
 SUMMARY_ACK = "好的，我已了解之前的对话内容。请继续。"
+
+BOUNDARY_TEMPLATE = (
+    "[compact-boundary] mode={mode} | pre_tokens={pre_tokens} | "
+    "pre_messages={pre_messages} | timestamp={timestamp}"
+)
 
 KEEP_RECENT_TURNS = 3
 TOOL_RESULT_PLACEHOLDER = "[工具已执行，结果见摘要]"
@@ -172,7 +178,13 @@ class Compactor:
         turns = _segment_turns(messages, start)
         return len(turns) > KEEP_RECENT_TURNS
 
-    async def compact(self, messages: list[dict], active_skill: str | None = None) -> list[dict]:
+    async def compact(
+        self,
+        messages: list[dict],
+        active_skill: str | None = None,
+        mode: str = "auto",
+        pre_tokens: int = 0,
+    ) -> list[dict]:
         system_msg = messages[0] if messages[0].get("role") == "system" else None
         start = 1 if system_msg else 0
 
@@ -184,6 +196,13 @@ class Compactor:
         summary = await self._summarize(messages, active_skill)
         logger.info("Compacted %d messages into summary (%d chars)", len(messages), len(summary))
 
+        boundary = BOUNDARY_TEMPLATE.format(
+            mode=mode,
+            pre_tokens=pre_tokens,
+            pre_messages=len(messages),
+            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+
         kept_messages = []
         for turn in keep_turns:
             kept_messages.extend(_replace_tool_results(turn))
@@ -191,7 +210,7 @@ class Compactor:
         prefix: list[dict] = []
         if system_msg:
             prefix.append(system_msg)
-        prefix.append({"role": "user", "content": f"{SUMMARY_MARKER}\n{summary}"})
+        prefix.append({"role": "user", "content": f"{boundary}\n{SUMMARY_MARKER}\n{summary}"})
         prefix.append({"role": "assistant", "content": SUMMARY_ACK})
 
         attachments = build_attachments(messages, self.plan_store, self.task_manager)

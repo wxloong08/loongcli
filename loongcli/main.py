@@ -332,7 +332,9 @@ async def _async_main():
                 spinner = Spinner("dots", text="[dim]压缩会话摘要中...[/dim]")
                 with Live(spinner, console=console, refresh_per_second=8):
                     active_skill = agent._detect_active_skill()
-                    compact_msgs = await compactor.compact(agent.messages, active_skill=active_skill)
+                    compact_msgs = await compactor.compact(
+                        agent.messages, active_skill=active_skill, mode="exit",
+                    )
                     conversation.save_compact(compact_msgs)
                 console.print("[dim]会话摘要已保存[/dim]")
             except Exception:

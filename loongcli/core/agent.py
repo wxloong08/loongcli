@@ -155,7 +155,10 @@ class AgentLoop:
             before = len(self.messages)
             yield CompactStart(message_count=before)
             active_skill = self._detect_active_skill()
-            self.messages = await self.compactor.compact(self.messages, active_skill=active_skill)
+            self.messages = await self.compactor.compact(
+                self.messages, active_skill=active_skill,
+                mode="auto", pre_tokens=self._last_prompt_tokens,
+            )
             yield CompactNotice(before=before, after=len(self.messages))
 
         if disable_tools:

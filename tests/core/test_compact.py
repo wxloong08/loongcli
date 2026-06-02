@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import MagicMock
 from loongcli.core.compact import (
     Compactor, KEEP_RECENT_TURNS, SUMMARY_MARKER, SUMMARY_ACK,
-    COMPACT_INSTRUCTION, TOOL_RESULT_PLACEHOLDER,
+    COMPACT_INSTRUCTION, TOOL_RESULT_PLACEHOLDER, BOUNDARY_TEMPLATE,
     _extract_summary, _segment_turns, _replace_tool_results, _fix_role_alternation,
     micro_compact, RECLAIMABLE_TOOLS, MICRO_COMPACT_KEEP_RECENT, CLEARED_PLACEHOLDER,
 )
@@ -376,6 +376,47 @@ class TestHeavyToolResults:
         for m in result:
             if m["role"] == "tool":
                 assert m["content"] == TOOL_RESULT_PLACEHOLDER
+
+
+# --- Compact Boundary ---
+
+class TestCompactBoundary:
+    async def test_boundary_marker_present(self):
+        c = Compactor(llm=_mock_llm(), threshold=100)
+        msgs = _make_messages(15)
+        result = await c.compact(msgs, mode="auto", pre_tokens=150000)
+        assert "compact-boundary" in result[1]["content"]
+        assert "auto" in result[1]["content"]
+        assert "150000" in result[1]["content"]
+
+    async def test_boundary_before_summary(self):
+        c = Compactor(llm=_mock_llm(), threshold=100)
+        msgs = _make_messages(15)
+        result = await c.compact(msgs, mode="manual", pre_tokens=0)
+        summary_msg = result[1]
+        assert "compact-boundary" in summary_msg["content"]
+        assert SUMMARY_MARKER in summary_msg["content"]
+        idx_boundary = summary_msg["content"].index("compact-boundary")
+        idx_summary = summary_msg["content"].index(SUMMARY_MARKER)
+        assert idx_boundary < idx_summary
+
+    async def test_boundary_contains_message_count(self):
+        c = Compactor(llm=_mock_llm(), threshold=100)
+        msgs = _make_messages(15)
+        result = await c.compact(msgs, mode="auto", pre_tokens=100000)
+        assert f"pre_messages={len(msgs)}" in result[1]["content"]
+
+    async def test_boundary_contains_timestamp(self):
+        c = Compactor(llm=_mock_llm(), threshold=100)
+        msgs = _make_messages(15)
+        result = await c.compact(msgs, mode="auto")
+        assert "timestamp=" in result[1]["content"]
+
+    async def test_exit_mode(self):
+        c = Compactor(llm=_mock_llm(), threshold=100)
+        msgs = _make_messages(15)
+        result = await c.compact(msgs, mode="exit")
+        assert "mode=exit" in result[1]["content"]
 
 
 # --- micro_compact ---
