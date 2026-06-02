@@ -1,0 +1,345 @@
+from __future__ import annotations
+import argparse
+import asyncio
+import json
+import sys
+
+from rich.console import Console
+
+from loongcli.core.config import Config
+from loongcli.core.llm import LLMClient
+from loongcli.core.agent import AgentLoop
+from loongcli.core.compact import Compactor
+from loongcli.core.prompts import get_system_prompt
+from loongcli.core.git_context import collect_git_context
+from loongcli.core.project_context import find_project_context_files
+from loongcli.tools.base import ToolRegistry
+from loongcli.tools.read_file import ReadFileTool
+from loongcli.tools.write_file import WriteFileTool
+from loongcli.tools.edit_file import EditFileTool
+from loongcli.tools.shell import ShellTool
+from loongcli.tools.glob_tool import GlobTool
+from loongcli.tools.grep_tool import GrepTool
+from loongcli.tools.recall import RecallTool
+from loongcli.tools.memorize import MemorizeTool
+from loongcli.tools.plan_tool import PlanTool
+from loongcli.plan.store import PlanStore
+from loongcli.tools.agent_tool import AgentTool
+from loongcli.tools.batch_delegate import BatchDelegateTool
+from loongcli.tools.send_message import SendMessageTool
+from loongcli.tools.task_status import TaskStatusTool
+from loongcli.core.task import TaskManager
+from loongcli.memory.store import MemoryStore
+from loongcli.memory.conversation import ConversationStore
+from loongcli.security.permissions import PermissionChecker, PermissionMode
+from loongcli.mcp.manager import MCPManager
+from loongcli.hooks.manager import HookManager, HookEvent
+from loongcli.skills.registry import SkillRegistry
+from loongcli.tools.skill import SkillTool
+from loongcli.tui.app import TUI
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="loongcli",
+        description="DeepSeek Agent CLI — 通用 AI Agent 终端工具",
+    )
+    parser.add_argument(
+        "prompt", nargs="?", default=None,
+        help="直接提问（非交互模式），支持管道输入",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--continue", dest="continue_session", action="store_true",
+        help="恢复最近一个会话",
+    )
+    group.add_argument(
+        "--resume", action="store_true",
+        help="浏览历史会话并选择一个继续",
+    )
+    parser.add_argument(
+        "--dangerously-skip-permissions", action="store_true",
+        help="跳过所有权限确认（灾难性操作仍会拦截）",
+    )
+    parser.add_argument(
+        "--output-format", choices=["text", "json"], default="text",
+        help="非交互模式输出格式（默认 text）",
+    )
+    parser.add_argument(
+        "--no-stream", action="store_true",
+        help="非交互模式下不流式输出，等待完整回复",
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="非交互模式下显示工具调用详情（输出到 stderr）",
+    )
+    return parser.parse_args()
+
+
+def _build_prompt(args) -> str | None:
+    parts = []
+    if not sys.stdin.isatty():
+        stdin_content = sys.stdin.read().strip()
+        if stdin_content:
+            parts.append(stdin_content)
+    if args.prompt:
+        parts.append(args.prompt)
+    return "\n\n".join(parts) if parts else None
+
+
+async def _run_noninteractive(agent: AgentLoop, prompt: str, args, mcp: MCPManager):
+    from loongcli.core.events import TextDelta, ThinkingDelta, ToolCallStart, ToolCallResult, AgentDone, ConfirmRequest
+
+    stderr = Console(stderr=True, no_color=True)
+    output_json = args.output_format == "json"
+    stream = not args.no_stream
+    verbose = args.verbose
+
+    buffer = ""
+    thinking_buffer = ""
+    tool_log: list[dict] = []
+
+    async for event in agent.run_stream(prompt):
+        if isinstance(event, ThinkingDelta):
+            thinking_buffer += event.text
+
+        elif isinstance(event, TextDelta):
+            buffer += event.text
+            if stream and not output_json:
+                sys.stdout.write(event.text)
+                sys.stdout.flush()
+
+        elif isinstance(event, ToolCallStart):
+            if verbose:
+                stderr.print(f"⚙ {event.tool_name}({_brief(event.arguments)})")
+
+        elif isinstance(event, ToolCallResult):
+            if verbose:
+                preview = event.result[:200] + "..." if len(event.result) > 200 else event.result
+                stderr.print(f"✓ {event.tool_name}: {preview}")
+            tool_log.append({"tool": event.tool_name, "result": event.result})
+
+        elif isinstance(event, ConfirmRequest):
+            if verbose:
+                stderr.print(f"⚠ 自动拒绝: {event.tool_name} — {event.risk_reason}")
+            event.future.set_result(False)
+
+        elif isinstance(event, AgentDone):
+            pass
+
+    if output_json:
+        result = {"content": buffer}
+        if thinking_buffer:
+            result["reasoning_content"] = thinking_buffer
+        if verbose:
+            result["tool_calls"] = tool_log
+        sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2))
+        sys.stdout.write("\n")
+    elif not stream:
+        sys.stdout.write(buffer)
+        sys.stdout.write("\n")
+    else:
+        if not buffer.endswith("\n"):
+            sys.stdout.write("\n")
+
+    await mcp.disconnect_all()
+
+
+def _brief(args: dict) -> str:
+    parts = []
+    for k, v in args.items():
+        s = str(v)
+        if len(s) > 40:
+            s = s[:40] + "..."
+        parts.append(f"{k}={s}")
+    return ", ".join(parts)
+
+
+async def _async_main():
+    args = _parse_args()
+    console = Console()
+    cfg = Config.load()
+
+    if not cfg.api_key:
+        console.print("[bold red]错误：[/bold red]未设置 API Key")
+        console.print("配置文件: [cyan]~/.loongcli/config.json[/cyan]  字段: [cyan]api_key[/cyan]")
+        console.print("  或环境变量: [cyan]DEEPSEEK_API_KEY[/cyan]")
+        sys.exit(1)
+
+    prompt = _build_prompt(args)
+    noninteractive = prompt is not None
+
+    llm = LLMClient(
+        api_key=cfg.api_key, model=cfg.model, base_url=cfg.base_url,
+        thinking=cfg.thinking, reasoning_effort=cfg.reasoning_effort,
+    )
+    sub_llm = None
+    if cfg.sub_model and cfg.sub_model != cfg.model:
+        sub_llm = LLMClient(
+            api_key=cfg.api_key, model=cfg.sub_model, base_url=cfg.base_url,
+            thinking=cfg.thinking, reasoning_effort=cfg.reasoning_effort,
+        )
+    memory = MemoryStore()
+    conversation = ConversationStore()
+
+    resumed = False
+    restored_messages: list[dict] | None = None
+
+    if not noninteractive:
+        if args.continue_session:
+            sessions = conversation.list_sessions(limit=1)
+            if sessions:
+                msgs = conversation.resume(sessions[0]["session_id"])
+                if msgs:
+                    restored_messages = msgs
+                    resumed = True
+                    console.print(
+                        f"[dim]恢复会话: {sessions[0]['session_id']} "
+                        f"— {sessions[0].get('title', '(无标题)')}[/dim]"
+                    )
+            if not resumed:
+                console.print("[yellow]没有可恢复的会话，启动新会话[/yellow]")
+
+        elif args.resume:
+            tui = TUI(memory=memory, config=cfg)
+            session_id = await tui.pick_session(conversation)
+            if session_id:
+                msgs = conversation.resume(session_id)
+                if msgs:
+                    restored_messages = msgs
+                    resumed = True
+            if not resumed:
+                console.print("[dim]启动新会话[/dim]")
+
+    registry = ToolRegistry()
+    registry.register(ReadFileTool())
+    registry.register(WriteFileTool())
+    registry.register(EditFileTool())
+    registry.register(ShellTool())
+    registry.register(GlobTool())
+    registry.register(GrepTool())
+    registry.register(RecallTool(memory))
+    registry.register(MemorizeTool(memory))
+    plan_store = PlanStore()
+    registry.register(PlanTool(plan_store))
+
+    mcp = MCPManager(servers=cfg.mcp_servers)
+    mcp_status = ""
+    try:
+        mcp_tools = await mcp.connect_all()
+        if mcp_tools:
+            mcp.register_tools(registry)
+            mcp_status = f"MCP: {mcp.server_count} server(s), {mcp.tool_count} tool(s)"
+    except Exception as e:
+        if not noninteractive:
+            console.print(f"[yellow]MCP 连接失败: {e}[/yellow]")
+        else:
+            print(f"MCP 连接失败: {e}", file=sys.stderr)
+
+    from pathlib import Path
+    skill_registry = SkillRegistry(project_dir=Path.cwd(), extra_dirs=cfg.skill_dirs)
+    skill_tool = SkillTool(skill_registry)
+    registry.register(skill_tool)
+
+    perm_mode = PermissionMode.SKIP if args.dangerously_skip_permissions else PermissionMode.DEFAULT
+    perm_checker = PermissionChecker(mode=perm_mode)
+    task_manager = TaskManager()
+    hook_manager = HookManager.from_config(cfg.hooks)
+
+    registry.register(AgentTool(
+        task_manager=task_manager,
+        llm=llm,
+        parent_registry=registry,
+        security=perm_checker,
+        sub_llm=sub_llm,
+    ))
+    registry.register(BatchDelegateTool(
+        task_manager=task_manager,
+        llm=llm,
+        parent_registry=registry,
+        security=perm_checker,
+        sub_llm=sub_llm,
+    ))
+    registry.register(SendMessageTool(task_manager))
+    registry.register(TaskStatusTool(task_manager))
+
+    system_prompt = get_system_prompt(model=cfg.model, memory=memory, mcp=mcp, plan_store=plan_store)
+    compactor = Compactor(llm=llm, threshold=cfg.compact_threshold)
+
+    agent = AgentLoop(
+        llm=llm,
+        tool_registry=registry,
+        permission_checker=perm_checker,
+        system_prompt=system_prompt,
+        conversation_store=conversation,
+        compactor=compactor,
+        task_manager=task_manager,
+        hook_manager=hook_manager,
+        skill_registry=skill_registry,
+    )
+
+    if restored_messages:
+        non_system = [m for m in restored_messages if m.get("role") != "system"]
+        agent.messages = [agent.messages[0]] + non_system if agent.messages else non_system
+
+    await hook_manager.run(HookEvent.SESSION_START, {
+        "session_id": conversation.session_id,
+        "model": cfg.model,
+        "resumed": resumed,
+        "noninteractive": noninteractive,
+    })
+
+    try:
+        if noninteractive:
+            await _run_noninteractive(agent, prompt, args, mcp)
+        else:
+            tui = TUI(memory=memory, config=cfg, skill_registry=skill_registry, plan_store=plan_store)
+            status_parts = [f"model: {cfg.model}"]
+            thinking_label = cfg.reasoning_effort if cfg.thinking else "off"
+            status_parts.append(f"thinking: {thinking_label}")
+            git_ctx = collect_git_context()
+            if git_ctx.is_repo:
+                git_label = f"git: {git_ctx.branch}"
+                if git_ctx.dirty_files:
+                    git_label += f" ({len(git_ctx.dirty_files)} changed)"
+                status_parts.append(git_label)
+            ctx_files = find_project_context_files()
+            if ctx_files:
+                status_parts.append(f"DSCLI.md: {len(ctx_files)} loaded")
+            skill_count = len(skill_registry.list_skills())
+            if skill_count:
+                status_parts.append(f"skills: {skill_count}")
+            if mcp_status:
+                status_parts.append(mcp_status)
+            if perm_mode == PermissionMode.SKIP:
+                status_parts.append("⚠ permissions: skip")
+            await tui.start(agent, resumed=resumed, status_line=" | ".join(status_parts))
+    finally:
+        from loongcli.core.compact import _segment_turns, KEEP_RECENT_TURNS
+        start = 1 if agent.messages and agent.messages[0].get("role") == "system" else 0
+        turns = _segment_turns(agent.messages, start)
+        if not noninteractive and len(turns) > KEEP_RECENT_TURNS:
+            try:
+                from rich.live import Live
+                from rich.spinner import Spinner
+                spinner = Spinner("dots", text="[dim]压缩会话摘要中...[/dim]")
+                with Live(spinner, console=console, refresh_per_second=8):
+                    active_skill = agent._detect_active_skill()
+                    compact_msgs = await compactor.compact(agent.messages, active_skill=active_skill)
+                    conversation.save_compact(compact_msgs)
+                console.print("[dim]会话摘要已保存[/dim]")
+            except Exception:
+                pass
+        await hook_manager.run(HookEvent.SESSION_END, {
+            "session_id": conversation.session_id,
+        })
+        if not noninteractive:
+            await mcp.disconnect_all()
+
+
+def main():
+    asyncio.run(_async_main())
+
+
+if __name__ == "__main__":
+    main()
