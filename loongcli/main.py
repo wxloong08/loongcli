@@ -271,7 +271,7 @@ async def _async_main():
         max_tokens = cfg.model_max_tokens or model_context_window(cfg.model)
         threshold = max(0, max_tokens - SUMMARY_TOKEN_RESERVE)
 
-    compactor = Compactor(llm=llm, threshold=threshold)
+    compactor = Compactor(llm=llm, threshold=threshold, plan_store=plan_store, task_manager=task_manager)
 
     agent = AgentLoop(
         llm=llm,

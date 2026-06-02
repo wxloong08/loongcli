@@ -4,6 +4,7 @@ import re
 
 from loongcli.core.llm import LLMClient
 from loongcli.core.stream_collector import StreamCollector
+from loongcli.core.attachments import build_attachments
 
 logger = logging.getLogger(__name__)
 
@@ -156,9 +157,11 @@ def _fix_role_alternation(prefix: list[dict], kept: list[dict]) -> list[dict]:
 
 
 class Compactor:
-    def __init__(self, llm: LLMClient, threshold: int = 800000):
+    def __init__(self, llm: LLMClient, threshold: int = 800000, plan_store=None, task_manager=None):
         self.llm = llm
         self.threshold = threshold
+        self.plan_store = plan_store
+        self.task_manager = task_manager
 
     def should_compact(self, prompt_tokens: int, messages: list[dict]) -> bool:
         if prompt_tokens <= 0:
@@ -191,7 +194,9 @@ class Compactor:
         prefix.append({"role": "user", "content": f"{SUMMARY_MARKER}\n{summary}"})
         prefix.append({"role": "assistant", "content": SUMMARY_ACK})
 
-        return _fix_role_alternation(prefix, kept_messages)
+        attachments = build_attachments(messages, self.plan_store, self.task_manager)
+
+        return _fix_role_alternation(prefix + attachments, kept_messages)
 
     async def _summarize(self, messages: list[dict], active_skill: str | None = None) -> str:
         instruction = COMPACT_INSTRUCTION
