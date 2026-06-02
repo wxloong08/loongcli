@@ -3,8 +3,10 @@ from unittest.mock import MagicMock
 from loongcli.core.compact import (
     Compactor, KEEP_RECENT_TURNS, SUMMARY_MARKER, SUMMARY_ACK,
     COMPACT_INSTRUCTION, TOOL_RESULT_PLACEHOLDER, BOUNDARY_TEMPLATE,
+    SNIP_AGE_THRESHOLD,
     _extract_summary, _segment_turns, _replace_tool_results, _fix_role_alternation,
-    micro_compact, RECLAIMABLE_TOOLS, MICRO_COMPACT_KEEP_RECENT, CLEARED_PLACEHOLDER,
+    micro_compact, snip,
+    RECLAIMABLE_TOOLS, MICRO_COMPACT_KEEP_RECENT, CLEARED_PLACEHOLDER,
 )
 
 
@@ -376,6 +378,57 @@ class TestHeavyToolResults:
         for m in result:
             if m["role"] == "tool":
                 assert m["content"] == TOOL_RESULT_PLACEHOLDER
+
+
+# --- Snip ---
+
+class TestSnip:
+    def test_below_threshold_unchanged(self):
+        msgs = _make_messages(5)
+        result, count = snip(msgs, threshold=10)
+        assert result == msgs
+        assert count == 0
+
+    def test_above_threshold_drops_ancient(self):
+        msgs = _make_messages(25)
+        result, count = snip(msgs, threshold=10)
+        assert count > 0
+        # System msg preserved
+        assert result[0]["role"] == "system"
+        # Snip marker present
+        assert "snip" in result[1]["content"].lower() or "删除" in result[1]["content"]
+        # Recent turns preserved
+        user_contents = [m["content"] for m in result if m["role"] == "user" and "question" in m.get("content", "")]
+        assert "question 24" in user_contents
+
+    def test_preserves_system_msg(self):
+        msgs = _make_messages(25)
+        result, _ = snip(msgs, threshold=10)
+        assert result[0]["role"] == "system"
+        assert result[0]["content"] == "you are helpful"
+
+    def test_empty_messages(self):
+        result, count = snip([])
+        assert result == []
+        assert count == 0
+
+    def test_exact_threshold_unchanged(self):
+        msgs = _make_messages(10)  # 10 turns
+        result, count = snip(msgs, threshold=10)
+        assert count == 0
+
+    def test_one_over_threshold(self):
+        msgs = _make_messages(11)
+        result, count = snip(msgs, threshold=10)
+        assert count > 0
+        # Should have dropped the first turn (2 messages)
+        assert count == 2
+
+    def test_no_system_msg(self):
+        msgs = _make_messages(15, with_system=False)
+        result, count = snip(msgs, threshold=10)
+        assert count > 0
+        assert result[0]["role"] == "user"
 
 
 # --- Suppress Follow-Up Questions ---

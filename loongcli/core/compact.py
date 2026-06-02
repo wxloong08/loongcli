@@ -63,6 +63,9 @@ BOUNDARY_TEMPLATE = (
 KEEP_RECENT_TURNS = 3
 TOOL_RESULT_PLACEHOLDER = "[工具已执行，结果见摘要]"
 
+SNIP_AGE_THRESHOLD = 20
+SNIP_MARKER = "[snip] 已删除 {count} 条远古消息，保留最近 {kept} 轮对话"
+
 # --- micro_compact: pre-LLM cleanup of old reclaimable tool results ---
 
 RECLAIMABLE_TOOLS = frozenset({"read_file", "shell", "grep", "glob", "write_file", "edit_file"})
@@ -121,6 +124,38 @@ def micro_compact(messages: list[dict]) -> list[dict]:
         else:
             result.append(msg)
     return result
+
+
+def snip(messages: list[dict], threshold: int = SNIP_AGE_THRESHOLD) -> tuple[list[dict], int]:
+    """Delete ancient messages beyond `threshold` turns, keeping system msg and recent turns.
+
+    Returns (new_messages, count_of_removed_messages).
+    Zero API cost — just drops old messages and inserts a marker.
+    """
+    if not messages:
+        return messages, 0
+
+    system_msg = messages[0] if messages[0].get("role") == "system" else None
+    start = 1 if system_msg else 0
+
+    turns = _segment_turns(messages, start)
+    if len(turns) <= threshold:
+        return messages, 0
+
+    keep_turns = turns[-threshold:]
+    dropped_turns = turns[:-threshold]
+    dropped_count = sum(len(t) for t in dropped_turns)
+
+    marker = SNIP_MARKER.format(count=dropped_count, kept=threshold)
+    result: list[dict] = []
+    if system_msg:
+        result.append(system_msg)
+    result.append({"role": "user", "content": marker})
+    result.append({"role": "assistant", "content": "好的，已了解。"})
+    for turn in keep_turns:
+        result.extend(turn)
+
+    return _fix_role_alternation(result[:3], result[3:]), dropped_count
 
 
 def _segment_turns(messages: list[dict], start: int) -> list[list[dict]]:
@@ -228,8 +263,9 @@ class Compactor:
         if mode == "auto":
             instruction += "\n\n不要在摘要中提出新问题或建议用户回答任何内容。摘要应纯粹记录事实，不包含后续提问。"
 
-        # Pre-process: clear old reclaimable tool results to reduce token load
-        cleaned = micro_compact(list(messages))
+        # Pre-process pipeline: snip ancient messages, then clear old reclaimable tool results
+        snipped, _ = snip(list(messages))
+        cleaned = micro_compact(snipped)
         compact_messages = cleaned + [
             {"role": "user", "content": instruction},
         ]
