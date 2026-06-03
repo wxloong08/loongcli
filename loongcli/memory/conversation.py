@@ -85,6 +85,29 @@ class ConversationStore:
             encoding="utf-8",
         )
 
+    def save_structured_state(
+        self,
+        summary: str,
+        recent_files: list[str],
+        plan_id: str | None,
+        active_tasks: list[dict],
+    ):
+        """Persist structured state alongside the session JSON for smart resume."""
+        path = self._session_path()
+        if not path.exists():
+            return
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["structured_state"] = {
+            "summary": summary,
+            "recent_files": recent_files,
+            "plan_id": plan_id,
+            "active_tasks": active_tasks,
+        }
+        path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     def resume(self, session_id: str) -> list[dict] | None:
         data = self.load(session_id)
         if not data:
@@ -92,3 +115,15 @@ class ConversationStore:
         self.session_id = session_id
         self._meta = data["meta"]
         return data.get("compact_messages") or data.get("messages", [])
+
+    def resume_structured(self, session_id: str) -> dict | None:
+        """Load structured state for smart resume. Returns the dict or None."""
+        data = self.load(session_id)
+        if not data:
+            return None
+        structured = data.get("structured_state")
+        if not structured:
+            return None
+        self.session_id = session_id
+        self._meta = data["meta"]
+        return structured

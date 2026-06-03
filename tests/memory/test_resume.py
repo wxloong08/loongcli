@@ -63,3 +63,107 @@ def test_resume_then_save_appends(store):
     data = store2.load(sid)
     assert len(data["messages"]) == 3
     assert data["messages"][-1]["content"] == "second"
+
+
+# ---------- Structured state tests ----------
+
+
+def test_save_structured_state(store):
+    """save_structured_state persists structured_state into the session JSON."""
+    messages = [{"role": "user", "content": "hello"}]
+    store.save(messages)
+    sid = store.session_id
+
+    store.save_structured_state(
+        summary="User asked about Python.",
+        recent_files=["a.py", "b.py"],
+        plan_id="plan123",
+        active_tasks=[{"id": "t1", "prompt": "do stuff"}],
+    )
+
+    data = json.loads((store.base_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    ss = data["structured_state"]
+    assert ss["summary"] == "User asked about Python."
+    assert ss["recent_files"] == ["a.py", "b.py"]
+    assert ss["plan_id"] == "plan123"
+    assert ss["active_tasks"] == [{"id": "t1", "prompt": "do stuff"}]
+    # Original messages should still be present
+    assert "messages" in data
+
+
+def test_save_structured_state_no_session(store):
+    """save_structured_state is a no-op when no session file exists yet."""
+    # Don't call store.save() — no session file on disk
+    # Force a session_id that has no file
+    store.session_id = "nonexistent123"
+    # Should not raise
+    store.save_structured_state(
+        summary="test",
+        recent_files=[],
+        plan_id=None,
+        active_tasks=[],
+    )
+    # No file should be created
+    assert not (store.base_dir / "nonexistent123.json").exists()
+
+
+def test_resume_structured_returns_state(store):
+    """resume_structured returns structured_state dict when it exists."""
+    messages = [{"role": "user", "content": "hello"}]
+    store.save(messages)
+    sid = store.session_id
+
+    store.save_structured_state(
+        summary="Summary text",
+        recent_files=["x.py"],
+        plan_id=None,
+        active_tasks=[],
+    )
+
+    store2 = ConversationStore(base_dir=store.base_dir)
+    result = store2.resume_structured(sid)
+
+    assert result is not None
+    assert result["summary"] == "Summary text"
+    assert result["recent_files"] == ["x.py"]
+    assert result["plan_id"] is None
+    assert result["active_tasks"] == []
+
+
+def test_resume_structured_returns_none_without_state(store):
+    """resume_structured returns None when structured_state is absent."""
+    messages = [{"role": "user", "content": "hello"}]
+    store.save(messages)
+    sid = store.session_id
+
+    store2 = ConversationStore(base_dir=store.base_dir)
+    result = store2.resume_structured(sid)
+    assert result is None
+
+
+def test_resume_structured_sets_session_id(store):
+    """resume_structured sets session_id and _meta like resume does."""
+    messages = [{"role": "user", "content": "hello"}]
+    store.save(messages)
+    sid = store.session_id
+
+    store.save_structured_state(
+        summary="test",
+        recent_files=[],
+        plan_id=None,
+        active_tasks=[],
+    )
+
+    store2 = ConversationStore(base_dir=store.base_dir)
+    original_sid = store2.session_id
+    assert original_sid != sid
+
+    store2.resume_structured(sid)
+    assert store2.session_id == sid
+    assert store2._meta["session_id"] == sid
+
+
+def test_resume_structured_nonexistent(store):
+    """resume_structured returns None for a non-existent session."""
+    result = store.resume_structured("does_not_exist_999")
+    assert result is None
