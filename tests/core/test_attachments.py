@@ -60,23 +60,23 @@ class TestExtractRecentFiles:
 
 class TestRestoreFiles:
     def test_reads_existing_file(self, tmp_path):
-        from loongcli.core.attachments import _restore_files
+        from loongcli.core.attachments import restore_files
         f = tmp_path / "hello.py"
         f.write_text("print('hi')", encoding="utf-8")
-        result = _restore_files([str(f)])
+        result = restore_files([str(f)])
         assert "hello.py" in result
         assert "print('hi')" in result
 
     def test_truncates_large_file(self, tmp_path):
-        from loongcli.core.attachments import _restore_files, POST_COMPACT_MAX_CHARS_PER_FILE
+        from loongcli.core.attachments import restore_files, POST_COMPACT_MAX_CHARS_PER_FILE
         f = tmp_path / "big.py"
         f.write_text("x" * (POST_COMPACT_MAX_CHARS_PER_FILE + 500), encoding="utf-8")
-        result = _restore_files([str(f)])
+        result = restore_files([str(f)])
         assert "文件已截断" in result
 
     def test_skips_missing_file(self, tmp_path):
-        from loongcli.core.attachments import _restore_files
-        result = _restore_files([str(tmp_path / "nonexistent.py")])
+        from loongcli.core.attachments import restore_files
+        result = restore_files([str(tmp_path / "nonexistent.py")])
         assert result == ""
 
     def test_budget_exhaustion(self, tmp_path, monkeypatch):
@@ -86,13 +86,13 @@ class TestRestoreFiles:
         f1.write_text("a" * 900, encoding="utf-8")
         f2 = tmp_path / "f2.py"
         f2.write_text("b" * 500, encoding="utf-8")
-        result = mod._restore_files([str(f1), str(f2)])
+        result = mod.restore_files([str(f1), str(f2)])
         assert "f1.py" in result
         assert "f2.py" not in result
 
     def test_empty_paths(self):
-        from loongcli.core.attachments import _restore_files
-        assert _restore_files([]) == ""
+        from loongcli.core.attachments import restore_files
+        assert restore_files([]) == ""
 
 
 class TestBuildAttachments:

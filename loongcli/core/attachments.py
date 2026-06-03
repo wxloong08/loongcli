@@ -42,7 +42,7 @@ def extract_recent_files(messages: list[dict]) -> list[str]:
     return paths
 
 
-def _restore_files(paths: list[str]) -> str:
+def restore_files(paths: list[str]) -> str:
     if not paths:
         return ""
     sections: list[str] = []
@@ -67,7 +67,7 @@ def _restore_files(paths: list[str]) -> str:
     return "## 最近文件\n" + "\n\n".join(sections)
 
 
-def _plan_status(plan_store) -> str:
+def plan_status(plan_store) -> str:
     if not plan_store:
         return ""
     text = plan_store.format_for_prompt(max_chars=2000)
@@ -76,7 +76,7 @@ def _plan_status(plan_store) -> str:
     return f"## 计划进度\n{text}"
 
 
-def _task_status(task_manager) -> str:
+def task_status(task_manager) -> str:
     if not task_manager:
         return ""
     from loongcli.core.task import TaskStatus
@@ -102,15 +102,15 @@ def build_attachments(
     sections: list[str] = []
 
     file_paths = extract_recent_files(messages)
-    file_section = _restore_files(file_paths)
+    file_section = restore_files(file_paths)
     if file_section:
         sections.append(file_section)
 
-    plan_section = _plan_status(plan_store)
+    plan_section = plan_status(plan_store)
     if plan_section:
         sections.append(plan_section)
 
-    task_section = _task_status(task_manager)
+    task_section = task_status(task_manager)
     if task_section:
         sections.append(task_section)
 

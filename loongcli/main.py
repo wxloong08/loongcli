@@ -186,30 +186,31 @@ async def _async_main():
     restored_messages: list[dict] | None = None
     structured_state: dict | None = None
 
+    def _try_resume(sid: str) -> bool:
+        nonlocal structured_state, restored_messages, resumed
+        ss = conversation.resume_structured(sid)
+        if ss:
+            structured_state = ss
+            resumed = True
+            return True
+        msgs = conversation.resume(sid)
+        if msgs:
+            restored_messages = msgs
+            resumed = True
+            return True
+        return False
+
     if not noninteractive:
         if args.continue_session:
             sessions = conversation.list_sessions(limit=1)
             if sessions:
                 sid = sessions[0]["session_id"]
-                # Try structured resume first
-                ss = conversation.resume_structured(sid)
-                if ss:
-                    structured_state = ss
-                    resumed = True
+                if _try_resume(sid):
+                    mode = "structured" if structured_state else "compact"
                     console.print(
-                        f"[dim]恢复会话 (structured): {sid} "
+                        f"[dim]恢复会话 ({mode}): {sid} "
                         f"— {sessions[0].get('title', '(无标题)')}[/dim]"
                     )
-                else:
-                    # Fall back to old resume
-                    msgs = conversation.resume(sid)
-                    if msgs:
-                        restored_messages = msgs
-                        resumed = True
-                        console.print(
-                            f"[dim]恢复会话: {sid} "
-                            f"— {sessions[0].get('title', '(无标题)')}[/dim]"
-                        )
             if not resumed:
                 console.print("[yellow]没有可恢复的会话，启动新会话[/yellow]")
 
@@ -217,16 +218,7 @@ async def _async_main():
             tui = TUI(memory=memory, config=cfg)
             session_id = await tui.pick_session(conversation)
             if session_id:
-                # Try structured resume first
-                ss = conversation.resume_structured(session_id)
-                if ss:
-                    structured_state = ss
-                    resumed = True
-                else:
-                    msgs = conversation.resume(session_id)
-                    if msgs:
-                        restored_messages = msgs
-                        resumed = True
+                _try_resume(session_id)
             if not resumed:
                 console.print("[dim]启动新会话[/dim]")
 
@@ -311,7 +303,7 @@ async def _async_main():
         # Structured resume: rebuild context from state instead of raw messages
         from loongcli.core.compact import SUMMARY_MARKER, SUMMARY_ACK
         from loongcli.core.attachments import (
-            _restore_files, _plan_status, _task_status,
+            restore_files, plan_status, task_status,
             ATTACHMENT_MARKER, ATTACHMENT_ACK,
         )
 
@@ -325,13 +317,13 @@ async def _async_main():
 
         # Rebuild file attachments + plan/task status from live stores
         sections: list[str] = []
-        file_section = _restore_files(structured_state.get("recent_files", []))
+        file_section = restore_files(structured_state.get("recent_files", []))
         if file_section:
             sections.append(file_section)
-        ps = _plan_status(plan_store)
+        ps = plan_status(plan_store)
         if ps:
             sections.append(ps)
-        ts = _task_status(task_manager)
+        ts = task_status(task_manager)
         if ts:
             sections.append(ts)
         if sections:
@@ -392,12 +384,9 @@ async def _async_main():
                     compact_msgs = await compactor.compact(
                         agent.messages, active_skill=active_skill, mode="exit",
                     )
-                    conversation.save_compact(compact_msgs)
-
-                    # Extract and save structured state for smart resume
+                    # Extract structured state for smart resume
                     recent_files = extract_recent_files(agent.messages)
 
-                    # Extract summary from compacted messages
                     summary = ""
                     marker = SUMMARY_MARKER
                     for m in compact_msgs:
@@ -408,24 +397,22 @@ async def _async_main():
                                 summary = content[idx + len(marker):].strip()
                             break
 
-                    # Collect active tasks
                     active_tasks = []
                     for t in task_manager._tasks.values():
                         if t.status == TaskStatus.RUNNING:
                             active_tasks.append({"id": t.id, "prompt": t.prompt[:200]})
 
-                    # PlanStore has no current_plan_id; use first active plan id if any
                     plan_id = None
                     active_plans = plan_store.get_active_plans()
                     if active_plans:
                         plan_id = active_plans[0].id
 
-                    conversation.save_structured_state(
-                        summary=summary,
-                        recent_files=recent_files,
-                        plan_id=plan_id,
-                        active_tasks=active_tasks,
-                    )
+                    conversation.save_compact(compact_msgs, structured_state={
+                        "summary": summary,
+                        "recent_files": recent_files,
+                        "plan_id": plan_id,
+                        "active_tasks": active_tasks,
+                    })
                 console.print("[dim]会话摘要已保存[/dim]")
             except Exception:
                 pass

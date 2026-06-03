@@ -74,35 +74,18 @@ class ConversationStore:
                 break
         return sessions
 
-    def save_compact(self, compact_messages: list[dict]):
+    def save_compact(
+        self,
+        compact_messages: list[dict],
+        structured_state: dict | None = None,
+    ):
         path = self._session_path()
         if not path.exists():
             return
         data = json.loads(path.read_text(encoding="utf-8"))
         data["compact_messages"] = compact_messages
-        path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-    def save_structured_state(
-        self,
-        summary: str,
-        recent_files: list[str],
-        plan_id: str | None,
-        active_tasks: list[dict],
-    ):
-        """Persist structured state alongside the session JSON for smart resume."""
-        path = self._session_path()
-        if not path.exists():
-            return
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data["structured_state"] = {
-            "summary": summary,
-            "recent_files": recent_files,
-            "plan_id": plan_id,
-            "active_tasks": active_tasks,
-        }
+        if structured_state is not None:
+            data["structured_state"] = structured_state
         path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",

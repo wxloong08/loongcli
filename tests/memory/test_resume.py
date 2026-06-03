@@ -68,43 +68,41 @@ def test_resume_then_save_appends(store):
 # ---------- Structured state tests ----------
 
 
-def test_save_structured_state(store):
-    """save_structured_state persists structured_state into the session JSON."""
+def test_save_compact_with_structured_state(store):
+    """save_compact with structured_state persists both into the session JSON."""
     messages = [{"role": "user", "content": "hello"}]
     store.save(messages)
     sid = store.session_id
 
-    store.save_structured_state(
-        summary="User asked about Python.",
-        recent_files=["a.py", "b.py"],
-        plan_id="plan123",
-        active_tasks=[{"id": "t1", "prompt": "do stuff"}],
-    )
+    compact_msgs = [{"role": "user", "content": "summary"}]
+    store.save_compact(compact_msgs, structured_state={
+        "summary": "User asked about Python.",
+        "recent_files": ["a.py", "b.py"],
+        "plan_id": "plan123",
+        "active_tasks": [{"id": "t1", "prompt": "do stuff"}],
+    })
 
     data = json.loads((store.base_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    assert data["compact_messages"] == compact_msgs
     ss = data["structured_state"]
     assert ss["summary"] == "User asked about Python."
     assert ss["recent_files"] == ["a.py", "b.py"]
     assert ss["plan_id"] == "plan123"
     assert ss["active_tasks"] == [{"id": "t1", "prompt": "do stuff"}]
-    # Original messages should still be present
     assert "messages" in data
 
 
-def test_save_structured_state_no_session(store):
-    """save_structured_state is a no-op when no session file exists yet."""
-    # Don't call store.save() — no session file on disk
-    # Force a session_id that has no file
-    store.session_id = "nonexistent123"
-    # Should not raise
-    store.save_structured_state(
-        summary="test",
-        recent_files=[],
-        plan_id=None,
-        active_tasks=[],
-    )
-    # No file should be created
-    assert not (store.base_dir / "nonexistent123.json").exists()
+def test_save_compact_without_structured_state(store):
+    """save_compact without structured_state only saves compact_messages."""
+    messages = [{"role": "user", "content": "hello"}]
+    store.save(messages)
+    sid = store.session_id
+
+    store.save_compact([{"role": "user", "content": "compact"}])
+
+    data = json.loads((store.base_dir / f"{sid}.json").read_text(encoding="utf-8"))
+    assert "compact_messages" in data
+    assert "structured_state" not in data
 
 
 def test_resume_structured_returns_state(store):
@@ -113,12 +111,12 @@ def test_resume_structured_returns_state(store):
     store.save(messages)
     sid = store.session_id
 
-    store.save_structured_state(
-        summary="Summary text",
-        recent_files=["x.py"],
-        plan_id=None,
-        active_tasks=[],
-    )
+    store.save_compact([{"role": "user", "content": "compact"}], structured_state={
+        "summary": "Summary text",
+        "recent_files": ["x.py"],
+        "plan_id": None,
+        "active_tasks": [],
+    })
 
     store2 = ConversationStore(base_dir=store.base_dir)
     result = store2.resume_structured(sid)
@@ -147,12 +145,12 @@ def test_resume_structured_sets_session_id(store):
     store.save(messages)
     sid = store.session_id
 
-    store.save_structured_state(
-        summary="test",
-        recent_files=[],
-        plan_id=None,
-        active_tasks=[],
-    )
+    store.save_compact([{"role": "user", "content": "compact"}], structured_state={
+        "summary": "test",
+        "recent_files": [],
+        "plan_id": None,
+        "active_tasks": [],
+    })
 
     store2 = ConversationStore(base_dir=store.base_dir)
     original_sid = store2.session_id
