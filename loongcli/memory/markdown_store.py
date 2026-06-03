@@ -8,6 +8,23 @@ MEMORY_TYPES = ("user", "feedback", "project", "reference")
 _INDEX_FILENAME = "MEMORY.md"
 _INDEX_MAX_LINES = 200
 _MAX_INDEX_LINE_LENGTH = 150
+_DEDUP_SIMILARITY = 0.7
+_STALE_INDEX_DAYS = 90
+_KEEP_FOREVER = ("user", "feedback")
+
+
+def _tokenize(text: str) -> set[str]:
+    """Lowercase word tokenizer for similarity comparison."""
+    return set(text.lower().split())
+
+
+def _similarity(a: str, b: str) -> float:
+    """Jaccard similarity between two strings based on word overlap."""
+    wa, wb = _tokenize(a), _tokenize(b)
+    union = wa | wb
+    if not union:
+        return 0.0
+    return len(wa & wb) / len(union)
 
 
 def _sanitize_name(name: str) -> str:
@@ -107,6 +124,13 @@ class MarkdownMemoryStore:
         if type not in MEMORY_TYPES:
             type = "project"
 
+        # Dedup: if another memory has a very similar description, update that one
+        for existing in self.list_all():
+            if existing["name"] == name:
+                continue
+            if _similarity(description, existing["description"]) >= _DEDUP_SIMILARITY:
+                name = existing["name"]
+
         now = datetime.now(timezone.utc).isoformat()
         created_at = now
 
@@ -187,9 +211,34 @@ class MarkdownMemoryStore:
 
         return results
 
+    def _is_stale_for_index(self, entry: dict) -> bool:
+        """Check if an entry is too old to appear in the index.
+
+        user and feedback memories are kept forever.
+        project and reference memories older than _STALE_INDEX_DAYS are trimmed
+        from the index (but remain on disk for recall/listing).
+        """
+        if entry["type"] in _KEEP_FOREVER:
+            return False
+        updated = entry.get("updated_at", "")
+        if not updated:
+            return False
+        try:
+            dt = datetime.fromisoformat(updated)
+            age = datetime.now(timezone.utc) - dt
+            return age.days > _STALE_INDEX_DAYS
+        except (ValueError, TypeError):
+            return False
+
     def _rebuild_index(self) -> None:
-        """Rebuild MEMORY.md index from all .md files in base_dir."""
+        """Rebuild MEMORY.md index from all .md files in base_dir.
+
+        Stale project/reference entries (older than _STALE_INDEX_DAYS) are
+        excluded from the index but remain on disk for recall/listing.
+        """
         entries = self.list_all()
+        # Filter out stale project/reference memories
+        entries = [e for e in entries if not self._is_stale_for_index(e)]
         if not entries:
             # Remove stale index if no memories remain
             index_path = self.base_dir / _INDEX_FILENAME

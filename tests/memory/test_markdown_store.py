@@ -207,6 +207,29 @@ def test_list_all_excludes_memory_index(store: MarkdownMemoryStore, tmp_path: Pa
     assert "real-note" in names
 
 
+# ---- Dedup tests ----
+
+def test_dedup_merges_identical_description(store: MarkdownMemoryStore):
+    store.save("git-rule", "dev master branch strategy for GitHub", "feedback", "use dev for dev")
+    store.save("git-workflow", "dev master branch strategy for GitHub", "feedback", "use dev for dev, master for push")
+    items = store.list_all()
+    assert len(items) == 1
+    mem = store.load("git-rule")
+    assert "master for push" in mem["content"]
+
+
+def test_dedup_preserves_different_descriptions(store: MarkdownMemoryStore):
+    store.save("mem-a", "Python is my main language", "user", "a")
+    store.save("mem-b", "I prefer Rust for systems programming", "user", "b")
+    assert len(store.list_all()) == 2
+
+
+def test_dedup_no_match_below_threshold(store: MarkdownMemoryStore):
+    store.save("mem-a", "the cat sat on the mat", "project", "a")
+    store.save("mem-b", "dogs are great companions", "project", "b")
+    assert len(store.list_all()) == 2
+
+
 def test_persistence_across_instances(tmp_path: Path):
     """Data written by one instance is readable by another."""
     s1 = MarkdownMemoryStore(base_dir=tmp_path)
@@ -217,3 +240,109 @@ def test_persistence_across_instances(tmp_path: Path):
     assert mem is not None
     assert mem["content"] == "important content"
     assert mem["type"] == "feedback"
+
+
+# ---- Aging trim tests ----
+
+def _write_memory_file(path: Path, name: str, description: str, mem_type: str, updated_at: str):
+    """Write a memory file directly with a specific updated_at date."""
+    content = f"""---
+name: {name}
+description: {description}
+type: {mem_type}
+created_at: {updated_at}
+updated_at: {updated_at}
+---
+
+body content
+"""
+    path.write_text(content, encoding="utf-8")
+
+
+def test_index_excludes_stale_project(tmp_path: Path):
+    from datetime import datetime, timezone, timedelta
+    store = MarkdownMemoryStore(base_dir=tmp_path)
+    _write_memory_file(
+        tmp_path / "old-proj.md", "old-proj", "old project", "project",
+        "2020-01-01T00:00:00+00:00",
+    )
+    recent = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    _write_memory_file(
+        tmp_path / "fresh.md", "fresh", "fresh ref", "reference", recent,
+    )
+    store._rebuild_index()
+    index = (tmp_path / "MEMORY.md").read_text(encoding="utf-8")
+    assert "old-proj" not in index
+    assert "fresh" in index
+
+
+def test_index_includes_recent_project(tmp_path: Path):
+    from datetime import datetime, timezone, timedelta
+    store = MarkdownMemoryStore(base_dir=tmp_path)
+    recent = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    _write_memory_file(
+        tmp_path / "recent-proj.md", "recent-proj", "recent", "project", recent,
+    )
+    store._rebuild_index()
+    index = (tmp_path / "MEMORY.md").read_text(encoding="utf-8")
+    assert "recent-proj" in index
+
+
+def test_index_keeps_old_user_memory(tmp_path: Path):
+    store = MarkdownMemoryStore(base_dir=tmp_path)
+    _write_memory_file(
+        tmp_path / "old-user.md", "old-user", "old user pref", "user",
+        "2020-01-01T00:00:00+00:00",
+    )
+    store._rebuild_index()
+    index = (tmp_path / "MEMORY.md").read_text(encoding="utf-8")
+    assert "old-user" in index
+
+
+def test_index_keeps_old_feedback_memory(tmp_path: Path):
+    store = MarkdownMemoryStore(base_dir=tmp_path)
+    _write_memory_file(
+        tmp_path / "old-fb.md", "old-fb", "old feedback", "feedback",
+        "2020-01-01T00:00:00+00:00",
+    )
+    store._rebuild_index()
+    index = (tmp_path / "MEMORY.md").read_text(encoding="utf-8")
+    assert "old-fb" in index
+
+
+def test_stale_entries_still_in_list_all(tmp_path: Path):
+    store = MarkdownMemoryStore(base_dir=tmp_path)
+    _write_memory_file(
+        tmp_path / "stale-proj.md", "stale-proj", "stale", "project",
+        "2020-01-01T00:00:00+00:00",
+    )
+    items = store.list_all()
+    names = {item["name"] for item in items}
+    assert "stale-proj" in names
+
+
+def test_stale_index_removed_when_no_fresh_entries(tmp_path: Path):
+    """When all entries are stale, the index should be removed entirely."""
+    store = MarkdownMemoryStore(base_dir=tmp_path)
+    _write_memory_file(
+        tmp_path / "stale.md", "stale", "only stale", "reference",
+        "2020-01-01T00:00:00+00:00",
+    )
+    store._rebuild_index()
+    assert not (tmp_path / "MEMORY.md").exists()
+
+
+def test_missing_updated_at_not_stale(tmp_path: Path):
+    """Entries without updated_at should not be considered stale."""
+    store = MarkdownMemoryStore(base_dir=tmp_path)
+    (tmp_path / "no-date.md").write_text("""---
+name: no-date
+description: missing date
+type: project
+---
+
+body
+""", encoding="utf-8")
+    store._rebuild_index()
+    index = (tmp_path / "MEMORY.md").read_text(encoding="utf-8")
+    assert "no-date" in index

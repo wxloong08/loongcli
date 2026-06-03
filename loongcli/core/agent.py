@@ -44,6 +44,7 @@ class AgentLoop:
         skill_registry: SkillRegistry | None = None,
         system_prompt_builder: Callable[[], str] | None = None,
         recall_engine=None,
+        auto_extractor=None,
     ):
         self.llm = llm
         self.tool_registry = tool_registry
@@ -59,6 +60,7 @@ class AgentLoop:
         self.skill_registry = skill_registry
         self._system_prompt_builder = system_prompt_builder
         self.recall_engine = recall_engine
+        self.auto_extractor = auto_extractor
         self._last_prompt_tokens = 0
         self.token_usage = {
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
@@ -73,6 +75,10 @@ class AgentLoop:
         self.messages: list[dict] = []
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
+
+    def _schedule_auto_extract(self):
+        if self.auto_extractor:
+            asyncio.create_task(self.auto_extractor.extract(list(self.messages)))
 
     def _persist(self):
         if self.conversation_store:
@@ -232,6 +238,7 @@ class AgentLoop:
             if not response.tool_calls:
                 self.messages.append({"role": "assistant", "content": response.content})
                 self._persist()
+                self._schedule_auto_extract()
                 yield AgentDone(content=response.content)
                 return
 
@@ -342,4 +349,5 @@ class AgentLoop:
 
         msg = f"⚠ 已达到迭代上限（{self.max_iterations}轮），自动停止。"
         self._persist()
+        self._schedule_auto_extract()
         yield AgentDone(content=msg)

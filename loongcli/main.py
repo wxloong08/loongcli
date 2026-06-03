@@ -33,6 +33,7 @@ from loongcli.core.task import TaskManager
 from loongcli.memory.markdown_store import MarkdownMemoryStore
 from loongcli.memory.migrate import migrate_kv_to_markdown
 from loongcli.memory.recall_engine import RecallEngine
+from loongcli.memory.auto_extract import AutoExtractor
 from loongcli.memory.conversation import ConversationStore
 from loongcli.security.permissions import PermissionChecker, PermissionMode
 from loongcli.mcp.manager import MCPManager
@@ -292,6 +293,9 @@ async def _async_main():
     recall_llm = LLMClient(api_key=cfg.api_key, model="deepseek-chat", base_url=cfg.base_url)
     recall_engine = RecallEngine(memory=memory, llm=recall_llm)
 
+    auto_extract_llm = LLMClient(api_key=cfg.api_key, model="deepseek-chat", base_url=cfg.base_url)
+    auto_extractor = AutoExtractor(memory=memory, llm=auto_extract_llm)
+
     agent = AgentLoop(
         llm=llm,
         tool_registry=registry,
@@ -306,6 +310,7 @@ async def _async_main():
             model=cfg.model, memory=memory, mcp=mcp, plan_store=plan_store,
         ),
         recall_engine=recall_engine,
+        auto_extractor=auto_extractor,
     )
 
     if structured_state:

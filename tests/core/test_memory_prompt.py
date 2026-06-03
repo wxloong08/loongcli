@@ -48,10 +48,14 @@ def test_memory_section_truncation(tmp_path):
 
     store = MarkdownMemoryStore(base_dir=tmp_path)
     # 198 entries × ~160 bytes/line ≈ 31KB → triggers 25KB byte cap
+    # Each description needs mostly unique tokens to avoid dedup merging.
+    # Repeat the unique tag enough to fill ~150 chars without shared words.
     for i in range(198):
+        tag = f"ZEBRA{i:04d}QUANTUM"
+        desc = " ".join([tag] * 10)  # unique words dominate, ~150 chars
         store.save(
             name=f"mem-{i:04d}",
-            description=f"Memory entry {i:04d} — detailed description with padding to ensure line length hits cap " + "x" * 80,
+            description=desc,
             type="project",
             content=f"Content body for memory {i}. " * 5,
         )
