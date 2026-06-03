@@ -7,6 +7,7 @@ from pathlib import Path
 MEMORY_TYPES = ("user", "feedback", "project", "reference")
 _INDEX_FILENAME = "MEMORY.md"
 _INDEX_MAX_LINES = 200
+_MAX_INDEX_LINE_LENGTH = 150
 
 
 def _sanitize_name(name: str) -> str:
@@ -197,24 +198,44 @@ class MarkdownMemoryStore:
             return
 
         lines = ["# Memory Index", ""]
-        for entry in entries[:_INDEX_MAX_LINES - 2]:  # reserve 2 lines for header
-            lines.append(f"- [{entry['name']}]({entry['name']}.md) — {entry['description']}")
+        for entry in entries[:_INDEX_MAX_LINES - 2]:
+            prefix = f"- [{entry['name']}]({entry['name']}.md) — "
+            desc = entry["description"]
+            max_desc_len = _MAX_INDEX_LINE_LENGTH - len(prefix)
+            if max_desc_len > 3 and len(desc) > max_desc_len:
+                desc = desc[:max_desc_len - 3] + "..."
+            lines.append(f"{prefix}{desc}")
 
         index_path = self.base_dir / _INDEX_FILENAME
         index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    def get_index(self, max_chars: int = 6000) -> str:
-        """Read MEMORY.md content, truncate if needed. Returns '' if empty/missing."""
+    def get_index(self, max_bytes: int = 25_000) -> str:
+        """Read MEMORY.md content, truncate if needed. Returns '' if empty/missing.
+
+        Truncation is byte-aware: caps at max_bytes to defend against
+        long-line index bombs that stay under the 200-line limit but
+        still carry hundreds of KB (e.g. verbose Chinese descriptions).
+        """
         index_path = self.base_dir / _INDEX_FILENAME
         if not index_path.exists():
             return ""
 
-        text = index_path.read_text(encoding="utf-8")
-        if not text.strip():
+        raw = index_path.read_bytes()
+        if len(raw) == 0:
             return ""
 
-        if len(text) > max_chars:
-            cut = text[:max_chars].rfind("\n")
-            text = text[:cut] if cut > 0 else text[:max_chars]
+        if len(raw) > max_bytes:
+            # Truncate at last complete UTF-8 byte boundary before max_bytes
+            cut = max_bytes
+            while cut > 0 and (raw[cut - 1] & 0xC0) == 0x80:
+                cut -= 1
+            truncated = raw[:cut]
+            # Find last newline to avoid cutting mid-line
+            last_nl = truncated.rfind(b"\n")
+            if last_nl > 0:
+                truncated = truncated[:last_nl]
+            text = truncated.decode("utf-8")
+            text += f"\n\n> ⚠ 索引已截断（{len(raw)} 字节中只加载了前 {len(truncated)} 字节），部分记忆未显示。使用 recall 工具检索遗漏的条目。\n"
+            return text
 
-        return text
+        return raw.decode("utf-8")

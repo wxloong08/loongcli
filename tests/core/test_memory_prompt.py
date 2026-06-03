@@ -47,15 +47,17 @@ def test_memory_section_truncation(tmp_path):
     from loongcli.memory.markdown_store import MarkdownMemoryStore
 
     store = MarkdownMemoryStore(base_dir=tmp_path)
-    for i in range(200):
+    # 198 entries × ~160 bytes/line ≈ 31KB → triggers 25KB byte cap
+    for i in range(198):
         store.save(
             name=f"mem-{i:04d}",
-            description=f"Description for memory entry number {i} with extra text to pad length",
+            description=f"Memory entry {i:04d} — detailed description with padding to ensure line length hits cap " + "x" * 80,
             type="project",
-            content=f"Content body for memory {i}. " * 10,
+            content=f"Content body for memory {i}. " * 5,
         )
     section = _memory_section(store)
     assert "# 记忆系统" in section
     assert "记忆索引" in section
-    # Should not exceed a reasonable size (guidelines + 6000 chars of index)
-    assert len(section) < 15000
+    # 200 entries with max 150-char lines ≈ 30KB → triggers 25KB byte cap
+    assert "索引已截断" in section
+    assert len(section) < 35000

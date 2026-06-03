@@ -211,7 +211,7 @@ def _memory_section(memory) -> str:
 - 写入前先 recall 检查是否已有同类记忆，有则更新而非重复创建
 - 不要在每次对话都保存 — 只保存对未来会话有价值的信息"""
 
-    content = memory.get_index(max_chars=6000)
+    content = memory.get_index(max_bytes=25_000)
 
     if content:
         return f"{guidelines}\n\n## 记忆索引\n以下是所有已保存记忆的索引，详细内容通过 recall 工具获取：\n\n{content}"

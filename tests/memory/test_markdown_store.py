@@ -150,6 +150,14 @@ def test_index_rebuilt_on_delete(store: MarkdownMemoryStore, tmp_path: Path):
     assert "remove" not in index_text
 
 
+def test_index_line_capped_to_150(store: MarkdownMemoryStore, tmp_path: Path):
+    store.save("my-memory", "x" * 5000, "project", "body")
+    index_text = (tmp_path / "MEMORY.md").read_text(encoding="utf-8")
+    lines = index_text.strip().split("\n")
+    for line in lines:
+        assert len(line) <= 150
+
+
 # ---- 12. get_index empty ----
 
 def test_get_index_empty(store: MarkdownMemoryStore):
@@ -159,11 +167,12 @@ def test_get_index_empty(store: MarkdownMemoryStore):
 # ---- 13. get_index truncation ----
 
 def test_get_index_truncation(store: MarkdownMemoryStore):
-    # Create many entries to produce a large index
     for i in range(100):
         store.save(f"note-{i:03d}", f"description for note {i} " + "x" * 50, "project", "body")
-    index = store.get_index(max_chars=500)
-    assert len(index) <= 500
+    index = store.get_index(max_bytes=500)
+    raw_bytes = index.encode("utf-8")
+    assert len(raw_bytes) <= 500 + 300
+    assert "索引已截断" in index
 
 
 # ---- Extra edge cases ----
