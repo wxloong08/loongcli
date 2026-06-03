@@ -53,14 +53,14 @@ async def test_stream_collector_captures_thinking():
 
 
 @pytest.mark.asyncio
-async def test_to_message_includes_reasoning_with_tool_calls():
+async def test_to_message_excludes_reasoning_from_context():
     resp = CollectedResponse(
         content="",
         reasoning_content="thinking here",
         tool_calls=[{"id": "c1", "type": "function", "function": {"name": "test", "arguments": "{}"}}],
     )
     msg = resp.to_message()
-    assert msg["reasoning_content"] == "thinking here"
+    assert "reasoning_content" not in msg
     assert "tool_calls" in msg
 
 

@@ -20,8 +20,6 @@ class CollectedResponse:
 
     def to_message(self) -> dict:
         msg: dict = {"role": "assistant", "content": self.content or None}
-        if self.reasoning_content and self.tool_calls:
-            msg["reasoning_content"] = self.reasoning_content
         if self.tool_calls:
             msg["tool_calls"] = self.tool_calls
         return msg
