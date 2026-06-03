@@ -35,6 +35,7 @@ from loongcli.memory.migrate import migrate_kv_to_markdown
 from loongcli.memory.recall_engine import RecallEngine
 from loongcli.memory.auto_extract import AutoExtractor
 from loongcli.memory.conversation import ConversationStore
+from loongcli.core.checkpoint import CheckpointManager
 from loongcli.security.permissions import PermissionChecker, PermissionMode
 from loongcli.mcp.manager import MCPManager
 from loongcli.hooks.manager import HookManager, HookEvent
@@ -296,6 +297,8 @@ async def _async_main():
     auto_extract_llm = LLMClient(api_key=cfg.api_key, model="deepseek-chat", base_url=cfg.base_url)
     auto_extractor = AutoExtractor(memory=memory, llm=auto_extract_llm)
 
+    checkpoint_mgr = CheckpointManager(cwd=Path.cwd())
+
     agent = AgentLoop(
         llm=llm,
         tool_registry=registry,
@@ -311,6 +314,7 @@ async def _async_main():
         ),
         recall_engine=recall_engine,
         auto_extractor=auto_extractor,
+        checkpoint_manager=checkpoint_mgr,
     )
 
     if structured_state:

@@ -23,6 +23,7 @@ def get_system_prompt(
         _system_section(),
         _doing_tasks_section(),
         _actions_section(),
+        _verify_section(),
         _tools_section(),
         _plan_usage_section(),
         _skill_discipline_section(),
@@ -97,6 +98,23 @@ def _actions_section() -> str:
 
 遇到障碍时，不要用破坏性操作作为捷径。找到根因并修复，而不是绕过安全检查。
 发现陌生文件/分支/配置时，先调查再删除——可能是用户正在进行的工作。"""
+
+
+def _verify_section() -> str:
+    return """\
+# 验证循环
+
+每次修改代码后，你必须验证修改是否正确。系统会自动检测项目测试命令并提供给你。
+
+工作流程：
+1. 用 Shell 工具运行测试命令
+2. 如果测试通过 → 报告完成
+3. 如果测试失败 → 仔细阅读报错，分析根因
+4. 修复问题后重新运行测试
+5. 最多 3 轮验证，若仍失败则向用户报告具体原因
+
+不要跳过验证步骤。测试通过后再报告完成。
+如果项目没有测试框架，至少用 Shell 工具手动验证（运行脚本/检查语法/验证输出）。"""
 
 
 def _tools_section() -> str:

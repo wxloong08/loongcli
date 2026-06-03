@@ -1,0 +1,160 @@
+from __future__ import annotations
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock
+
+from loongcli.core.verify_loop import (
+    VerifyState,
+    build_verify_prompt,
+    MAX_VERIFY_ROUNDS,
+)
+
+
+class TestVerifyState:
+    def test_initial_state(self):
+        vs = VerifyState()
+        assert not vs.is_active
+        assert not vs.is_exhausted
+        assert vs.round == 0
+
+    def test_start_sets_round_one(self):
+        vs = VerifyState()
+        vs.start(["foo.py"], "pytest")
+        assert vs.is_active
+        assert not vs.is_exhausted
+        assert vs.round == 1
+        assert vs.changed_files == ["foo.py"]
+        assert vs.test_command == "pytest"
+
+    def test_exhausted_after_max_rounds(self):
+        vs = VerifyState()
+        vs.start(["foo.py"], "pytest")
+        vs.round = MAX_VERIFY_ROUNDS + 1
+        assert vs.is_exhausted
+        assert not vs.is_active
+
+    def test_reset_clears_all(self):
+        vs = VerifyState()
+        vs.start(["foo.py"], "pytest")
+        vs.round = 3
+        vs.last_error = "failed"
+        vs.reset()
+        assert vs.round == 0
+        assert not vs.is_active
+        assert vs.changed_files == []
+        assert vs.test_command is None
+        assert vs.last_error is None
+
+
+class TestBuildVerifyPrompt:
+    def test_round_1_with_test_command(self):
+        prompt = build_verify_prompt(
+            changed_files=["src/foo.py", "src/bar.py"],
+            test_command="pytest",
+            round_number=1,
+        )
+        assert "src/foo.py" in prompt
+        assert "src/bar.py" in prompt
+        assert "pytest" in prompt
+        assert "验证" in prompt
+
+    def test_round_1_without_test_command(self):
+        prompt = build_verify_prompt(
+            changed_files=["src/foo.py"],
+            test_command=None,
+            round_number=1,
+        )
+        assert "src/foo.py" in prompt
+        assert "验证" in prompt or "test" in prompt.lower()
+
+    def test_round_2_with_error(self):
+        prompt = build_verify_prompt(
+            changed_files=["src/foo.py"],
+            test_command="pytest",
+            round_number=2,
+            last_error="AssertionError: expected 5, got 3",
+        )
+        assert "AssertionError" in prompt
+        assert "重试" in prompt or "retry" in prompt.lower()
+
+    def test_round_3_last_attempt(self):
+        prompt = build_verify_prompt(
+            changed_files=["src/foo.py"],
+            test_command="pytest",
+            round_number=3,
+            last_error="test failed",
+        )
+        assert "重试" in prompt or "retry" in prompt.lower()
+
+    def test_long_error_truncated(self):
+        long_error = "x" * 5000
+        prompt = build_verify_prompt(
+            changed_files=["src/foo.py"],
+            test_command="pytest",
+            round_number=2,
+            last_error=long_error,
+        )
+        assert len(long_error) > len(prompt)
+        # The error in the prompt should be truncated to ~3000 chars
+        error_in_prompt = prompt.count("x")
+        assert error_in_prompt <= 3100  # allow small overhead
+
+
+# --- AgentLoop integration ---
+
+@pytest.mark.asyncio
+async def test_agent_verify_loop_no_file_changes():
+    """No file modifications — no verify loop triggered."""
+    from loongcli.core.agent import AgentLoop
+    from loongcli.core.llm import LLMClient
+    from loongcli.tools.base import ToolRegistry
+    from loongcli.security.permissions import PermissionChecker
+    from loongcli.core.events import AgentDone
+
+    llm = LLMClient(api_key="test")
+
+    async def mock_stream(**kwargs):
+        chunk = MagicMock()
+        chunk.choices = [MagicMock()]
+        delta = MagicMock(spec=[])
+        delta.content = "Hello!"
+        delta.tool_calls = None
+        chunk.choices[0].delta = delta
+        chunk.choices[0].finish_reason = "stop"
+        chunk.usage = None
+        yield chunk
+
+    llm.chat_stream = mock_stream
+
+    agent = AgentLoop(
+        llm=llm,
+        tool_registry=ToolRegistry(),
+        permission_checker=PermissionChecker(),
+        system_prompt="You are helpful.",
+    )
+
+    events = []
+    async for event in agent.run_stream("hi"):
+        events.append(event)
+
+    assert any(isinstance(e, AgentDone) for e in events)
+    # No file changes, verify state should not be active
+    assert not agent._verify_state.is_active
+
+
+@pytest.mark.asyncio
+async def test_verify_state_not_active_initially():
+    """VerifyState should be reset at agent creation and after each run."""
+    from loongcli.core.agent import AgentLoop
+    from loongcli.core.llm import LLMClient
+    from loongcli.tools.base import ToolRegistry
+    from loongcli.security.permissions import PermissionChecker
+
+    agent = AgentLoop(
+        llm=LLMClient(api_key="test"),
+        tool_registry=ToolRegistry(),
+        permission_checker=PermissionChecker(),
+        system_prompt="test",
+    )
+    assert not agent._verify_state.is_active
+    assert agent._verify_state.round == 0

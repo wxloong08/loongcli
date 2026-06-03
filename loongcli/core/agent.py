@@ -45,6 +45,7 @@ class AgentLoop:
         system_prompt_builder: Callable[[], str] | None = None,
         recall_engine=None,
         auto_extractor=None,
+        checkpoint_manager=None,
     ):
         self.llm = llm
         self.tool_registry = tool_registry
@@ -61,6 +62,11 @@ class AgentLoop:
         self._system_prompt_builder = system_prompt_builder
         self.recall_engine = recall_engine
         self.auto_extractor = auto_extractor
+        self.checkpoint_manager = checkpoint_manager
+        self._last_checkpoint: str | None = None
+        self._files_modified_this_turn: list[str] = []
+        from loongcli.core.verify_loop import VerifyState
+        self._verify_state = VerifyState()
         self._last_prompt_tokens = 0
         self.token_usage = {
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
@@ -96,6 +102,40 @@ class AgentLoop:
         raw = json.dumps({"n": name, "a": args}, sort_keys=True)
         return hashlib.md5(raw.encode()).hexdigest()
 
+    @staticmethod
+    def _extract_file_args(name: str, args: dict) -> list[str]:
+        """Extract file paths from tool arguments for checkpointing."""
+        files = []
+        file_keys = ("file_path", "path", "target_file")
+        for key in file_keys:
+            if key in args and isinstance(args[key], str):
+                files.append(args[key])
+        if name == "shell" and "command" in args:
+            # Parse mv/cp/rm targets from shell commands
+            import shlex
+            cmd = args["command"]
+            try:
+                tokens = shlex.split(cmd)
+            except ValueError:
+                tokens = cmd.split()
+            redirect_ops = {">", ">>", "|"}
+            for i, tok in enumerate(tokens):
+                if tok in redirect_ops and i + 1 < len(tokens):
+                    files.append(tokens[i + 1])
+        return files
+
+    def _maybe_checkpoint(self, tool_name: str, args: dict) -> None:
+        """Save a checkpoint before file-modifying tool calls."""
+        if not self.checkpoint_manager:
+            return
+        from loongcli.core.checkpoint import MODIFY_TOOLS
+        if tool_name not in MODIFY_TOOLS:
+            return
+        files = self._extract_file_args(tool_name, args)
+        self._last_checkpoint = self.checkpoint_manager.save(files)
+        if self._last_checkpoint:
+            self._files_modified_this_turn.extend(files)
+
     def _check_loop(self, name: str, args: dict) -> str | None:
         sig = self._tool_signature(name, args)
         if sig == self._last_tool_sig:
@@ -111,6 +151,7 @@ class AgentLoop:
         return None
 
     async def _exec_tool_stream(self, tool_name: str, args: dict):
+        self._maybe_checkpoint(tool_name, args)
         tool = self.tool_registry._tools.get(tool_name)
         if not tool or not getattr(tool, 'supports_progress', False):
             try:
@@ -170,6 +211,8 @@ class AgentLoop:
         self._tool_call_count = 0
         self._last_tool_sig = ""
         self._repeat_count = 0
+        self._files_modified_this_turn = []
+        self._verify_state.reset()
 
         if self.recall_engine:
             try:
@@ -237,6 +280,46 @@ class AgentLoop:
 
             if not response.tool_calls:
                 self.messages.append({"role": "assistant", "content": response.content})
+
+                # Verify loop: if files were modified, kick off verification
+                if self._files_modified_this_turn and not self._verify_state.is_active:
+                    from loongcli.core.verify_loop import build_verify_prompt
+                    from loongcli.core.test_discovery import discover_test_command
+
+                    test_cmd = discover_test_command(changed_files=self._files_modified_this_turn)
+                    self._verify_state.start(self._files_modified_this_turn, test_cmd)
+                    prompt = build_verify_prompt(
+                        changed_files=self._files_modified_this_turn,
+                        test_command=test_cmd,
+                        round_number=1,
+                    )
+                    self.messages.append({"role": "user", "content": prompt})
+                    self._files_modified_this_turn = []
+                    continue  # Let LLM process the verify prompt
+
+                # Verify loop: already active, check if we need to retry
+                if self._verify_state.is_active:
+                    content_lower = (response.content or "").lower()
+                    failure_indicators = [
+                        "fail", "error", "assertionerror", "traceback",
+                        "失败", "错误", "异常", "❌", "✗", "✘",
+                    ]
+                    is_failure = any(ind in content_lower for ind in failure_indicators)
+
+                    if is_failure and not self._verify_state.is_exhausted:
+                        self._verify_state.last_error = response.content
+                        self._verify_state.round += 1
+                        prompt = build_verify_prompt(
+                            changed_files=self._verify_state.changed_files,
+                            test_command=self._verify_state.test_command,
+                            round_number=self._verify_state.round,
+                            last_error=self._verify_state.last_error,
+                        )
+                        self.messages.append({"role": "user", "content": prompt})
+                        continue  # Retry verification
+
+                    self._verify_state.reset()
+
                 self._persist()
                 self._schedule_auto_extract()
                 yield AgentDone(content=response.content)
