@@ -3,7 +3,7 @@ def test_packages_importable():
     from loongcli.core.agent import AgentLoop
     from loongcli.tools.base import Tool, ToolRegistry
     from loongcli.tui.app import TUI
-    from loongcli.memory.store import MemoryStore
+    from loongcli.memory.markdown_store import MarkdownMemoryStore
     from loongcli.memory.conversation import ConversationStore
     from loongcli.tools.recall import RecallTool
     from loongcli.security.checker import SecurityChecker

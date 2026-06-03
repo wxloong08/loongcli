@@ -18,7 +18,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from loongcli.core.agent import AgentLoop
 from loongcli.core.events import TextDelta, ThinkingDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress, ShellOutput
 from loongcli.core.intent import StopIntent, detect_stop_intent
-from loongcli.memory.store import MemoryStore
+from loongcli.memory.markdown_store import MarkdownMemoryStore
 from loongcli.memory.conversation import ConversationStore
 from loongcli.tui.commands import CommandContext, CommandRegistry, create_default_registry
 
@@ -79,7 +79,7 @@ class TUI:
 
     def __init__(
         self,
-        memory: MemoryStore | None = None,
+        memory: MarkdownMemoryStore | None = None,
         command_registry: CommandRegistry | None = None,
         config=None,
         skill_registry=None,

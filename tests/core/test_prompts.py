@@ -34,11 +34,11 @@ def test_prompt_contains_model_name():
 
 
 def test_prompt_includes_memory():
-    memory = MagicMock()
-    memory.format_for_prompt.return_value = "- [user] prefs/lang: Python"
+    memory = MagicMock(spec=["get_index"])
+    memory.get_index.return_value = "- [user-role](user-role.md) — Python developer"
     prompt = get_system_prompt(model="deepseek-v4-flash", memory=memory)
-    assert "prefs/lang" in prompt
-    assert "已有记忆" in prompt
+    assert "user-role" in prompt
+    assert "记忆索引" in prompt
 
 
 def test_prompt_includes_mcp():
@@ -49,11 +49,11 @@ def test_prompt_includes_mcp():
 
 
 def test_prompt_no_memory_when_empty():
-    memory = MagicMock()
-    memory.format_for_prompt.return_value = ""
+    memory = MagicMock(spec=["get_index"])
+    memory.get_index.return_value = ""
     prompt = get_system_prompt(model="deepseek-v4-flash", memory=memory)
     assert "记忆系统" in prompt
-    assert "已有记忆" not in prompt
+    assert "记忆索引" not in prompt
 
 
 def test_prompt_environment_has_cwd():

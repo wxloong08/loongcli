@@ -26,6 +26,14 @@ class LLMClient:
         self.thinking = thinking
         self.reasoning_effort = reasoning_effort
 
+    async def chat(self, prompt: str) -> str:
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            stream=False,
+        )
+        return response.choices[0].message.content or ""
+
     async def chat_stream(
         self,
         messages: list[dict],

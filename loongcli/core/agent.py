@@ -43,6 +43,7 @@ class AgentLoop:
         hook_manager: HookManager | None = None,
         skill_registry: SkillRegistry | None = None,
         system_prompt_builder: Callable[[], str] | None = None,
+        recall_engine=None,
     ):
         self.llm = llm
         self.tool_registry = tool_registry
@@ -57,6 +58,7 @@ class AgentLoop:
         self.max_tool_calls = max_tool_calls
         self.skill_registry = skill_registry
         self._system_prompt_builder = system_prompt_builder
+        self.recall_engine = recall_engine
         self._last_prompt_tokens = 0
         self.token_usage = {
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
@@ -162,6 +164,16 @@ class AgentLoop:
         self._tool_call_count = 0
         self._last_tool_sig = ""
         self._repeat_count = 0
+
+        if self.recall_engine:
+            try:
+                recalled = await self.recall_engine.recall(user_input)
+                if recalled:
+                    injection = self.recall_engine.format_for_injection(recalled)
+                    insert_idx = 1 if self.messages and self.messages[0].get("role") == "system" else 0
+                    self.messages.insert(insert_idx, {"role": "system", "content": injection})
+            except Exception as e:
+                logger.warning("Memory recall failed: %s", e)
 
         if (self.compactor
                 and not self._compact_breaker.is_open

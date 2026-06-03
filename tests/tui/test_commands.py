@@ -129,10 +129,11 @@ async def test_compact_command_runs():
 @pytest.mark.asyncio
 async def test_remember_command():
     memory = MagicMock()
+    memory.save.return_value = "my-name"
     ctx = _make_ctx(memory=memory)
     cmd = RememberCommand()
-    await cmd.run(["cat", "key", "value"], ctx)
-    memory.set.assert_called_once_with("cat", "key", "value")
+    await cmd.run(["my-name", "description", "some content"], ctx)
+    memory.save.assert_called_once_with(name="my-name", description="description", type="project", content="some content")
     out = _output(ctx)
     assert "已保存" in out
 
@@ -152,8 +153,8 @@ async def test_forget_command():
     memory.delete.return_value = True
     ctx = _make_ctx(memory=memory)
     cmd = ForgetCommand()
-    await cmd.run(["cat", "key"], ctx)
-    memory.delete.assert_called_once_with("cat", "key")
+    await cmd.run(["my-name"], ctx)
+    memory.delete.assert_called_once_with("my-name")
     out = _output(ctx)
     assert "已删除" in out
 
@@ -161,12 +162,14 @@ async def test_forget_command():
 @pytest.mark.asyncio
 async def test_memories_command():
     memory = MagicMock()
-    memory.format_all.return_value = "all memories"
+    memory.list_all.return_value = [
+        {"name": "test-mem", "type": "user", "description": "a test memory"},
+    ]
     ctx = _make_ctx(memory=memory)
     cmd = MemoriesCommand()
     await cmd.run([], ctx)
     out = _output(ctx)
-    assert "all memories" in out
+    assert "test-mem" in out
 
 
 @pytest.mark.asyncio

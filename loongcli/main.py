@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import json
 import sys
+from pathlib import Path
 
 from rich.console import Console
 
@@ -29,7 +30,9 @@ from loongcli.tools.batch_delegate import BatchDelegateTool
 from loongcli.tools.send_message import SendMessageTool
 from loongcli.tools.task_status import TaskStatusTool
 from loongcli.core.task import TaskManager
-from loongcli.memory.store import MemoryStore
+from loongcli.memory.markdown_store import MarkdownMemoryStore
+from loongcli.memory.migrate import migrate_kv_to_markdown
+from loongcli.memory.recall_engine import RecallEngine
 from loongcli.memory.conversation import ConversationStore
 from loongcli.security.permissions import PermissionChecker, PermissionMode
 from loongcli.mcp.manager import MCPManager
@@ -179,7 +182,9 @@ async def _async_main():
             api_key=cfg.api_key, model=cfg.sub_model, base_url=cfg.base_url,
             thinking=cfg.thinking, reasoning_effort=cfg.reasoning_effort,
         )
-    memory = MemoryStore()
+    memory_dir = Path.home() / ".loongcli" / "memory"
+    migrate_kv_to_markdown(memory_dir)
+    memory = MarkdownMemoryStore(base_dir=memory_dir)
     conversation = ConversationStore()
 
     resumed = False
@@ -284,6 +289,9 @@ async def _async_main():
 
     compactor = Compactor(llm=llm, threshold=threshold, plan_store=plan_store, task_manager=task_manager)
 
+    recall_llm = LLMClient(api_key=cfg.api_key, model="deepseek-chat", base_url=cfg.base_url)
+    recall_engine = RecallEngine(memory=memory, llm=recall_llm)
+
     agent = AgentLoop(
         llm=llm,
         tool_registry=registry,
@@ -297,6 +305,7 @@ async def _async_main():
         system_prompt_builder=lambda: get_system_prompt(
             model=cfg.model, memory=memory, mcp=mcp, plan_store=plan_store,
         ),
+        recall_engine=recall_engine,
     )
 
     if structured_state:

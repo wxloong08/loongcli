@@ -12,7 +12,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 if TYPE_CHECKING:
     from loongcli.core.agent import AgentLoop
     from loongcli.core.config import Config
-    from loongcli.memory.store import MemoryStore
+    from loongcli.memory.markdown_store import MarkdownMemoryStore
 
 
 class SlashCommand(ABC):
@@ -30,7 +30,7 @@ class CommandContext:
         self,
         console: Console,
         agent: AgentLoop,
-        memory: MemoryStore | None = None,
+        memory: MarkdownMemoryStore | None = None,
         registry: CommandRegistry | None = None,
         tui: Any = None,
         config: Config | None = None,
@@ -134,7 +134,7 @@ class CompactCommand(SlashCommand):
 class RememberCommand(SlashCommand):
     name = "remember"
     description = "保存记忆"
-    usage = "<category> <key> <value>"
+    usage = "<name> <description> <content>"
 
     async def run(self, args: list[str], ctx: CommandContext) -> None:
         if not ctx.memory:
@@ -143,15 +143,16 @@ class RememberCommand(SlashCommand):
         if len(args) < 3:
             ctx.console.print(f"[yellow]用法: /{self.name} {self.usage}[/yellow]")
             return
-        category, key, value = args[0], args[1], args[2]
-        ctx.memory.set(category, key, value)
-        ctx.console.print(f"[green]✓ 已保存[/green] [{category}] {key}: {value}")
+        name, description = args[0], args[1]
+        content = " ".join(args[2:])
+        saved = ctx.memory.save(name=name, description=description, type="project", content=content)
+        ctx.console.print(f"[green]✓ 已保存[/green] {saved}: {description}")
 
 
 class ForgetCommand(SlashCommand):
     name = "forget"
     description = "删除记忆"
-    usage = "<category> [key]"
+    usage = "<name>"
 
     async def run(self, args: list[str], ctx: CommandContext) -> None:
         if not ctx.memory:
@@ -160,11 +161,9 @@ class ForgetCommand(SlashCommand):
         if len(args) < 1:
             ctx.console.print(f"[yellow]用法: /{self.name} {self.usage}[/yellow]")
             return
-        category = args[0]
-        key = args[1] if len(args) > 1 else None
-        if ctx.memory.delete(category, key):
-            target = f"[{category}] {key}" if key else f"[{category}] (整个分类)"
-            ctx.console.print(f"[green]✓ 已删除[/green] {target}")
+        name = args[0]
+        if ctx.memory.delete(name):
+            ctx.console.print(f"[green]✓ 已删除[/green] {name}")
         else:
             ctx.console.print("[yellow]未找到对应记忆[/yellow]")
 
@@ -177,7 +176,14 @@ class MemoriesCommand(SlashCommand):
         if not ctx.memory:
             ctx.console.print("[red]记忆功能未启用[/red]")
             return
-        ctx.console.print(Panel(ctx.memory.format_all(), title="记忆", border_style="cyan"))
+        entries = ctx.memory.list_all()
+        if not entries:
+            ctx.console.print("[dim]（暂无记忆）[/dim]")
+            return
+        lines = []
+        for e in entries:
+            lines.append(f"[{e['type']}] {e['name']} — {e['description']}")
+        ctx.console.print(Panel("\n".join(lines), title="记忆", border_style="cyan"))
 
 
 class InitCommand(SlashCommand):

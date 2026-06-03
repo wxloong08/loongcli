@@ -1,4 +1,4 @@
-from loongcli.memory.store import MemoryStore
+from loongcli.memory.markdown_store import MarkdownMemoryStore
 from loongcli.memory.conversation import ConversationStore
 
-__all__ = ["MemoryStore", "ConversationStore"]
+__all__ = ["MarkdownMemoryStore", "ConversationStore"]
