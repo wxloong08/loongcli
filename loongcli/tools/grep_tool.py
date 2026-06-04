@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from loongcli.tools.base import Tool
+from loongcli.tools.errors import ToolError
 
 _MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB per file
 _MAX_RESULTS = 500
@@ -50,7 +51,7 @@ class GrepTool(Tool):
             flags = re.IGNORECASE if case_insensitive else 0
             regex = re.compile(pattern, flags)
         except re.error as e:
-            return f"错误：无效的正则表达式 — {e}"
+            raise ToolError(f"无效的正则表达式 — {e}", retryable=False)
 
         base = Path(path).resolve()
         if not base.is_dir():

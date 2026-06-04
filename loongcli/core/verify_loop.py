@@ -13,6 +13,7 @@ class VerifyState:
     test_command: str | None = None
     round: int = 0
     last_error: str | None = None
+    test_failed: bool = False
 
     @property
     def is_active(self) -> bool:
@@ -27,12 +28,14 @@ class VerifyState:
         self.test_command = test_command
         self.round = 1
         self.last_error = None
+        self.test_failed = False
 
     def reset(self) -> None:
         self.changed_files.clear()
         self.test_command = None
         self.round = 0
         self.last_error = None
+        self.test_failed = False
 
 
 def build_verify_prompt(

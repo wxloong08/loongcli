@@ -45,10 +45,10 @@ async def test_recall_injects_memories():
     )
 
     events = []
-    async for event in agent.run_stream("hi"):
+    async for event in agent.run_stream("帮我查看项目记忆"):
         events.append(event)
 
-    recall_engine.recall.assert_called_once_with("hi")
+    recall_engine.recall.assert_called_once_with("帮我查看项目记忆")
     system_msgs = [m for m in agent.messages if m.get("role") == "system"]
     assert any("相关记忆" in (m.get("content") or "") for m in system_msgs)
 

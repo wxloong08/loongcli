@@ -14,8 +14,16 @@ _KEEP_FOREVER = ("user", "feedback")
 
 
 def _tokenize(text: str) -> set[str]:
-    """Lowercase word tokenizer for similarity comparison."""
-    return set(text.lower().split())
+    """Tokenizer supporting English (word-level) and CJK (char + bigram)."""
+    tokens = set()
+    text_lower = text.lower()
+    for word in re.findall(r'[a-z0-9_]+', text_lower):
+        tokens.add(word)
+    cjk = re.findall(r'[一-鿿]', text_lower)
+    tokens.update(cjk)
+    for i in range(len(cjk) - 1):
+        tokens.add(cjk[i] + cjk[i + 1])
+    return tokens
 
 
 def _similarity(a: str, b: str) -> float:

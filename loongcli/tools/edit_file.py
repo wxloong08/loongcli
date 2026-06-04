@@ -167,15 +167,22 @@ def _fuzzy_locate(file_lines: list[str], old_string: str) -> list[tuple[str, flo
     return _fuzzy_locate_multi_line(file_lines, old_lines, old_string)
 
 
+def _prefix_offsets(file_lines: list[str]) -> list[int]:
+    """Precompute cumulative character offsets for O(1) lookup."""
+    offsets = [0]
+    for line in file_lines:
+        offsets.append(offsets[-1] + len(line))
+    return offsets
+
+
 def _fuzzy_locate_single_line(file_lines: list[str], target: str) -> list[tuple[str, float, int, int]]:
     """Find best matching single line in file."""
+    offsets = _prefix_offsets(file_lines)
     scored = []
     for i, line in enumerate(file_lines):
         ratio = SequenceMatcher(None, line, target).ratio()
         if ratio >= FUZZY_CANDIDATE_MIN:
-            start = _char_offset(file_lines, i)
-            end = start + len(line)
-            scored.append((line, ratio, start, end))
+            scored.append((line, ratio, offsets[i], offsets[i] + len(line)))
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored[:2]
 
@@ -188,7 +195,8 @@ def _fuzzy_locate_multi_line(
     if n > len(file_lines):
         return []
 
-    # Phase 1: for each old_line, collect candidate file positions
+    offsets = _prefix_offsets(file_lines)
+
     cands_per_line = []
     for ol in old_lines:
         cands = []
@@ -200,7 +208,6 @@ def _fuzzy_locate_multi_line(
             return []
         cands_per_line.append(cands)
 
-    # Phase 2: build candidate windows from first-line candidates
     windows = []
     for start_idx, start_ratio in cands_per_line[0]:
         chain = [(start_idx, start_ratio)]
@@ -222,13 +229,7 @@ def _fuzzy_locate_multi_line(
             window_text = "".join(file_lines[first:last])
             ratio = SequenceMatcher(None, window_text, old_string).ratio()
             if ratio >= FUZZY_CANDIDATE_MIN:
-                start_off = _char_offset(file_lines, first)
-                end_off = _char_offset(file_lines, last)
-                windows.append((window_text, ratio, start_off, end_off))
+                windows.append((window_text, ratio, offsets[first], offsets[last]))
 
     windows.sort(key=lambda x: x[1], reverse=True)
     return windows[:2]
-
-
-def _char_offset(file_lines: list[str], idx: int) -> int:
-    return sum(len(file_lines[i]) for i in range(idx))

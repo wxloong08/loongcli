@@ -24,6 +24,15 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_CALLS_PER_TURN = 200
 LOOP_DETECT_THRESHOLD = 3
+_MIN_RECALL_LENGTH = 4
+
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.warning("Background task failed: %s", exc)
 
 
 class AgentLoop:
@@ -84,7 +93,8 @@ class AgentLoop:
 
     def _schedule_auto_extract(self):
         if self.auto_extractor:
-            asyncio.create_task(self.auto_extractor.extract(list(self.messages)))
+            task = asyncio.create_task(self.auto_extractor.extract(list(self.messages)))
+            task.add_done_callback(_log_task_exception)
 
     def _persist(self):
         if self.conversation_store:
@@ -110,18 +120,6 @@ class AgentLoop:
         for key in file_keys:
             if key in args and isinstance(args[key], str):
                 files.append(args[key])
-        if name == "shell" and "command" in args:
-            # Parse mv/cp/rm targets from shell commands
-            import shlex
-            cmd = args["command"]
-            try:
-                tokens = shlex.split(cmd)
-            except ValueError:
-                tokens = cmd.split()
-            redirect_ops = {">", ">>", "|"}
-            for i, tok in enumerate(tokens):
-                if tok in redirect_ops and i + 1 < len(tokens):
-                    files.append(tokens[i + 1])
         return files
 
     def _maybe_checkpoint(self, tool_name: str, args: dict) -> None:
@@ -130,6 +128,9 @@ class AgentLoop:
             return
         from loongcli.core.checkpoint import MODIFY_TOOLS
         if tool_name not in MODIFY_TOOLS:
+            return
+        if tool_name == "shell":
+            self._last_checkpoint = self.checkpoint_manager.save_workdir()
             return
         files = self._extract_file_args(tool_name, args)
         self._last_checkpoint = self.checkpoint_manager.save(files)
@@ -238,7 +239,7 @@ class AgentLoop:
         self._files_modified_this_turn = []
         self._verify_state.reset()
 
-        if self.recall_engine:
+        if self.recall_engine and len(user_input.strip()) >= _MIN_RECALL_LENGTH:
             try:
                 recalled = await self.recall_engine.recall(user_input)
                 if recalled:
@@ -323,12 +324,8 @@ class AgentLoop:
 
                 # Verify loop: already active, check if we need to retry
                 if self._verify_state.is_active:
-                    content_lower = (response.content or "").lower()
-                    failure_indicators = [
-                        "fail", "error", "assertionerror", "traceback",
-                        "失败", "错误", "异常", "❌", "✗", "✘",
-                    ]
-                    is_failure = any(ind in content_lower for ind in failure_indicators)
+                    is_failure = self._verify_state.test_failed
+                    self._verify_state.test_failed = False
 
                     if is_failure and not self._verify_state.is_exhausted:
                         self._verify_state.last_error = response.content
@@ -432,6 +429,12 @@ class AgentLoop:
                         {"tool": tool_name, "arguments": args, "result": result},
                         tool_name=tool_name,
                     )
+
+                if (self._verify_state.is_active
+                        and tool_name == "shell"
+                        and isinstance(result, str)
+                        and "[exit code:" in result):
+                    self._verify_state.test_failed = True
 
                 yield ToolCallResult(tool_name=tool_name, result=result)
 

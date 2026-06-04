@@ -1,6 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 from loongcli.tools.base import Tool
+from loongcli.tools.errors import ToolError
 
 _MAX_CONTENT_SIZE = 2 * 1024 * 1024  # 2 MB
 
@@ -35,5 +36,7 @@ class WriteFileTool(Tool):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
             return f"成功写入 {path}（{len(content)} 字符）"
+        except PermissionError:
+            raise ToolError(f"权限不足，无法写入 '{path}'", retryable=True, retry_after=1.0)
         except Exception as e:
             return f"错误：{e}"

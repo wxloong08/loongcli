@@ -1,6 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 from loongcli.tools.base import Tool
+from loongcli.tools.errors import ToolError
 
 _ENCODING_CHAIN = ["utf-8", "utf-8-sig", "gbk", "cp936", "latin-1"]
 _MAX_FILE_MB = 20
@@ -80,6 +81,8 @@ class ReadFileTool(Tool):
                 parts.append("")
             parts.append("\n".join(numbered))
             return "\n".join(parts)
+        except PermissionError:
+            raise ToolError(f"权限不足，无法读取 '{path}'", retryable=True, retry_after=1.0)
         except Exception as e:
             return f"错误：{e}"
 

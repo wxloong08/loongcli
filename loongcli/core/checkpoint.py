@@ -34,6 +34,7 @@ class CheckpointManager:
         self._git_available: bool | None = None
         self._snapshots: dict[str, _Snapshot] = {}
         self._backup_dir = Path.home() / ".loongcli" / "checkpoints"
+        self._cleanup_orphans()
 
     @property
     def is_git_repo(self) -> bool:
@@ -97,21 +98,56 @@ class CheckpointManager:
         self._cleanup_old()
         return ckpt_id
 
+    def save_workdir(self) -> str | None:
+        """Checkpoint the entire working directory via git stash (no specific files)."""
+        if not self.is_git_repo:
+            return None
+        ckpt_id = f"loongcli-ckpt-{uuid.uuid4().hex[:12]}"
+        snap = _Snapshot(ckpt_id=ckpt_id)
+        try:
+            result = subprocess.run(
+                ["git", "stash", "push", "--include-untracked", "-m", ckpt_id],
+                cwd=self.cwd, capture_output=True, text=True,
+            )
+            if result.returncode == 0 and "No local changes" not in result.stdout:
+                snap.has_stash = True
+                self._snapshots[ckpt_id] = snap
+                self._cleanup_old()
+                return ckpt_id
+        except Exception:
+            logger.debug("git stash (workdir) failed", exc_info=True)
+        return None
+
+    def _find_stash_index(self, ckpt_id: str) -> str | None:
+        """Find stash index by checkpoint message. Returns 'stash@{N}' or None."""
+        try:
+            result = subprocess.run(
+                ["git", "stash", "list"],
+                cwd=self.cwd, capture_output=True, text=True,
+            )
+            for line in result.stdout.split("\n"):
+                if ckpt_id in line:
+                    return line.split(":")[0].strip()
+        except Exception:
+            logger.debug("git stash list failed", exc_info=True)
+        return None
+
     def restore(self, ckpt_id: str) -> bool:
         """Restore files from a checkpoint. Returns True on success."""
         snap = self._snapshots.get(ckpt_id)
         if not snap:
             return False
 
-        # Try git stash first (handles tracked/untracked restore atomically)
         if snap.has_stash:
-            try:
-                subprocess.run(
-                    ["git", "stash", "pop", "stash@{0}"],
-                    cwd=self.cwd, capture_output=True, text=True,
-                )
-            except Exception:
-                logger.debug("git stash pop failed, using file backup", exc_info=True)
+            stash_ref = self._find_stash_index(ckpt_id)
+            if stash_ref:
+                try:
+                    subprocess.run(
+                        ["git", "stash", "pop", stash_ref],
+                        cwd=self.cwd, capture_output=True, text=True,
+                    )
+                except Exception:
+                    logger.debug("git stash pop failed, using file backup", exc_info=True)
 
         # File backup restore (always works, fills gaps git stash missed)
         for rel_path, backup_path in snap.backed_files.items():
@@ -130,21 +166,15 @@ class CheckpointManager:
             return False
 
         if snap.has_stash:
-            try:
-                stash_list = subprocess.run(
-                    ["git", "stash", "list"],
-                    cwd=self.cwd, capture_output=True, text=True,
-                )
-                for line in stash_list.stdout.split("\n"):
-                    if ckpt_id in line:
-                        idx = line.split(":")[0].strip()
-                        subprocess.run(
-                            ["git", "stash", "drop", idx],
-                            cwd=self.cwd, capture_output=True, text=True,
-                        )
-                        break
-            except Exception:
-                logger.debug("git stash drop failed", exc_info=True)
+            stash_ref = self._find_stash_index(ckpt_id)
+            if stash_ref:
+                try:
+                    subprocess.run(
+                        ["git", "stash", "drop", stash_ref],
+                        cwd=self.cwd, capture_output=True, text=True,
+                    )
+                except Exception:
+                    logger.debug("git stash drop failed", exc_info=True)
 
         self._cleanup_snapshot(ckpt_id, snap)
         return True
@@ -165,3 +195,16 @@ class CheckpointManager:
         while len(self._snapshots) > MAX_CHECKPOINTS:
             oldest_id = next(iter(self._snapshots))
             self.discard(oldest_id)
+
+    def _cleanup_orphans(self, max_age_days: int = 7) -> None:
+        """Remove orphaned backup dirs older than max_age_days on startup."""
+        if not self._backup_dir.exists():
+            return
+        cutoff = datetime.now().timestamp() - max_age_days * 86400
+        for d in self._backup_dir.iterdir():
+            if d.is_dir() and d.name.startswith("loongcli-ckpt-"):
+                try:
+                    if d.stat().st_mtime < cutoff:
+                        shutil.rmtree(d, ignore_errors=True)
+                except OSError:
+                    pass
