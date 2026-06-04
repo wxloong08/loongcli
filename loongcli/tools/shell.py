@@ -4,6 +4,8 @@ import platform
 from loongcli.tools.base import Tool
 from loongcli.core.events import ShellOutput
 
+_GRACEFUL_WAIT = 3  # seconds to wait between terminate and kill
+
 
 class ShellTool(Tool):
     name = "shell"
@@ -71,30 +73,69 @@ class ShellTool(Tool):
                 )
                 await process.wait()
             except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                output = "\n".join(stdout_lines + stderr_lines).strip()
-                if output:
-                    return f"⚠ 命令超时（{timeout}秒）\n{output}"
-                return f"⚠ 命令超时（{timeout}秒）"
+                return await self._handle_timeout(
+                    process, timeout, stdout_lines, stderr_lines,
+                )
 
-            output_parts = []
-            if stdout_lines:
-                output_parts.append("\n".join(stdout_lines))
-            if stderr_lines:
-                output_parts.append("\n".join(stderr_lines))
+            output = _build_result(stdout_lines, stderr_lines, process.returncode)
+            return output
 
-            output = "\n".join(output_parts).strip()
-
-            if process.returncode != 0:
-                output = f"[exit code: {process.returncode}]\n{output}"
-
-            if len(output) > 10000:
-                output = output[:10000] + "\n... (output truncated)"
-
-            return output if output else "(no output)"
-
-        except asyncio.TimeoutError:
-            return f"⚠ 命令超时（{timeout}秒）"
         except Exception as e:
             return f"错误：{e}"
+
+    async def _handle_timeout(
+        self, process, timeout: int,
+        stdout_lines: list[str], stderr_lines: list[str],
+    ) -> str:
+        """Graceful shutdown: terminate → wait → kill."""
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_GRACEFUL_WAIT)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+
+        output_lines = stdout_lines + stderr_lines
+        if output_lines:
+            output = "\n".join(output_lines).strip()
+            return f"⚠ 命令超时（{timeout}秒）\n{output}\n\n[... 进程已终止]"
+        return f"⚠ 命令超时（{timeout}秒）\n[... 进程已终止]"
+
+
+def _build_result(stdout_lines: list[str], stderr_lines: list[str], returncode: int) -> str:
+    """Build result string with exit code hint."""
+    parts = []
+    if stdout_lines:
+        parts.append("\n".join(stdout_lines))
+    if stderr_lines:
+        parts.append("\n".join(stderr_lines))
+
+    output = "\n".join(parts).strip()
+
+    if returncode != 0:
+        hint = _exit_code_hint(returncode)
+        if hint:
+            output = f"[exit code: {returncode} — {hint}]\n{output}"
+        else:
+            output = f"[exit code: {returncode}]\n{output}"
+
+    if len(output) > 10000:
+        output = output[:10000] + "\n... (output truncated)"
+
+    return output if output else "(no output)"
+
+
+def _exit_code_hint(code: int) -> str:
+    """Return a human-readable hint for common exit codes."""
+    if code == 1:
+        return "一般错误"
+    if code == 2:
+        return "命令用法错误（参数可能不正确）"
+    if code in (126, 127):
+        return "命令不存在或不可执行（请检查是否安装）"
+    if platform.system() != "Windows":
+        if code == 137:
+            return "进程被 SIGKILL 终止（可能是 OOM）"
+        if code == 139:
+            return "段错误 SIGSEGV（内存访问越界）"
+    return ""

@@ -54,3 +54,28 @@ async def test_grep_case_insensitive(tool, project_dir):
 def test_tool_schema(tool):
     assert tool.name == "grep"
     assert "pattern" in tool.parameters["properties"]
+
+
+@pytest.mark.asyncio
+async def test_grep_skips_large_files(tool, tmp_path, monkeypatch):
+    """Files exceeding _MAX_FILE_SIZE should be skipped."""
+    import loongcli.tools.grep_tool as mod
+
+    monkeypatch.setattr(mod, "_MAX_FILE_SIZE", 10)  # 10 bytes only
+    f = tmp_path / "big.py"
+    f.write_text("def hello():\n    print('hello')\n", encoding="utf-8")  # > 10 bytes
+    result = await tool.execute(pattern="hello", path=str(tmp_path))
+    # Should find nothing since all files are "too large"
+    assert "未找到" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_reports_skipped_files(tool, tmp_path):
+    """Binary/unreadable files should be reported in skip notice."""
+    f = tmp_path / "binary.dat"
+    f.write_bytes(bytes(range(256)))
+    (tmp_path / "ok.py").write_text("hello world\n", encoding="utf-8")
+    result = await tool.execute(pattern="hello", path=str(tmp_path))
+    # binary file should be skipped and reported
+    assert "跳过" in result
+    assert "binary.dat" in result

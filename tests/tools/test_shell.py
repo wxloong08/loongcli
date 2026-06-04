@@ -98,3 +98,55 @@ async def test_streaming_timeout_partial(streaming_tool):
     assert "超时" in result
     before_events = [e for e in streaming_tool._collected if "before" in e.line]
     assert len(before_events) >= 1
+
+
+# ── exit code classification tests ──
+
+
+@pytest.mark.asyncio
+async def test_exit_code_1_shows_general_error(tool):
+    result = await tool.execute(
+        command="exit 1", timeout=5,
+    )
+    assert "exit code: 1" in result
+    assert "一般错误" in result
+
+
+@pytest.mark.asyncio
+async def test_exit_code_2_shows_usage_error(tool):
+    result = await tool.execute(command="exit 2", timeout=5)
+    assert "exit code: 2" in result
+    assert "用法错误" in result or "参数" in result
+
+
+@pytest.mark.asyncio
+async def test_exit_code_127_shows_not_found(tool):
+    result = await tool.execute(command="exit 127", timeout=5)
+    assert "exit code: 127" in result
+    assert "不存在" in result or "不可执行" in result
+
+
+@pytest.mark.asyncio
+async def test_exit_code_0_no_prefix(tool):
+    """Successful command should not show exit code prefix."""
+    result = await tool.execute(command="echo success", timeout=10)
+    assert "exit code" not in result
+    assert "success" in result
+
+
+@pytest.mark.asyncio
+async def test_unknown_exit_code_no_hint(tool):
+    """Exit code without a known hint shows just the code."""
+    result = await tool.execute(command="exit 99", timeout=5)
+    assert "exit code: 99" in result
+    assert "—" not in result  # no hint appended
+
+
+@pytest.mark.asyncio
+async def test_timeout_shows_terminated_notice(tool):
+    if platform.system() == "Windows":
+        cmd = "ping -n 10 127.0.0.1"
+    else:
+        cmd = "sleep 10"
+    result = await tool.execute(command=cmd, timeout=1)
+    assert "终止" in result or "timeout" in result.lower()

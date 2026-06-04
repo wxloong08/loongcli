@@ -36,3 +36,17 @@ def test_tool_schema(tool):
     assert tool.name == "write_file"
     assert "path" in tool.parameters["properties"]
     assert "content" in tool.parameters["properties"]
+
+
+@pytest.mark.asyncio
+async def test_write_rejects_oversized_content(tool, tmp_path, monkeypatch):
+    """Content exceeding _MAX_CONTENT_SIZE should be rejected."""
+    import loongcli.tools.write_file as mod
+
+    monkeypatch.setattr(mod, "_MAX_CONTENT_SIZE", 100)
+    result = await tool.execute(
+        path=str(tmp_path / "big.txt"),
+        content="x" * 200,
+    )
+    assert "过大" in result or "错误" in result
+    assert not (tmp_path / "big.txt").exists()

@@ -1,4 +1,6 @@
-"""Test skill auto-activation with real DeepSeek API."""
+"""Test skill auto-activation with real DeepSeek API.
+Not designed for pytest — run directly: python tests/e2e_skill_test.py
+"""
 import asyncio
 import sys
 import os
@@ -18,8 +20,12 @@ from loongcli.security.permissions import PermissionChecker, PermissionMode
 from loongcli.skills.registry import SkillRegistry
 from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone
 
+import pytest
 
-async def test_skill(prompt: str, expect_skill: str | None):
+pytestmark = pytest.mark.skip(reason="requires real DeepSeek API — run directly with python tests/e2e_skill_test.py")
+
+
+async def _run_skill_test(prompt: str, expect_skill: str | None):
     cfg = Config.load()
     llm = LLMClient(api_key=cfg.api_key, model=cfg.model, base_url=cfg.base_url)
 
@@ -92,7 +98,7 @@ async def main():
         print(f"Expected skill: {expect or '(none)'}")
         print(f"{'='*60}")
         try:
-            await test_skill(prompt, expect)
+            await _run_skill_test(prompt, expect)
         except Exception as e:
             print(f"  ERROR: {e}\n")
 

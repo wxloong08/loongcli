@@ -489,3 +489,109 @@ class TestRebuildSystemPrompt:
         )
         agent._rebuild_system_prompt()
         assert len(agent.messages) == 0
+
+
+# ── agent-level retry tests ──
+
+
+class FlakyTool(Tool):
+    """Tool that fails once then succeeds."""
+    name = "flaky"
+    description = "Fails first call, succeeds on retry"
+    parameters = {"type": "object", "properties": {}}
+
+    def __init__(self):
+        super().__init__()
+        self.call_count = 0
+
+    async def execute(self) -> str:
+        self.call_count += 1
+        if self.call_count == 1:
+            from loongcli.tools.errors import ToolError
+            raise ToolError("transient disk error", retryable=True)
+        return f"succeeded on attempt {self.call_count}"
+
+
+class PermanentFailTool(Tool):
+    """Tool that always fails with a non-retryable error."""
+    name = "permanent"
+    description = "Always fails"
+    parameters = {"type": "object", "properties": {}}
+
+    async def execute(self) -> str:
+        from loongcli.tools.errors import ToolError
+        raise ToolError("permanent config error", retryable=False)
+
+
+@pytest.mark.asyncio
+async def test_agent_retries_on_retryable_tool_error():
+    """Agent should retry once when ToolError(retryable=True) is raised."""
+    from loongcli.core.events import AgentDone
+
+    llm = LLMClient(api_key="test")
+    tool = FlakyTool()
+    tool_chunks = _make_tool_call_chunks("call_1", "flaky", {})
+    text_chunks = _make_text_chunks(["done"])
+
+    call_count = 0
+
+    async def mock_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        src = tool_chunks if call_count == 1 else text_chunks
+        for c in src:
+            yield c
+
+    llm.chat_stream = mock_stream
+
+    registry = ToolRegistry()
+    registry.register(tool)
+    checker = PermissionChecker()
+
+    agent = AgentLoop(llm=llm, tool_registry=registry, permission_checker=checker)
+
+    events = []
+    async for event in agent.run_stream("use flaky"):
+        events.append(event)
+
+    results = [e for e in events if isinstance(e, ToolCallResult)]
+    assert len(results) == 1
+    assert "succeeded on attempt 2" in results[0].result
+    assert tool.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_does_not_retry_permanent_error():
+    """Agent should NOT retry when ToolError(retryable=False)."""
+    from loongcli.core.events import AgentDone
+
+    llm = LLMClient(api_key="test")
+    tool = PermanentFailTool()
+    tool_chunks = _make_tool_call_chunks("call_1", "permanent", {})
+    text_chunks = _make_text_chunks(["ok"])
+
+    call_count = 0
+
+    async def mock_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        src = tool_chunks if call_count == 1 else text_chunks
+        for c in src:
+            yield c
+
+    llm.chat_stream = mock_stream
+
+    registry = ToolRegistry()
+    registry.register(tool)
+    checker = PermissionChecker()
+
+    agent = AgentLoop(llm=llm, tool_registry=registry, permission_checker=checker)
+
+    events = []
+    async for event in agent.run_stream("use permanent"):
+        events.append(event)
+
+    results = [e for e in events if isinstance(e, ToolCallResult)]
+    assert len(results) == 1
+    assert "工具执行失败" in results[0].result
+    assert "permanent config error" in results[0].result

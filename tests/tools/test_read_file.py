@@ -45,3 +45,109 @@ async def test_read_file_has_line_numbers(tool, sample_file):
 def test_tool_schema(tool):
     assert tool.name == "read_file"
     assert "path" in tool.parameters["properties"]
+
+
+# ── encoding fallback tests ──
+
+
+@pytest.mark.asyncio
+async def test_utf8_no_encoding_annotation(tool, sample_file):
+    """UTF-8 file should not have encoding annotation."""
+    result = await tool.execute(path=sample_file)
+    assert "[编码：" not in result
+
+
+@pytest.mark.asyncio
+async def test_gbk_encoded_file(tool, tmp_path):
+    """GBK-encoded file → fallback to gbk, annotation added."""
+    f = tmp_path / "chinese_gbk.txt"
+    content = "你好世界\n第二行\n"
+    f.write_bytes(content.encode("gbk"))
+    result = await tool.execute(path=str(f))
+    assert "[编码：gbk]" in result
+    assert "你好世界" in result
+
+
+@pytest.mark.asyncio
+async def test_utf8_bom_file(tool, tmp_path):
+    """UTF-8 with BOM → utf-8-sig fallback."""
+    f = tmp_path / "bom.txt"
+    content = "line with BOM\n"
+    f.write_bytes(b"\xef\xbb\xbf" + content.encode("utf-8"))
+    result = await tool.execute(path=str(f))
+    assert "[编码：utf-8-sig]" in result
+
+
+@pytest.mark.asyncio
+async def test_binary_file_falls_back_to_latin1(tool, tmp_path):
+    """True binary file → latin-1 fallback (always succeeds)."""
+    f = tmp_path / "data.bin"
+    f.write_bytes(bytes(range(256)))
+    result = await tool.execute(path=str(f))
+    assert "[编码：latin-1]" in result
+    assert "错误" not in result
+
+
+@pytest.mark.asyncio
+async def test_cp936_fallback(tool, tmp_path):
+    """CP936 is a variant of GBK for extended characters."""
+    f = tmp_path / "cp936.txt"
+    # Some characters encode differently in cp936 vs gbk
+    content = "中文字符测试\n"
+    f.write_bytes(content.encode("cp936"))
+    result = await tool.execute(path=str(f))
+    assert "错误" not in result
+    assert "中文字符测试" in result
+
+
+# ── large file / streaming protection tests ──
+
+
+@pytest.mark.asyncio
+async def test_file_too_large_rejected(tool, tmp_path, monkeypatch):
+    """Files > 20MB should be rejected."""
+    import loongcli.tools.read_file as mod
+
+    monkeypatch.setattr(mod, "_MAX_FILE_MB", 0)  # reject any non-empty file
+    f = tmp_path / "big.txt"
+    f.write_text("hello\n", encoding="utf-8")
+    result = await tool.execute(path=str(f))
+    assert "过大" in result or "错误" in result
+
+
+@pytest.mark.asyncio
+async def test_skip_past_max_lines_rejected(tool, tmp_path, monkeypatch):
+    """Offset beyond _MAX_LINES_SKIP should be rejected."""
+    import loongcli.tools.read_file as mod
+
+    monkeypatch.setattr(mod, "_MAX_LINES_SKIP", 3)
+    f = tmp_path / "many.txt"
+    f.write_text("\n".join(str(i) for i in range(1, 100)), encoding="utf-8")
+    result = await tool.execute(path=str(f), offset=90)
+    assert "错误" in result
+
+
+@pytest.mark.asyncio
+async def test_large_file_streaming_shows_more_indicator(tool, tmp_path):
+    """Large file within limit → streamed with 'more' indicator."""
+    f = tmp_path / "large.txt"
+    lines = [f"line_{i}" for i in range(1, 50)]
+    f.write_text("\n".join(lines), encoding="utf-8")
+    result = await tool.execute(path=str(f), offset=1, limit=10)
+    assert "line_1" in result
+    assert "line_10" in result
+    assert "line_11" not in result  # past limit
+    assert "共" in result  # range header
+
+
+@pytest.mark.asyncio
+async def test_mid_file_offset_streaming(tool, tmp_path):
+    """Streaming from mid-file offset within limit."""
+    f = tmp_path / "mid.txt"
+    lines = [f"line_{i}" for i in range(1, 60)]
+    f.write_text("\n".join(lines), encoding="utf-8")
+    result = await tool.execute(path=str(f), offset=25, limit=5)
+    assert "line_25" in result
+    assert "line_29" in result
+    assert "line_24" not in result
+    assert "line_30" not in result

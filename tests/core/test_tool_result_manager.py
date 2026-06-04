@@ -104,3 +104,21 @@ def test_one_over_single_limit_is_truncated():
     result = mgr.process("tool", text)
     assert "已截断" in result
     assert len(mgr.truncated_calls) == 1
+
+
+def test_error_result_uses_higher_limit():
+    """Error messages get 16KB limit instead of 8KB."""
+    mgr = ToolResultManager()
+    error_text = "错误：" + "x" * (MAX_SINGLE_RESULT + 500)
+    result = mgr.process("read_file", error_text)
+    assert result == error_text  # within 16KB, not truncated
+
+
+def test_error_result_still_truncated_when_too_large():
+    """Error messages beyond 16KB still get truncated."""
+    from loongcli.core.tool_result_manager import MAX_ERROR_RESULT
+    mgr = ToolResultManager()
+    error_text = "⚠ " + "y" * (MAX_ERROR_RESULT + 500)
+    result = mgr.process("shell", error_text)
+    assert "已截断" in result
+    assert len(result) < len(error_text)

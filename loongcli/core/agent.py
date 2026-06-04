@@ -154,11 +154,8 @@ class AgentLoop:
         self._maybe_checkpoint(tool_name, args)
         tool = self.tool_registry._tools.get(tool_name)
         if not tool or not getattr(tool, 'supports_progress', False):
-            try:
-                yield ("__result__", await self.tool_registry.execute_by_name(tool_name, args))
-            except Exception as e:
-                logger.warning("Tool %s failed: %s", tool_name, e)
-                yield ("__error__", f"⚠ 工具执行失败: {e}")
+            async for kind, data in self._exec_with_retry(tool_name, args):
+                yield (kind, data)
             return
 
         queue = asyncio.Queue()
@@ -166,7 +163,7 @@ class AgentLoop:
 
         try:
             exec_task = asyncio.create_task(
-                self.tool_registry.execute_by_name(tool_name, args)
+                self._exec_with_retry_single(tool_name, args)
             )
 
             while not exec_task.done():
@@ -187,6 +184,33 @@ class AgentLoop:
             yield ("__error__", f"⚠ 工具执行失败: {e}")
         finally:
             tool._progress_callback = None
+
+    async def _exec_with_retry_single(self, tool_name: str, args: dict):
+        """Execute a tool once, used by progress-supporting tools (retry not
+        supported for streaming tools — too complex to re-stream)."""
+        return await self.tool_registry.execute_by_name(tool_name, args)
+
+    async def _exec_with_retry(self, tool_name: str, args: dict):
+        """Execute tool with one automatic retry on ToolError."""
+        from loongcli.tools.errors import ToolError
+
+        last_error = None
+        for attempt in range(2):
+            try:
+                result = await self.tool_registry.execute_by_name(tool_name, args)
+                yield ("__result__", result)
+                return
+            except ToolError as e:
+                last_error = e
+                if e.retryable and attempt == 0:
+                    await asyncio.sleep(e.retry_after)
+                    continue
+                yield ("__error__", f"⚠ 工具执行失败: {e.message}")
+                return
+            except Exception as e:
+                logger.warning("Tool %s failed: %s", tool_name, e)
+                yield ("__error__", f"⚠ 工具执行失败: {e}")
+                return
 
     def _detect_active_skill(self) -> str | None:
         for msg in reversed(self.messages):
