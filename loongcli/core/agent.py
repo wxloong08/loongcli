@@ -72,6 +72,7 @@ class AgentLoop:
         self.recall_engine = recall_engine
         self.auto_extractor = auto_extractor
         self.checkpoint_manager = checkpoint_manager
+        self.cost_tracker = None
         self._last_checkpoint: str | None = None
         self._files_modified_this_turn: list[str] = []
         from loongcli.core.verify_loop import VerifyState
@@ -302,6 +303,16 @@ class AgentLoop:
             self.token_usage["prompt_cache_hit_tokens"] += response.prompt_cache_hit_tokens
             self.token_usage["prompt_cache_miss_tokens"] += response.prompt_cache_miss_tokens
             self.token_usage["reasoning_tokens"] += response.reasoning_tokens
+
+            if self.cost_tracker:
+                usage_snap = {
+                    "prompt_tokens": response.prompt_tokens,
+                    "completion_tokens": response.completion_tokens,
+                    "prompt_cache_hit_tokens": response.prompt_cache_hit_tokens,
+                    "prompt_cache_miss_tokens": response.prompt_cache_miss_tokens,
+                    "reasoning_tokens": response.reasoning_tokens,
+                }
+                self.cost_tracker.record(self.role.value, self.llm.model, usage_snap)
 
             if not response.tool_calls:
                 self.messages.append({"role": "assistant", "content": response.content})

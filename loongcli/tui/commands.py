@@ -237,7 +237,7 @@ class ThinkCommand(SlashCommand):
 
 class UsageCommand(SlashCommand):
     name = "usage"
-    description = "查看当前会话 token 用量"
+    description = "查看当前会话 token 用量与费用"
 
     async def run(self, args: list[str], ctx: CommandContext) -> None:
         u = ctx.agent.token_usage
@@ -251,6 +251,18 @@ class UsageCommand(SlashCommand):
         lines.append(f"  completion: [bold]{u['completion_tokens']:,}[/bold]")
         if u["reasoning_tokens"] > 0:
             lines.append(f"    thinking:   [cyan]{u['reasoning_tokens']:,}[/cyan]")
+
+        ct = ctx.agent.cost_tracker
+        if ct and ct.total_cost > 0:
+            lines.append("")
+            lines.append(f"  [bold yellow]总费用: {ct.format_cost()}[/bold yellow]")
+            for role_name, rc in ct.roles.items():
+                if rc.calls > 0:
+                    lines.append(
+                        f"    {role_name}: {ct.format_cost(rc.cost_usd)} "
+                        f"({rc.calls} calls, {rc.model})"
+                    )
+
         ctx.console.print(Panel("\n".join(lines), title="Token 用量", border_style="cyan"))
 
 

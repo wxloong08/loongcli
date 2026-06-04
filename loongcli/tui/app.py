@@ -416,6 +416,8 @@ class TUI:
             if u["reasoning_tokens"] > 0:
                 comp_detail += f" (thinking {u['reasoning_tokens']:,})"
             parts.append(comp_detail)
+            if agent.cost_tracker and agent.cost_tracker.total_cost > 0:
+                parts.append(f"cost: {agent.cost_tracker.format_cost()}")
             self.console.print(Padding(
                 Text.from_markup(f"[dim]{' | '.join(parts)}[/dim]"),
                 self.PADDING,

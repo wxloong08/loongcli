@@ -41,6 +41,7 @@ from loongcli.mcp.manager import MCPManager
 from loongcli.hooks.manager import HookManager, HookEvent
 from loongcli.skills.registry import SkillRegistry
 from loongcli.tools.skill import SkillTool
+from loongcli.core.cost import CostTracker
 from loongcli.tui.app import TUI
 
 
@@ -138,6 +139,9 @@ async def _run_noninteractive(agent: AgentLoop, prompt: str, args, mcp: MCPManag
             result["reasoning_content"] = thinking_buffer
         if verbose:
             result["tool_calls"] = tool_log
+        result["usage"] = agent.token_usage
+        if agent.cost_tracker:
+            result["cost"] = agent.cost_tracker.summary_dict()
         sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2))
         sys.stdout.write("\n")
     elif not stream:
@@ -290,6 +294,7 @@ async def _async_main():
     auto_extractor = AutoExtractor(memory=memory, llm=utility_llm)
 
     checkpoint_mgr = CheckpointManager(cwd=Path.cwd())
+    cost_tracker = CostTracker()
 
     agent = AgentLoop(
         llm=llm,
@@ -308,6 +313,7 @@ async def _async_main():
         auto_extractor=auto_extractor,
         checkpoint_manager=checkpoint_mgr,
     )
+    agent.cost_tracker = cost_tracker
 
     if structured_state:
         # Structured resume: rebuild context from state instead of raw messages

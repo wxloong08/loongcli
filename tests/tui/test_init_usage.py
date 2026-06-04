@@ -15,6 +15,7 @@ def _make_ctx(tmp_path=None, token_usage=None):
         "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0,
         "reasoning_tokens": 0,
     }
+    agent.cost_tracker = None
     return CommandContext(console=console, agent=agent)
 
 
