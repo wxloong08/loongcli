@@ -407,6 +407,7 @@ class AgentLoop:
                     )
                     approved = await future
                     if approved:
+                        self.permission_checker.record_approval(tool_name, args)
                         result = None
                         async for kind, data in self._exec_tool_stream(tool_name, args):
                             if kind == "__progress__":
