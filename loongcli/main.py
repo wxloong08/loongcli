@@ -46,6 +46,8 @@ from loongcli.hooks.manager import HookManager, HookEvent
 from loongcli.skills.registry import SkillRegistry
 from loongcli.tools.skill import SkillTool
 from loongcli.core.cost import CostTracker
+from loongcli.lsp.server_manager import LSPServerManager
+from loongcli.lsp.tools import register_lsp_tools
 from loongcli.tui.app import TUI
 
 
@@ -290,6 +292,9 @@ async def _async_main():
     registry.register(enter_plan_tool)
     registry.register(exit_plan_tool)
 
+    lsp_manager = LSPServerManager(workspace_root=Path.cwd())
+    register_lsp_tools(registry, lsp_manager)
+
     system_prompt = get_system_prompt(model=cfg.model, memory=memory, mcp=mcp, plan_store=plan_store)
     if cfg.compact_threshold:
         threshold = cfg.compact_threshold
@@ -325,6 +330,7 @@ async def _async_main():
     )
     agent.cost_tracker = cost_tracker
     agent.plan_store = plan_store
+    agent.lsp_manager = lsp_manager
     enter_plan_tool.bind_agent(agent)
     exit_plan_tool.bind_agent(agent)
 
@@ -453,6 +459,7 @@ async def _async_main():
         })
         if not noninteractive:
             await mcp.disconnect_all()
+        await lsp_manager.shutdown_all()
 
 
 def main():

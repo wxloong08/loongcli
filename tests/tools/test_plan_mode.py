@@ -188,6 +188,11 @@ class TestPlanModeToolFiltering:
         assert "grep" in PLAN_MODE_TOOLS
         assert "plan" in PLAN_MODE_TOOLS
         assert "exit_plan_mode" in PLAN_MODE_TOOLS
+        assert "lsp_goto_definition" in PLAN_MODE_TOOLS
+        assert "lsp_find_references" in PLAN_MODE_TOOLS
+        assert "lsp_symbol_search" in PLAN_MODE_TOOLS
+        assert "lsp_hover" in PLAN_MODE_TOOLS
+        assert "lsp_diagnostics" in PLAN_MODE_TOOLS
         assert "write_file" not in PLAN_MODE_TOOLS
         assert "edit_file" not in PLAN_MODE_TOOLS
         assert "shell" not in PLAN_MODE_TOOLS

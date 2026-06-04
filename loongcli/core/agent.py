@@ -29,6 +29,8 @@ _MIN_RECALL_LENGTH = 4
 PLAN_MODE_TOOLS = frozenset({
     "read_file", "glob", "grep",
     "plan", "exit_plan_mode",
+    "lsp_goto_definition", "lsp_find_references",
+    "lsp_symbol_search", "lsp_hover", "lsp_diagnostics",
 })
 
 PLAN_MODE_SYSTEM_INJECTION = """\
@@ -107,6 +109,7 @@ class AgentLoop:
         self.checkpoint_manager = checkpoint_manager
         self.cost_tracker = None
         self.plan_store = None
+        self.lsp_manager = None
         self._plan_mode: bool = False
         self._active_plan_id: str | None = None
         self._last_checkpoint: str | None = None
@@ -506,6 +509,10 @@ class AgentLoop:
                         {"tool": tool_name, "arguments": args, "result": result},
                         tool_name=tool_name,
                     )
+
+                if self.lsp_manager and tool_name in ("edit_file", "write_file"):
+                    for fp in self._extract_file_args(tool_name, args):
+                        await self.lsp_manager.invalidate_doc(fp)
 
                 if (self._verify_state.is_active
                         and tool_name == "shell"

@@ -40,6 +40,11 @@ COORDINATOR_ALLOWED: frozenset[str] = frozenset({
     "read_file",
     "glob",
     "grep",
+    "lsp_goto_definition",
+    "lsp_find_references",
+    "lsp_symbol_search",
+    "lsp_hover",
+    "lsp_diagnostics",
 })
 
 
