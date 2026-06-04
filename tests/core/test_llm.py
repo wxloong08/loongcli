@@ -5,7 +5,7 @@ from loongcli.core.llm import LLMClient
 
 def test_llm_client_init():
     client = LLMClient(api_key="test-key")
-    assert client.model == "deepseek-chat"
+    assert client.model == "deepseek-v4-flash"
 
 
 def test_llm_client_custom_model():

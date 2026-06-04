@@ -11,23 +11,11 @@ logger = logging.getLogger(__name__)
 
 SUMMARY_TOKEN_RESERVE = 13000
 
-# Model context windows (tokens). Used to compute compact threshold dynamically.
-MODEL_MAX_TOKENS: dict[str, int] = {
-    "deepseek-chat": 65536,
-    "deepseek-reasoner": 65536,
-    "deepseek-v4-flash": 1048576,
-    "deepseek-v4-pro": 1048576,
-}
-
-DEFAULT_MODEL_MAX_TOKENS = 131072  # 128K safe fallback
-
 
 def model_context_window(model: str) -> int:
     """Return the max context window (tokens) for a known model, or a safe default."""
-    for prefix, size in MODEL_MAX_TOKENS.items():
-        if model.startswith(prefix):
-            return size
-    return DEFAULT_MODEL_MAX_TOKENS
+    from loongcli.core.provider import context_window
+    return context_window(model)
 
 
 COMPACT_INSTRUCTION = """\

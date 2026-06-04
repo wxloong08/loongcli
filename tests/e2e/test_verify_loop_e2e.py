@@ -65,7 +65,7 @@ async def test_system_prompt_includes_verify_section():
     """The system prompt includes the verify loop section."""
     from loongcli.core.prompts import get_system_prompt
 
-    prompt = get_system_prompt(model="deepseek-chat")
+    prompt = get_system_prompt(model="deepseek-v4-flash")
     assert "验证循环" in prompt
     assert "3 轮" in prompt
 

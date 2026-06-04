@@ -8,7 +8,6 @@ from pathlib import Path
 from rich.console import Console
 
 from loongcli.core.config import Config
-from loongcli.core.llm import LLMClient
 from loongcli.core.agent import AgentLoop
 from loongcli.core.compact import Compactor, model_context_window, SUMMARY_TOKEN_RESERVE
 from loongcli.core.prompts import get_system_prompt
@@ -36,6 +35,7 @@ from loongcli.memory.recall_engine import RecallEngine
 from loongcli.memory.auto_extract import AutoExtractor
 from loongcli.memory.conversation import ConversationStore
 from loongcli.core.checkpoint import CheckpointManager
+from loongcli.core.provider import ModelRouter
 from loongcli.security.permissions import PermissionChecker, PermissionMode
 from loongcli.mcp.manager import MCPManager
 from loongcli.hooks.manager import HookManager, HookEvent
@@ -165,7 +165,7 @@ async def _async_main():
     console = Console()
     cfg = Config.load()
 
-    if not cfg.api_key:
+    if not cfg.api_key and not cfg.providers:
         console.print("[bold red]错误：[/bold red]未设置 API Key")
         console.print("配置文件: [cyan]~/.loongcli/config.json[/cyan]  字段: [cyan]api_key[/cyan]")
         console.print("  或环境变量: [cyan]DEEPSEEK_API_KEY[/cyan]")
@@ -174,16 +174,11 @@ async def _async_main():
     prompt = _build_prompt(args)
     noninteractive = prompt is not None
 
-    llm = LLMClient(
-        api_key=cfg.api_key, model=cfg.model, base_url=cfg.base_url,
-        thinking=cfg.thinking, reasoning_effort=cfg.reasoning_effort,
-    )
-    sub_llm = None
-    if cfg.sub_model and cfg.sub_model != cfg.model:
-        sub_llm = LLMClient(
-            api_key=cfg.api_key, model=cfg.sub_model, base_url=cfg.base_url,
-            thinking=cfg.thinking, reasoning_effort=cfg.reasoning_effort,
-        )
+    router = ModelRouter.from_config(cfg)
+    llm = router.client("main")
+    sub_llm = router.client("sub")
+    if sub_llm.model == llm.model:
+        sub_llm = None
     memory_dir = Path.home() / ".loongcli" / "memory"
     migrate_kv_to_markdown(memory_dir)
     memory = MarkdownMemoryStore(base_dir=memory_dir)
@@ -282,20 +277,17 @@ async def _async_main():
     registry.register(TaskStatusTool(task_manager))
 
     system_prompt = get_system_prompt(model=cfg.model, memory=memory, mcp=mcp, plan_store=plan_store)
-    # Use user-configured threshold or auto-compute: model_max - summary_reserve
     if cfg.compact_threshold:
         threshold = cfg.compact_threshold
     else:
-        max_tokens = cfg.model_max_tokens or model_context_window(cfg.model)
+        max_tokens = router.context_window_for("main")
         threshold = max(0, max_tokens - SUMMARY_TOKEN_RESERVE)
 
     compactor = Compactor(llm=llm, threshold=threshold, plan_store=plan_store, task_manager=task_manager)
 
-    recall_llm = LLMClient(api_key=cfg.api_key, model="deepseek-chat", base_url=cfg.base_url)
-    recall_engine = RecallEngine(memory=memory, llm=recall_llm)
-
-    auto_extract_llm = LLMClient(api_key=cfg.api_key, model="deepseek-chat", base_url=cfg.base_url)
-    auto_extractor = AutoExtractor(memory=memory, llm=auto_extract_llm)
+    utility_llm = router.client("utility")
+    recall_engine = RecallEngine(memory=memory, llm=utility_llm)
+    auto_extractor = AutoExtractor(memory=memory, llm=utility_llm)
 
     checkpoint_mgr = CheckpointManager(cwd=Path.cwd())
 

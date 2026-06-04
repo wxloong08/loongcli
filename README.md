@@ -85,7 +85,7 @@ pip install -e .
 
 # Configure (any OpenAI-compatible API)
 mkdir ~/.loongcli
-echo '{"api_key": "your-api-key", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-chat"}' > ~/.loongcli/config.json
+echo '{"api_key": "your-api-key", "base_url": "https://api.deepseek.com/v1", "model": "deepseek-v4-flash"}' > ~/.loongcli/config.json
 
 # Run
 loongcli

@@ -50,6 +50,8 @@ class Config:
     hooks: dict[str, Any] = field(default_factory=dict)
     skill_dirs: list[str] = field(default_factory=list)
     model_profiles: dict[str, ModelProfile] = field(default_factory=dict)
+    providers: dict[str, Any] = field(default_factory=dict)
+    role_bindings: dict[str, Any] = field(default_factory=dict)
 
     def get_profile(self, name: str) -> ModelProfile | None:
         return self.model_profiles.get(name)
@@ -76,6 +78,25 @@ class Config:
                 max_tokens=parse_token_size(pdata.get("max_tokens", 0)),
             )
 
+        from loongcli.core.provider import ProviderConfig, RoleBinding
+        providers: dict[str, ProviderConfig] = {}
+        for name, pdata in file_data.get("providers", {}).items():
+            providers[name] = ProviderConfig(
+                name=name,
+                api_key=pdata.get("api_key", ""),
+                base_url=pdata.get("base_url", "https://api.deepseek.com"),
+            )
+
+        role_bindings: dict[str, RoleBinding] = {}
+        for name, rdata in file_data.get("roles", {}).items():
+            role_bindings[name] = RoleBinding(
+                provider=rdata.get("provider", "_default"),
+                model=rdata.get("model", "deepseek-v4-flash"),
+                thinking=rdata.get("thinking", False),
+                reasoning_effort=rdata.get("reasoning_effort", "max"),
+                context_window=parse_token_size(rdata.get("context_window", 0)),
+            )
+
         return cls(
             api_key=os.environ.get("DEEPSEEK_API_KEY") or file_data.get("api_key", ""),
             model=os.environ.get("DSCLI_MODEL") or file_data.get("model", "deepseek-v4-flash"),
@@ -89,4 +110,6 @@ class Config:
             mcp_servers=file_data.get("mcpServers", {}),
             hooks=file_data.get("hooks", {}),
             model_profiles=profiles,
+            providers=providers,
+            role_bindings=role_bindings,
         )

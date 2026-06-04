@@ -18,14 +18,14 @@ def test_load_from_file(tmp_path):
     p = tmp_path / "config.json"
     p.write_text(json.dumps({
         "api_key": "sk-file",
-        "model": "deepseek-reasoner",
+        "model": "deepseek-v4-pro",
         "base_url": "https://custom.api.com",
         "mcpServers": {"demo": {"command": "python", "args": ["s.py"]}},
     }), encoding="utf-8")
 
     cfg = Config.load(path=p)
     assert cfg.api_key == "sk-file"
-    assert cfg.model == "deepseek-reasoner"
+    assert cfg.model == "deepseek-v4-pro"
     assert cfg.base_url == "https://custom.api.com"
     assert "demo" in cfg.mcp_servers
 
@@ -64,7 +64,7 @@ def test_sub_model_from_file(tmp_path):
     p = tmp_path / "config.json"
     p.write_text(json.dumps({
         "api_key": "sk-test",
-        "model": "deepseek-reasoner",
+        "model": "deepseek-v4-pro",
         "sub_model": "deepseek-v4-flash",
     }), encoding="utf-8")
     cfg = Config.load(path=p)
