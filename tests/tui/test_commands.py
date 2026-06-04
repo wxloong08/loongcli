@@ -29,6 +29,10 @@ def _make_ctx(memory=None, tui=None):
         {"role": "assistant", "content": "hi"},
     ]
     agent._last_prompt_tokens = 100
+    agent.plan_mode = False
+    agent._plan_mode = False
+    agent._active_plan_id = None
+    agent.plan_store = None
     agent.llm = MagicMock()
     agent.llm.model = "deepseek-v4-flash"
     agent.compactor = MagicMock()

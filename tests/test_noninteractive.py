@@ -2,10 +2,11 @@ import pytest
 import json
 import sys
 from io import StringIO
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, AsyncMock
 from argparse import Namespace
 
-from loongcli.main import _build_prompt, _run_noninteractive, _brief
+from loongcli.main import _build_prompt, _run_noninteractive, _brief, _async_main
 from loongcli.core.agent import AgentLoop
 from loongcli.core.llm import LLMClient
 from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone, ConfirmRequest
@@ -60,6 +61,43 @@ def test_build_prompt_piped_stdin_with_arg():
 def test_brief_args():
     assert _brief({"a": "short"}) == "a=short"
     assert "..." in _brief({"a": "x" * 50})
+
+
+@pytest.mark.asyncio
+async def test_async_main_uses_module_path_import_before_memory_migration():
+    args = Namespace(
+        prompt=None,
+        continue_session=False,
+        resume=False,
+        dangerously_skip_permissions=False,
+        output_format="text",
+        no_stream=False,
+        verbose=False,
+    )
+    cfg = SimpleNamespace(
+        api_key="test-key",
+        providers={},
+        skill_dirs=[],
+        mcp_servers={},
+        hooks={},
+        model="test-model",
+        compact_threshold=None,
+    )
+    router = MagicMock()
+    router.client.side_effect = [
+        SimpleNamespace(model="test-model"),
+        SimpleNamespace(model="test-model"),
+    ]
+
+    with (
+        patch("loongcli.main._parse_args", return_value=args),
+        patch("loongcli.main._build_prompt", return_value=None),
+        patch("loongcli.main.Config.load", return_value=cfg),
+        patch("loongcli.main.ModelRouter.from_config", return_value=router),
+        patch("loongcli.main.migrate_kv_to_markdown", side_effect=RuntimeError("migration reached")),
+    ):
+        with pytest.raises(RuntimeError, match="migration reached"):
+            await _async_main()
 
 
 def _make_text_chunks(texts: list[str]):

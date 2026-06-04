@@ -30,6 +30,8 @@ from loongcli.tools.send_message import SendMessageTool
 from loongcli.tools.task_status import TaskStatusTool
 from loongcli.tools.wait_tasks import WaitTasksTool
 from loongcli.tools.stop_task import StopTaskTool
+from loongcli.tools.enter_plan_mode import EnterPlanModeTool
+from loongcli.tools.exit_plan_mode import ExitPlanModeTool
 from loongcli.core.task import TaskManager
 from loongcli.memory.markdown_store import MarkdownMemoryStore
 from loongcli.memory.migrate import migrate_kv_to_markdown
@@ -255,7 +257,6 @@ async def _async_main():
         else:
             print(f"MCP 连接失败: {e}", file=sys.stderr)
 
-    from pathlib import Path
     skill_registry = SkillRegistry(project_dir=Path.cwd(), extra_dirs=cfg.skill_dirs)
     skill_tool = SkillTool(skill_registry)
     registry.register(skill_tool)
@@ -283,6 +284,11 @@ async def _async_main():
     registry.register(TaskStatusTool(task_manager))
     registry.register(WaitTasksTool(task_manager))
     registry.register(StopTaskTool(task_manager))
+    enter_plan_tool = EnterPlanModeTool()
+    exit_plan_tool = ExitPlanModeTool()
+    exit_plan_tool.bind_plan_store(plan_store)
+    registry.register(enter_plan_tool)
+    registry.register(exit_plan_tool)
 
     system_prompt = get_system_prompt(model=cfg.model, memory=memory, mcp=mcp, plan_store=plan_store)
     if cfg.compact_threshold:
@@ -318,6 +324,9 @@ async def _async_main():
         checkpoint_manager=checkpoint_mgr,
     )
     agent.cost_tracker = cost_tracker
+    agent.plan_store = plan_store
+    enter_plan_tool.bind_agent(agent)
+    exit_plan_tool.bind_agent(agent)
 
     if structured_state:
         # Structured resume: rebuild context from state instead of raw messages
@@ -350,6 +359,9 @@ async def _async_main():
             content = f"{ATTACHMENT_MARKER}\n\n" + "\n\n".join(sections)
             agent.messages.append({"role": "user", "content": content})
             agent.messages.append({"role": "assistant", "content": ATTACHMENT_ACK})
+        resumed_plan_id = structured_state.get("plan_id")
+        if resumed_plan_id and plan_store.load(resumed_plan_id):
+            agent._active_plan_id = resumed_plan_id
     elif restored_messages:
         non_system = [m for m in restored_messages if m.get("role") != "system"]
         agent.messages = [agent.messages[0]] + non_system if agent.messages else non_system

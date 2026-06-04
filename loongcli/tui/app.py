@@ -16,7 +16,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from loongcli.core.agent import AgentLoop
-from loongcli.core.events import TextDelta, ThinkingDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress, ShellOutput
+from loongcli.core.events import TextDelta, ThinkingDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress, ShellOutput, PlanApproval
 from loongcli.core.intent import StopIntent, detect_stop_intent
 from loongcli.memory.markdown_store import MarkdownMemoryStore
 from loongcli.memory.conversation import ConversationStore
@@ -392,6 +392,36 @@ class TUI:
                         self.console.print("  [green]✓ 已确认[/green]")
                     else:
                         self.console.print("  [yellow]✗ 已拒绝[/yellow]")
+                    buffer = ""
+                    live = Live(console=self.console, refresh_per_second=8)
+                    live.start()
+
+                elif isinstance(event, PlanApproval):
+                    live.stop()
+                    self.console.print(Panel(
+                        Markdown(event.plan_summary),
+                        title="执行计划",
+                        border_style="cyan",
+                    ))
+                    try:
+                        plan_session = PromptSession()
+                        with patch_stdout():
+                            answer = await plan_session.prompt_async(
+                                "  确认执行？(y=执行 / n=取消 / 其他文字=修改建议) "
+                            )
+                        answer = answer.strip()
+                        if answer.lower() in ("y", "yes"):
+                            event.future.set_result("approve")
+                            self.console.print("  [green]✓ 计划已批准，开始执行[/green]")
+                        elif answer.lower() in ("n", "no", ""):
+                            event.future.set_result("cancel")
+                            self.console.print("  [yellow]✗ 计划已取消[/yellow]")
+                        else:
+                            event.future.set_result(answer)
+                            self.console.print(f"  [cyan]↻ 修改建议已提交[/cyan]")
+                    except (EOFError, KeyboardInterrupt):
+                        event.future.set_result("cancel")
+                        self.console.print("  [yellow]✗ 计划已取消[/yellow]")
                     buffer = ""
                     live = Live(console=self.console, refresh_per_second=8)
                     live.start()

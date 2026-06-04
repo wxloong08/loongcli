@@ -7,7 +7,7 @@ import re
 from typing import AsyncIterator, Callable
 
 from loongcli.core.llm import LLMClient
-from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress
+from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress, PlanApproval
 from loongcli.core.stream_collector import StreamCollector
 from loongcli.core.compact import Compactor, model_context_window
 from loongcli.core.context_collapse import should_collapse, collapse
@@ -25,6 +25,39 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_CALLS_PER_TURN = 200
 LOOP_DETECT_THRESHOLD = 3
 _MIN_RECALL_LENGTH = 4
+
+PLAN_MODE_TOOLS = frozenset({
+    "read_file", "glob", "grep",
+    "plan", "exit_plan_mode",
+})
+
+PLAN_MODE_SYSTEM_INJECTION = """\
+
+## 规划模式
+
+你已进入规划模式，只能使用只读工具（read_file, glob, grep）调研代码。
+
+工作流程：
+1. **调研** — 用只读工具探索代码库，理解任务涉及的文件、接口、依赖
+2. **规划** — 用 plan 工具创建结构化计划（标题 + 具体步骤，每步说明改哪个文件、怎么改）
+3. **提交** — 调用 exit_plan_mode 提交计划等待用户审批
+
+原则：
+- 不要猜测，先读代码再规划
+- 计划要具体到文件和函数级别
+- 有不确定的地方直接问用户
+- 计划控制在 10 步以内\
+"""
+
+ACTIVE_PLAN_INJECTION_TEMPLATE = """\
+
+## 活跃计划
+
+{plan_summary}
+
+按步骤执行。每完成一步，用 plan update_step 更新状态。
+完成所有步骤后，用 plan complete 关闭计划。\
+"""
 
 
 def _log_task_exception(task: asyncio.Task) -> None:
@@ -73,6 +106,9 @@ class AgentLoop:
         self.auto_extractor = auto_extractor
         self.checkpoint_manager = checkpoint_manager
         self.cost_tracker = None
+        self.plan_store = None
+        self._plan_mode: bool = False
+        self._active_plan_id: str | None = None
         self._last_checkpoint: str | None = None
         self._files_modified_this_turn: list[str] = []
         from loongcli.core.verify_loop import VerifyState
@@ -101,12 +137,36 @@ class AgentLoop:
         if self.conversation_store:
             self.conversation_store.save(self.messages)
 
+    def enter_plan_mode(self):
+        self._plan_mode = True
+
+    def exit_plan_mode(self, plan_id: str | None = None):
+        self._plan_mode = False
+        self._active_plan_id = plan_id
+
+    @property
+    def plan_mode(self) -> bool:
+        return self._plan_mode
+
+    def _build_plan_injection(self) -> str:
+        if self._plan_mode:
+            return PLAN_MODE_SYSTEM_INJECTION
+        if self._active_plan_id and self.plan_store:
+            plan = self.plan_store.load(self._active_plan_id)
+            if plan and plan.status == "active":
+                return ACTIVE_PLAN_INJECTION_TEMPLATE.format(
+                    plan_summary=plan.format_summary(),
+                )
+        return ""
+
     def _rebuild_system_prompt(self):
         if not self._system_prompt_builder:
             return
         if not self.messages or self.messages[0].get("role") != "system":
             return
-        self.messages[0] = {"role": "system", "content": self._system_prompt_builder()}
+        base = self._system_prompt_builder()
+        plan_injection = self._build_plan_injection()
+        self.messages[0] = {"role": "system", "content": base + plan_injection}
 
     @staticmethod
     def _tool_signature(name: str, args: dict) -> str:
@@ -272,9 +332,14 @@ class AgentLoop:
             tools = None
         else:
             schemas = self.tool_registry.get_tool_schemas(role=self.role)
+            if self._plan_mode:
+                schemas = [s for s in schemas if s["function"]["name"] in PLAN_MODE_TOOLS]
             if allowed_tools is not None:
                 schemas = [s for s in schemas if s["function"]["name"] in allowed_tools]
             tools = schemas or None
+
+        if self._plan_mode or self._active_plan_id:
+            self._rebuild_system_prompt()
 
         for iteration in range(self.max_iterations):
             self._result_manager.reset_turn()
@@ -447,6 +512,32 @@ class AgentLoop:
                         and isinstance(result, str)
                         and "[exit code:" in result):
                     self._verify_state.test_failed = True
+
+                if (tool_name == "exit_plan_mode"
+                        and isinstance(result, str)
+                        and result.startswith('{"__plan_approval__":')):
+                    approval_data = json.loads(result)
+                    plan_id = approval_data["plan_id"]
+                    plan_summary = approval_data["plan_summary"]
+                    approval_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+                    yield PlanApproval(
+                        plan_id=plan_id,
+                        plan_summary=plan_summary,
+                        future=approval_future,
+                    )
+                    user_response = await approval_future
+                    if user_response == "approve":
+                        self.exit_plan_mode(plan_id=plan_id)
+                        result = f"计划已批准。现在按计划执行，所有工具已恢复。\n\n{plan_summary}"
+                        self._rebuild_system_prompt()
+                        tools = self.tool_registry.get_tool_schemas(role=self.role)
+                    elif user_response == "cancel":
+                        self._plan_mode = False
+                        result = "用户取消了计划。已退出规划模式。"
+                        self._rebuild_system_prompt()
+                        tools = self.tool_registry.get_tool_schemas(role=self.role)
+                    else:
+                        result = f"用户要求修改计划：{user_response}\n请根据反馈调整计划，然后重新调用 exit_plan_mode 提交。"
 
                 yield ToolCallResult(tool_name=tool_name, result=result)
 

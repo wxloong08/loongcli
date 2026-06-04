@@ -67,3 +67,10 @@ class ConfirmRequest:
     arguments: dict[str, Any]
     risk_reason: str
     future: Any  # asyncio.Future[bool]
+
+
+@dataclass
+class PlanApproval:
+    plan_id: str
+    plan_summary: str
+    future: Any  # asyncio.Future[str] — "approve" / "cancel" / feedback text

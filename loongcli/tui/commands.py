@@ -313,65 +313,33 @@ LOONG_TEMPLATE = """\
 """
 
 
-PLAN_INSTRUCTION = (
-    "请先制定一个详细的分步执行计划，不要直接执行任何工具。"
-    "按步骤编号列出，每步说明要做什么、用什么工具、预期结果。"
-    "等用户确认后再开始执行。"
-)
-
-
 class PlanCommand(SlashCommand):
     name = "plan"
-    description = "先制定计划，确认后再执行"
-    usage = "<任务描述>"
+    description = "进入规划模式：先调研、再规划、用户审批后执行"
+    usage = "[任务描述]"
 
     async def run(self, args: list[str], ctx: CommandContext) -> None:
         if not args:
-            ctx.console.print(f"[yellow]用法: /{self.name} {self.usage}[/yellow]")
+            if ctx.agent.plan_mode:
+                ctx.console.print("[cyan]当前已在规划模式中[/cyan]")
+            elif ctx.agent._active_plan_id and ctx.agent.plan_store:
+                plan = ctx.agent.plan_store.load(ctx.agent._active_plan_id)
+                if plan:
+                    ctx.console.print(Panel(
+                        Markdown(plan.format_summary()),
+                        title="活跃计划", border_style="cyan",
+                    ))
+                else:
+                    ctx.console.print("[dim]没有活跃计划[/dim]")
+            else:
+                ctx.console.print(f"[yellow]用法: /{self.name} {self.usage}[/yellow]")
             return
+
+        ctx.agent.enter_plan_mode()
+        ctx.console.print("[cyan]已进入规划模式 — Agent 将先调研再规划[/cyan]")
 
         task_desc = " ".join(args)
-        plan_prompt = f"{PLAN_INSTRUCTION}\n\n任务：{task_desc}"
-
-        ctx.console.print("[cyan]📋 正在制定计划...[/cyan]")
-
-        from loongcli.core.events import TextDelta, AgentDone
-        from rich.live import Live
-        from rich.text import Text
-
-        plan_text = ""
-        live = Live(console=ctx.console, refresh_per_second=8)
-        live.start()
-        try:
-            async for event in ctx.agent.run_stream(plan_prompt, disable_tools=True):
-                if isinstance(event, TextDelta):
-                    plan_text += event.text
-                    try:
-                        live.update(Markdown(plan_text))
-                    except Exception:
-                        live.update(Text(plan_text))
-                elif isinstance(event, AgentDone):
-                    break
-        finally:
-            live.stop()
-
-        ctx.console.print(Panel(Markdown(plan_text), title="执行计划", border_style="cyan"))
-
-        try:
-            with patch_stdout():
-                answer = await ctx.tui._session.prompt_async(
-                    "确认执行此计划？(y/N) "
-                )
-            if answer.strip().lower() not in ("y", "yes"):
-                ctx.console.print("[yellow]✗ 已取消[/yellow]")
-                return
-        except (EOFError, KeyboardInterrupt):
-            ctx.console.print("[yellow]✗ 已取消[/yellow]")
-            return
-
-        ctx.console.print("[cyan]▶ 开始执行计划...[/cyan]")
-        execute_prompt = f"用户已确认以下计划，请严格按步骤执行：\n\n{plan_text}"
-        await ctx.tui._handle_agent_response(ctx.agent, execute_prompt)
+        await ctx.tui._handle_agent_response(ctx.agent, task_desc)
 
 
 class GoalCommand(SlashCommand):

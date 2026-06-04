@@ -18,6 +18,8 @@ SUBAGENT_BLACKLIST: frozenset[str] = frozenset({
     "stop_task",
     "memorize",
     "plan",
+    "enter_plan_mode",
+    "exit_plan_mode",
 })
 
 BACKGROUND_WHITELIST: frozenset[str] = frozenset({
