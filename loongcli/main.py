@@ -28,6 +28,8 @@ from loongcli.tools.agent_tool import AgentTool
 from loongcli.tools.batch_delegate import BatchDelegateTool
 from loongcli.tools.send_message import SendMessageTool
 from loongcli.tools.task_status import TaskStatusTool
+from loongcli.tools.wait_tasks import WaitTasksTool
+from loongcli.tools.stop_task import StopTaskTool
 from loongcli.core.task import TaskManager
 from loongcli.memory.markdown_store import MarkdownMemoryStore
 from loongcli.memory.migrate import migrate_kv_to_markdown
@@ -279,6 +281,8 @@ async def _async_main():
     ))
     registry.register(SendMessageTool(task_manager))
     registry.register(TaskStatusTool(task_manager))
+    registry.register(WaitTasksTool(task_manager))
+    registry.register(StopTaskTool(task_manager))
 
     system_prompt = get_system_prompt(model=cfg.model, memory=memory, mcp=mcp, plan_store=plan_store)
     if cfg.compact_threshold:

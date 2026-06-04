@@ -36,11 +36,13 @@ class Task:
 
 
 class TaskManager:
-    MAX_DEPTH = 2
+    MAX_DEPTH = 3
+    MAX_CONCURRENT = 8
 
     def __init__(self):
         self._tasks: dict[str, Task] = {}
         self._notifications: list[dict] = []
+        self._semaphore = asyncio.Semaphore(self.MAX_CONCURRENT)
 
     def register(self, task: Task):
         self._tasks[task.id] = task
@@ -58,7 +60,7 @@ class TaskManager:
         if task.status == TaskStatus.COMPLETED and task._agent_loop:
             task.status = TaskStatus.RUNNING
             task._async_task = asyncio.create_task(
-                self._run_agent(task, resume_message=message)
+                self._run_agent_with_limit(task, resume_message=message)
             )
             return f"已唤醒任务 {task_id}，消息已送达"
 
@@ -93,6 +95,55 @@ class TaskManager:
             f"结果：{notif['result']}"
         )
 
+    def stop(self, task_id: str, reason: str) -> str:
+        task = self._tasks.get(task_id)
+        if not task:
+            return f"未找到任务 {task_id}"
+        if task.status != TaskStatus.RUNNING:
+            return f"任务 {task_id} 已结束 ({task.status.value})，无需停止"
+        if task._async_task and not task._async_task.done():
+            task._async_task.cancel()
+        task.status = TaskStatus.FAILED
+        task.result = f"被停止: {reason}"
+        self.push_notification(task)
+        return f"已停止任务 {task_id}"
+
+    async def wait(self, task_ids: list[str], timeout: float = 300) -> dict:
+        results = []
+        pending_tasks = []
+
+        for tid in task_ids:
+            task = self._tasks.get(tid)
+            if not task:
+                results.append({"task_id": tid, "status": "not_found", "result": ""})
+            elif task.status != TaskStatus.RUNNING:
+                results.append({
+                    "task_id": tid,
+                    "status": task.status.value,
+                    "result": task.result,
+                })
+            else:
+                pending_tasks.append(task)
+
+        if pending_tasks:
+            aws = [t._async_task for t in pending_tasks if t._async_task]
+            if aws:
+                await asyncio.wait(aws, timeout=timeout)
+
+        timed_out = []
+        for task in pending_tasks:
+            entry = {
+                "task_id": task.id,
+                "status": task.status.value,
+                "result": task.result,
+            }
+            if task.status == TaskStatus.RUNNING:
+                entry["status"] = "running (timeout)"
+                timed_out.append(task.id)
+            results.append(entry)
+
+        return {"results": results, "timed_out": timed_out}
+
     async def create_and_run(
         self,
         prompt: str,
@@ -105,9 +156,13 @@ class TaskManager:
         self.register(task)
 
         task._async_task = asyncio.create_task(
-            self._run_agent(task)
+            self._run_agent_with_limit(task)
         )
         return task
+
+    async def _run_agent_with_limit(self, task: Task, resume_message: str | None = None):
+        async with self._semaphore:
+            await self._run_agent(task, resume_message)
 
     async def _run_agent(self, task: Task, resume_message: str | None = None):
         try:

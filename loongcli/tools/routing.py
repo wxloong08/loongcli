@@ -4,6 +4,7 @@ from enum import Enum
 
 class AgentRole(Enum):
     MAIN = "main"
+    COORDINATOR = "coordinator"
     SUBAGENT = "subagent"
     BACKGROUND = "background"
 
@@ -13,6 +14,8 @@ SUBAGENT_BLACKLIST: frozenset[str] = frozenset({
     "batch_delegate",
     "send_message",
     "task_status",
+    "wait_tasks",
+    "stop_task",
     "memorize",
     "plan",
 })
@@ -26,10 +29,23 @@ BACKGROUND_WHITELIST: frozenset[str] = frozenset({
     "grep",
 })
 
+COORDINATOR_ALLOWED: frozenset[str] = frozenset({
+    "delegate",
+    "wait_tasks",
+    "stop_task",
+    "send_message",
+    "task_status",
+    "read_file",
+    "glob",
+    "grep",
+})
+
 
 def filter_tools(tools: dict[str, object], role: AgentRole) -> dict[str, object]:
     if role == AgentRole.MAIN:
         return tools
+    if role == AgentRole.COORDINATOR:
+        return {n: t for n, t in tools.items() if n in COORDINATOR_ALLOWED}
     if role == AgentRole.SUBAGENT:
         return {n: t for n, t in tools.items() if n not in SUBAGENT_BLACKLIST}
     if role == AgentRole.BACKGROUND:
