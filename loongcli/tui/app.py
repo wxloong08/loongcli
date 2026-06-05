@@ -118,8 +118,20 @@ class TUI:
         for msg in messages:
             if msg.get("role") == "user":
                 content = msg.get("content", "")
-                if content:
+                if content and not self._is_compact_message(content):
                     session.history.append_string(content)
+
+    @staticmethod
+    def _is_compact_message(content: str) -> bool:
+        if not content:
+            return False
+        return (
+            content.startswith("[compact-boundary]")
+            or content.startswith("[压缩后上下文恢复]")
+            or content.startswith("[对话历史摘要]")
+            or content == "好的，我已了解之前的对话内容。请继续。"
+            or content == "好的，我已了解恢复的上下文信息，继续工作。"
+        )
 
     def render_history(self, messages: list[dict], max_recent: int = 5):
         conversations: list[tuple[str, str]] = []
@@ -127,6 +139,8 @@ class TUI:
             role = msg.get("role", "")
             content = msg.get("content", "")
             if role == "system":
+                continue
+            if self._is_compact_message(content):
                 continue
             if role == "user":
                 conversations.append(("user", content or ""))

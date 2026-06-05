@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 from loongcli.core.verify_loop import (
     VerifyState,
     build_verify_prompt,
+    detect_test_failure,
     MAX_VERIFY_ROUNDS,
 )
 
@@ -98,6 +99,47 @@ class TestBuildVerifyPrompt:
         # The error in the prompt should be truncated to ~3000 chars
         error_in_prompt = prompt.count("x")
         assert error_in_prompt <= 3100  # allow small overhead
+
+
+class TestDetectTestFailure:
+    def test_exit_code_0_is_not_failure(self):
+        output = "[exit code: 0]\n15 passed in 0.17s"
+        assert not detect_test_failure(output)
+
+    def test_exit_code_1_all_passed_is_not_failure(self):
+        """PowerShell stderr false positive: exit code 1 but all tests pass."""
+        output = (
+            "[exit code: 1 — 一般错误]\n"
+            "================= 980 passed, 3 warnings in 90.70s =================="
+        )
+        assert not detect_test_failure(output)
+
+    def test_exit_code_1_with_failures_is_failure(self):
+        output = (
+            "[exit code: 1 — 一般错误]\n"
+            "================= 3 failed, 977 passed in 90.70s =================="
+        )
+        assert detect_test_failure(output)
+
+    def test_exit_code_1_no_pytest_output_is_failure(self):
+        output = "[exit code: 1 — 一般错误]\nSyntaxError: invalid syntax"
+        assert detect_test_failure(output)
+
+    def test_no_exit_code_is_not_failure(self):
+        output = "some random shell output"
+        assert not detect_test_failure(output)
+
+    def test_exit_code_0_passed_and_failed_zero(self):
+        output = "[exit code: 0]\n5 passed, 0 failed"
+        assert not detect_test_failure(output)
+
+    def test_exit_code_1_passed_and_0_failed_is_not_failure(self):
+        output = "[exit code: 1 — 一般错误]\n22 passed, 0 failed in 0.45s"
+        assert not detect_test_failure(output)
+
+    def test_exit_code_2_no_tests_collected(self):
+        output = "[exit code: 2 — 错误]\nno tests ran"
+        assert detect_test_failure(output)
 
 
 # --- AgentLoop integration ---

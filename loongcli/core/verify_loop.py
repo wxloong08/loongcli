@@ -1,9 +1,37 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 MAX_VERIFY_ROUNDS = 3
+
+_EXIT_CODE_RE = re.compile(r"\[exit code: (\d+)")
+_PYTEST_PASSED_RE = re.compile(r"(\d+) passed")
+_PYTEST_FAILED_RE = re.compile(r"(\d+) failed")
+
+
+def detect_test_failure(shell_output: str) -> bool:
+    """Determine if shell output indicates test failure.
+
+    Handles false positives: PowerShell returns exit code 1 when pytest
+    prints deprecation warnings to stderr, even when all tests pass.
+    """
+    m = _EXIT_CODE_RE.search(shell_output)
+    if not m:
+        return False
+    exit_code = int(m.group(1))
+    if exit_code == 0:
+        return False
+
+    passed = _PYTEST_PASSED_RE.search(shell_output)
+    failed = _PYTEST_FAILED_RE.search(shell_output)
+    if passed and not failed:
+        return False
+    if passed and failed and int(failed.group(1)) == 0:
+        return False
+
+    return True
 
 
 @dataclass

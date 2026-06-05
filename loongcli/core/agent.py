@@ -519,9 +519,10 @@ class AgentLoop:
 
                 if (self._verify_state.is_active
                         and tool_name == "shell"
-                        and isinstance(result, str)
-                        and "[exit code:" in result):
-                    self._verify_state.test_failed = True
+                        and isinstance(result, str)):
+                    from loongcli.core.verify_loop import detect_test_failure
+                    if detect_test_failure(result):
+                        self._verify_state.test_failed = True
 
                 if (tool_name == "exit_plan_mode"
                         and isinstance(result, str)
