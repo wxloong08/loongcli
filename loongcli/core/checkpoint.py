@@ -82,21 +82,6 @@ class CheckpointManager:
             except (PermissionError, OSError) as e:
                 logger.debug("checkpoint copy skipped %s: %s", f, e)
 
-        # Also try git stash (optional optimization)
-        if self.is_git_repo:
-            try:
-                result = subprocess.run(
-                    ["git", "stash", "push", "--include-untracked",
-                     "-m", ckpt_id, "--"] + existing,
-                    cwd=self.cwd,
-                    capture_output=True,
-                    text=True,
-                )
-                if result.returncode == 0:
-                    snap.has_stash = True
-            except Exception:
-                logger.debug("git stash failed", exc_info=True)
-
         self._snapshots[ckpt_id] = snap
         self._cleanup_old()
         return ckpt_id

@@ -54,7 +54,7 @@ def test_discard_in_git_repo(git_repo: Path):
 
 
 def test_save_tracked_files_in_git(git_repo: Path):
-    """Only tracked files are included in git stash."""
+    """Both tracked and untracked files are backed up."""
     (git_repo / "bar.py").write_text("new file, not tracked")
     mgr = CheckpointManager(cwd=git_repo)
     ckpt_id = mgr.save(["foo.py", "bar.py"])
@@ -62,6 +62,24 @@ def test_save_tracked_files_in_git(git_repo: Path):
     (git_repo / "foo.py").write_text("modified")
     assert mgr.restore(ckpt_id)
     assert (git_repo / "foo.py").read_text() == "original"
+
+
+def test_save_does_not_remove_tracked_file(git_repo: Path):
+    """Regression: save() must NOT remove tracked files from the working tree."""
+    (git_repo / "foo.py").write_text("modified before checkpoint")
+    mgr = CheckpointManager(cwd=git_repo)
+    mgr.save(["foo.py"])
+    assert (git_repo / "foo.py").exists(), "Checkpoint removed tracked file!"
+    assert (git_repo / "foo.py").read_text() == "modified before checkpoint"
+
+
+def test_save_does_not_remove_untracked_file(git_repo: Path):
+    """Regression: save() must NOT remove untracked files from the working tree."""
+    (git_repo / "new_file.py").write_text("untracked content")
+    mgr = CheckpointManager(cwd=git_repo)
+    mgr.save(["new_file.py"])
+    assert (git_repo / "new_file.py").exists(), "Checkpoint removed untracked file!"
+    assert (git_repo / "new_file.py").read_text() == "untracked content"
 
 
 # --- File backup mode (no git) ---
