@@ -54,16 +54,20 @@ class GrepTool(Tool):
             raise ToolError(f"无效的正则表达式 — {e}", retryable=False)
 
         base = Path(path).resolve()
-        if not base.is_dir():
-            return f"错误：'{path}' 不是目录"
+        single_file = base.is_file()
+        if not single_file and not base.is_dir():
+            return f"错误：'{path}' 不存在"
 
         results: list[str] = []
         files_searched = 0
         files_skipped: list[str] = []
         total_files = 0
 
-        iterator = base.rglob(glob) if "**" in glob else base.glob(glob)
-        for file_path in sorted(iterator):
+        if single_file:
+            file_iter = [base]
+        else:
+            file_iter = sorted(base.rglob(glob) if "**" in glob else base.glob(glob))
+        for file_path in file_iter:
             total_files += 1
             if total_files > _MAX_TOTAL_FILES:
                 break
@@ -85,10 +89,13 @@ class GrepTool(Tool):
 
             for line_num, line in enumerate(text.splitlines(), 1):
                 if regex.search(line):
-                    try:
-                        rel = file_path.relative_to(base)
-                    except ValueError:
-                        rel = file_path
+                    if single_file:
+                        rel = file_path.name
+                    else:
+                        try:
+                            rel = file_path.relative_to(base)
+                        except ValueError:
+                            rel = file_path
                     results.append(f"{rel}:{line_num}: {line.strip()}")
                     if len(results) >= _MAX_RESULTS:
                         break

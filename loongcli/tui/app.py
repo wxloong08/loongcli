@@ -210,13 +210,16 @@ class TUI:
                 with patch_stdout():
                     user_input = await session.prompt_async()
             except (EOFError, KeyboardInterrupt):
+                sid = agent.conversation_store.session_id
+                self.console.print(f"\n[dim]再见！会话 [cyan]{sid}[/cyan] 已保存，[cyan]loongcli --continue[/cyan] 可继续[/dim]")
                 break
 
             user_input = user_input.strip()
             if not user_input:
                 continue
             if user_input == "/exit":
-                self.console.print("[dim]再见！[/dim]")
+                sid = agent.conversation_store.session_id
+                self.console.print(f"[dim]再见！会话 [cyan]{sid}[/cyan] 已保存，[cyan]loongcli --continue[/cyan] 可继续[/dim]")
                 break
 
             if user_input.startswith("/"):
@@ -287,6 +290,7 @@ class TUI:
                     live.update(Padding(Text(buffer), self.PADDING))
 
                 elif isinstance(event, ToolCallStart):
+                    live.update(Text(""))
                     live.stop()
                     if in_thinking:
                         in_thinking = False
@@ -430,6 +434,7 @@ class TUI:
                     pass
 
         finally:
+            live.update(Text(""))
             live.stop()
             if buffer.strip():
                 self.console.print(Padding(Markdown(buffer), self.PADDING))

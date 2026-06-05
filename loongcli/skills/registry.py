@@ -123,20 +123,17 @@ class SkillRegistry:
 
     def _scan_dir(self, base: Path):
         for entry in sorted(base.iterdir()):
-            if entry.is_dir():
-                skill_md = entry / "SKILL.md"
-                if not skill_md.is_file():
-                    skill_md = entry / "skill.md"
-                if skill_md.is_file():
-                    meta = _parse_skill_file(skill_md)
-                    if meta and meta.name not in self._skills:
-                        self._skills[meta.name] = meta
-                else:
-                    self._scan_nested_skills(entry)
-            elif entry.is_file() and entry.suffix == ".md":
-                meta = _parse_skill_file(entry)
+            if not entry.is_dir():
+                continue
+            skill_md = entry / "SKILL.md"
+            if not skill_md.is_file():
+                skill_md = entry / "skill.md"
+            if skill_md.is_file():
+                meta = _parse_skill_file(skill_md)
                 if meta and meta.name not in self._skills:
                     self._skills[meta.name] = meta
+            else:
+                self._scan_nested_skills(entry)
 
     def _scan_nested_skills(self, project_dir: Path):
         for prefix in (".claude/skills", ".loongcli/skills"):

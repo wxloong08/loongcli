@@ -142,12 +142,15 @@ class TestSkillRegistry:
         assert reg.get("debug") is not None
         assert reg.get("debug").name == "debug"
 
-    def test_scan_single_file_format(self, tmp_path):
+    def test_loose_md_files_ignored(self, tmp_path):
+        """Only SKILL.md inside directories should be loaded, not loose .md files."""
         skills_dir = tmp_path / ".loongcli" / "skills"
         skills_dir.mkdir(parents=True)
         (skills_dir / "hello.md").write_text(MINIMAL_SKILL, encoding="utf-8")
+        (skills_dir / "CLAUDE.md").write_text("# Not a skill", encoding="utf-8")
         reg = SkillRegistry(project_dir=tmp_path, personal_dir=tmp_path / "empty")
-        assert reg.get("hello") is not None
+        assert reg.get("hello") is None
+        assert len(reg.list_skills()) == 0
 
     def test_scan_personal_dir(self, tmp_path):
         personal = tmp_path / "personal"
@@ -179,8 +182,9 @@ description: 项目级调试工作流
     def test_list_skills(self, tmp_path):
         skills_dir = tmp_path / ".loongcli" / "skills"
         self._setup_skills(skills_dir, {"debug/": VALID_SKILL})
-        skills_dir.mkdir(parents=True, exist_ok=True)
-        (skills_dir / "hello.md").write_text(MINIMAL_SKILL, encoding="utf-8")
+        hello_dir = skills_dir / "hello"
+        hello_dir.mkdir(parents=True, exist_ok=True)
+        (hello_dir / "SKILL.md").write_text(MINIMAL_SKILL, encoding="utf-8")
 
         reg = SkillRegistry(project_dir=tmp_path, personal_dir=tmp_path / "empty")
         skills = reg.list_skills()
@@ -252,6 +256,16 @@ description: 项目级调试工作流
         reg = SkillRegistry(project_dir=None, personal_dir=tmp_path / "empty", extra_dirs=[tmp_path])
         meta = reg.get("debug")
         assert "系统化" in meta.description
+
+    def test_non_skill_md_silently_skipped(self, tmp_path):
+        """Loose .md files in skill dirs are completely ignored."""
+        skills_dir = tmp_path / ".loongcli" / "skills"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "CLAUDE.md").write_text("# Not a skill\nJust notes.", encoding="utf-8")
+        (skills_dir / "README.md").write_text("# Readme", encoding="utf-8")
+        (skills_dir / "hello.md").write_text(MINIMAL_SKILL, encoding="utf-8")
+        reg = SkillRegistry(project_dir=tmp_path, personal_dir=tmp_path / "empty")
+        assert len(reg.list_skills()) == 0
 
     def test_empty_registry(self, tmp_path):
         reg = SkillRegistry(project_dir=tmp_path, personal_dir=tmp_path / "empty")

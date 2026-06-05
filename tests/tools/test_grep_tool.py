@@ -79,3 +79,25 @@ async def test_grep_reports_skipped_files(tool, tmp_path):
     # binary file should be skipped and reported
     assert "跳过" in result
     assert "binary.dat" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_single_file(tool, project_dir):
+    """Should accept a file path, not just a directory."""
+    file_path = str(Path(project_dir) / "a.py")
+    result = await tool.execute(pattern="hello", path=file_path)
+    assert "hello" in result
+    assert "a.py" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_single_file_no_match(tool, project_dir):
+    file_path = str(Path(project_dir) / "a.py")
+    result = await tool.execute(pattern="zzz_not_here", path=file_path)
+    assert "未找到" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_nonexistent_path(tool):
+    result = await tool.execute(pattern="hello", path="/does/not/exist")
+    assert "不存在" in result

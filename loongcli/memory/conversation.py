@@ -34,6 +34,10 @@ class ConversationStore:
             "title": "",
         }
 
+    @property
+    def session_path(self) -> Path:
+        return self.base_dir / f"{self.session_id}.json"
+
     def _session_path(self, session_id: str | None = None) -> Path:
         return self.base_dir / f"{session_id or self.session_id}.json"
 
