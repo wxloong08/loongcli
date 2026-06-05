@@ -61,7 +61,10 @@ class Config:
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:
+        default = path is None
         path = path or Path.home() / ".loongcli" / "config.json"
+        if default:
+            cls._ensure_config_dir(path)
         file_data: dict[str, Any] = {}
         if path.exists():
             try:
@@ -113,3 +116,23 @@ class Config:
             providers=providers,
             role_bindings=role_bindings,
         )
+
+    @staticmethod
+    def _ensure_config_dir(config_path: Path) -> None:
+        config_dir = config_path.parent
+        config_dir.mkdir(parents=True, exist_ok=True)
+        if not config_path.exists():
+            config_path.write_text(_DEFAULT_CONFIG, encoding="utf-8")
+
+
+_DEFAULT_CONFIG = json.dumps({
+    "api_key": "",
+    "model": "deepseek-v4-flash",
+    "base_url": "https://api.deepseek.com",
+    "thinking": True,
+    "reasoning_effort": "max",
+    "mcpServers": {},
+    "hooks": {},
+    "providers": {},
+    "roles": {},
+}, indent=2, ensure_ascii=False) + "\n"

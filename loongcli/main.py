@@ -176,9 +176,14 @@ async def _async_main():
     cfg = Config.load()
 
     if not cfg.api_key and not cfg.providers:
-        console.print("[bold red]错误：[/bold red]未设置 API Key")
-        console.print("配置文件: [cyan]~/.loongcli/config.json[/cyan]  字段: [cyan]api_key[/cyan]")
-        console.print("  或环境变量: [cyan]DEEPSEEK_API_KEY[/cyan]")
+        config_path = Path.home() / ".loongcli" / "config.json"
+        console.print("[bold cyan]欢迎使用 Loong CLI！[/bold cyan]\n")
+        console.print("首次运行需要配置 API Key。两种方式任选其一：")
+        console.print(f"\n  1. 编辑配置文件，填入 api_key：")
+        console.print(f"     [cyan]{config_path}[/cyan]")
+        console.print(f"\n  2. 设置环境变量：")
+        console.print(f"     [cyan]$env:DEEPSEEK_API_KEY = 'sk-...'[/cyan]")
+        console.print(f"\n获取 API Key → [underline]https://platform.deepseek.com/api_keys[/underline]")
         sys.exit(1)
 
     prompt = _build_prompt(args)

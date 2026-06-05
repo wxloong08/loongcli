@@ -79,6 +79,48 @@ def test_sub_model_from_env(tmp_path, monkeypatch):
     assert cfg.sub_model == "deepseek-v4-flash"
 
 
+class TestAutoCreateConfig:
+    def test_creates_dir_and_file(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        config_path = fake_home / ".loongcli" / "config.json"
+        assert not config_path.exists()
+
+        cfg = Config.load()
+
+        assert config_path.exists()
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert "api_key" in data
+        assert data["model"] == "deepseek-v4-flash"
+
+    def test_does_not_overwrite_existing(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        config_dir = fake_home / ".loongcli"
+        config_dir.mkdir(parents=True)
+        config_path = config_dir / "config.json"
+        config_path.write_text(json.dumps({"api_key": "sk-existing"}), encoding="utf-8")
+
+        cfg = Config.load()
+
+        assert cfg.api_key == "sk-existing"
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["api_key"] == "sk-existing"
+
+    def test_custom_path_skips_creation(self):
+        cfg = Config.load(path=Path("/nonexistent/config.json"))
+        assert cfg.api_key == ""
+
+    def test_default_template_is_valid_json(self):
+        from loongcli.core.config import _DEFAULT_CONFIG
+        data = json.loads(_DEFAULT_CONFIG)
+        assert isinstance(data, dict)
+        assert "api_key" in data
+        assert "mcpServers" in data
+
+
 class TestParseTokenSize:
     def test_plain_int(self):
         assert parse_token_size(131072) == 131072
