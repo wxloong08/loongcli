@@ -21,34 +21,49 @@ def test_format_tool_result_truncated():
     assert "截断" in result or "..." in result
 
 
-class TestIsCompactMessage:
+class TestIsInternalMessage:
     def test_compact_boundary(self):
-        assert TUI._is_compact_message("[compact-boundary] mode=auto | pre_tokens=100")
+        assert TUI._is_internal_message("[compact-boundary] mode=auto | pre_tokens=100")
 
     def test_context_recovery(self):
-        assert TUI._is_compact_message("[压缩后上下文恢复]\n\n## 最近文件\n...")
+        assert TUI._is_internal_message("[压缩后上下文恢复]\n\n## 最近文件\n...")
 
     def test_summary_marker(self):
-        assert TUI._is_compact_message("[对话历史摘要]\n## 1. 主要意图\n...")
+        assert TUI._is_internal_message("[对话历史摘要]\n## 1. 主要意图\n...")
 
     def test_summary_ack(self):
-        assert TUI._is_compact_message("好的，我已了解之前的对话内容。请继续。")
+        assert TUI._is_internal_message("好的，我已了解之前的对话内容。请继续。")
 
     def test_attachment_ack(self):
-        assert TUI._is_compact_message("好的，我已了解恢复的上下文信息，继续工作。")
+        assert TUI._is_internal_message("好的，我已了解恢复的上下文信息，继续工作。")
+
+    def test_short_ack(self):
+        assert TUI._is_internal_message("好的，已了解。")
+
+    def test_snip_marker(self):
+        assert TUI._is_internal_message("[snip] 已删除 10 条远古消息")
+
+    def test_tool_placeholder(self):
+        assert TUI._is_internal_message("[工具结果已省略]")
+
+    def test_verify_prompt(self):
+        assert TUI._is_internal_message("## 验证\n\n本轮修改了 3 个文件:")
+
+    def test_verify_retry(self):
+        assert TUI._is_internal_message("## 验证 — 第 2 轮重试\n\n上一轮验证失败。")
 
     def test_normal_user_message(self):
-        assert not TUI._is_compact_message("给loongcli加一个 /status 命令")
+        assert not TUI._is_internal_message("给loongcli加一个 /status 命令")
 
     def test_empty_content(self):
-        assert not TUI._is_compact_message("")
+        assert not TUI._is_internal_message("")
 
     def test_none_content(self):
-        assert not TUI._is_compact_message(None)
+        assert not TUI._is_internal_message(None)
 
 
-def test_render_history_skips_compact_messages():
-    """Compact boundary and recovery messages should not be rendered."""
+def test_render_history_skips_internal_messages():
+    """Internal messages (compact, verify, tool) should not be rendered."""
     tui = TUI()
     messages = [
         {"role": "system", "content": "system prompt"},
@@ -59,19 +74,20 @@ def test_render_history_skips_compact_messages():
         {"role": "assistant", "content": "好的，我已了解之前的对话内容。请继续。"},
         {"role": "user", "content": "[压缩后上下文恢复]\n\n## 最近文件\n### foo.py\n```\ncode\n```"},
         {"role": "assistant", "content": "好的，我已了解恢复的上下文信息，继续工作。"},
+        {"role": "tool", "content": "file contents here"},
+        {"role": "user", "content": "## 验证\n\n本轮修改了 2 个文件:\n- src/foo.py"},
         {"role": "user", "content": "continue working"},
     ]
-    # Build conversations list using same logic as render_history
     conversations = []
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content", "")
-        if role == "system":
+        if role in ("system", "tool"):
             continue
-        if tui._is_compact_message(content):
+        if tui._is_internal_message(content):
             continue
         if role == "user":
-            conversations.append(("user", content))
+            conversations.append(("user", content or ""))
         elif role == "assistant" and content:
             conversations.append(("assistant", content))
 

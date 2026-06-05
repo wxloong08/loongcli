@@ -68,7 +68,7 @@ def test_render_history_empty():
     assert output.strip() == ""
 
 
-def test_render_history_tool_messages():
+def test_render_history_skips_tool_messages():
     tui = TUI()
     tui.console = Console(file=StringIO(), force_terminal=True)
 
@@ -81,4 +81,6 @@ def test_render_history_tool_messages():
 
     tui.console.file.seek(0)
     output = tui.console.file.read()
-    assert "file contents" in output
+    assert "file contents" not in output
+    assert "read file" in output
+    assert "done" in output

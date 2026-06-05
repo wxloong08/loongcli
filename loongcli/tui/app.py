@@ -118,19 +118,24 @@ class TUI:
         for msg in messages:
             if msg.get("role") == "user":
                 content = msg.get("content", "")
-                if content and not self._is_compact_message(content):
+                if content and not self._is_internal_message(content):
                     session.history.append_string(content)
 
     @staticmethod
-    def _is_compact_message(content: str) -> bool:
+    def _is_internal_message(content: str) -> bool:
+        """Detect system-injected messages that shouldn't appear on resume."""
         if not content:
             return False
         return (
             content.startswith("[compact-boundary]")
             or content.startswith("[压缩后上下文恢复]")
             or content.startswith("[对话历史摘要]")
+            or content.startswith("[snip]")
+            or content.startswith("[工具")
+            or content.startswith("## 验证")
             or content == "好的，我已了解之前的对话内容。请继续。"
             or content == "好的，我已了解恢复的上下文信息，继续工作。"
+            or content == "好的，已了解。"
         )
 
     def render_history(self, messages: list[dict], max_recent: int = 5):
@@ -138,24 +143,22 @@ class TUI:
         for msg in messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
-            if role == "system":
+            if role in ("system", "tool"):
                 continue
-            if self._is_compact_message(content):
+            if self._is_internal_message(content):
                 continue
             if role == "user":
                 conversations.append(("user", content or ""))
             elif role == "assistant" and content:
                 conversations.append(("assistant", content))
-            elif role == "tool":
-                conversations.append(("tool", content or ""))
 
         if not conversations:
             return
 
-        if len(conversations) > max_recent * 3:
-            skipped = len(conversations) - max_recent * 3
+        if len(conversations) > max_recent * 2:
+            skipped = len(conversations) - max_recent * 2
             self.console.print(f"  [dim]... 还有 {skipped} 条历史消息 ...[/dim]\n")
-            conversations = conversations[-(max_recent * 3):]
+            conversations = conversations[-(max_recent * 2):]
 
         for role, content in conversations:
             if role == "user":
@@ -166,9 +169,6 @@ class TUI:
                     self.console.print(Markdown(text))
                 except Exception:
                     self.console.print(text)
-            elif role == "tool":
-                preview = content if len(content) <= 120 else content[:120] + "..."
-                self.console.print(f"  [dim]{preview}[/dim]")
         self.console.print()
 
     @staticmethod
