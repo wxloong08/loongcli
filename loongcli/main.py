@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from rich.console import Console
+from rich.panel import Panel
 
 from loongcli.core.config import Config
 from loongcli.core.agent import AgentLoop
@@ -170,24 +171,105 @@ def _brief(args: dict) -> str:
     return ", ".join(parts)
 
 
+def _onboarding(console: Console, cfg: Config) -> Config:
+    """Interactive first-run setup. Returns updated Config or original if skipped."""
+    config_path = Path.home() / ".loongcli" / "config.json"
+
+    console.print(Panel.fit(
+        "[bold]Loong CLI[/bold] — AI Agent 终端工具",
+        border_style="cyan",
+    ))
+    console.print()
+    console.print("首次运行，需要配置 API Key 才能使用。")
+    console.print(f"获取 Key → [underline]https://platform.deepseek.com/api_keys[/underline]")
+    console.print()
+
+    try:
+        api_key = input("请粘贴 API Key (sk-...): ").strip()
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[dim]已取消[/dim]")
+        return cfg
+
+    if not api_key:
+        console.print("[yellow]未输入 API Key[/yellow]")
+        console.print(f"你可以稍后编辑配置文件: [cyan]{config_path}[/cyan]")
+        return cfg
+
+    providers_menu = {
+        "1": ("DeepSeek", "https://api.deepseek.com", "deepseek-v4-flash"),
+        "2": ("OpenAI", "https://api.openai.com/v1", "gpt-4o"),
+        "3": ("Claude (via OpenAI-compatible proxy)", "", ""),
+        "4": ("Ollama (local)", "http://localhost:11434/v1", ""),
+    }
+
+    console.print()
+    console.print("[bold]选择 API 提供商：[/bold]")
+    for k, (name, _, _) in providers_menu.items():
+        marker = " [dim](默认)[/dim]" if k == "1" else ""
+        console.print(f"  {k}. {name}{marker}")
+
+    try:
+        choice = input("\n选择 [1-4，回车=1]: ").strip() or "1"
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[dim]已取消[/dim]")
+        return cfg
+
+    if choice in providers_menu:
+        provider_name, base_url, default_model = providers_menu[choice]
+    else:
+        provider_name, base_url, default_model = providers_menu["1"]
+
+    if not base_url:
+        try:
+            base_url = input(f"输入 {provider_name} 的 Base URL: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]已取消[/dim]")
+            return cfg
+
+    if not default_model:
+        try:
+            default_model = input("输入模型名称: ").strip() or "deepseek-v4-flash"
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]已取消[/dim]")
+            return cfg
+
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+
+    data["api_key"] = api_key
+    data["base_url"] = base_url
+    data["model"] = default_model
+    config_path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    console.print()
+    console.print(f"[green]✓ 配置已保存[/green] → [cyan]{config_path}[/cyan]")
+    console.print(f"  提供商: {provider_name}")
+    console.print(f"  模型:   {default_model}")
+    console.print(f"  Base:   {base_url}")
+    console.print()
+
+    return Config.load()
+
+
 async def _async_main():
     args = _parse_args()
     console = Console()
     cfg = Config.load()
 
-    if not cfg.api_key and not cfg.providers:
-        config_path = Path.home() / ".loongcli" / "config.json"
-        console.print("[bold cyan]欢迎使用 Loong CLI！[/bold cyan]\n")
-        console.print("首次运行需要配置 API Key。两种方式任选其一：")
-        console.print(f"\n  1. 编辑配置文件，填入 api_key：")
-        console.print(f"     [cyan]{config_path}[/cyan]")
-        console.print(f"\n  2. 设置环境变量：")
-        console.print(f"     [cyan]$env:DEEPSEEK_API_KEY = 'sk-...'[/cyan]")
-        console.print(f"\n获取 API Key → [underline]https://platform.deepseek.com/api_keys[/underline]")
-        sys.exit(1)
-
     prompt = _build_prompt(args)
     noninteractive = prompt is not None
+
+    if not cfg.api_key and not cfg.providers:
+        if sys.stdin.isatty() and not noninteractive:
+            cfg = _onboarding(console, cfg)
+        if not cfg.api_key and not cfg.providers:
+            console.print("[red]未配置 API Key[/red]，请编辑 ~/.loongcli/config.json 或设置 DEEPSEEK_API_KEY 环境变量")
+            sys.exit(1)
 
     router = ModelRouter.from_config(cfg)
     llm = router.client("main")
