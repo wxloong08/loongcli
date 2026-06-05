@@ -193,13 +193,16 @@ class AgentLoop:
         from loongcli.core.checkpoint import MODIFY_TOOLS
         if tool_name not in MODIFY_TOOLS:
             return
-        if tool_name == "shell":
-            self._last_checkpoint = self.checkpoint_manager.save_workdir()
-            return
-        files = self._extract_file_args(tool_name, args)
-        self._last_checkpoint = self.checkpoint_manager.save(files)
-        if self._last_checkpoint:
-            self._files_modified_this_turn.extend(files)
+        try:
+            if tool_name == "shell":
+                self._last_checkpoint = self.checkpoint_manager.save_workdir()
+                return
+            files = self._extract_file_args(tool_name, args)
+            self._last_checkpoint = self.checkpoint_manager.save(files)
+            if self._last_checkpoint:
+                self._files_modified_this_turn.extend(files)
+        except Exception:
+            logger.debug("checkpoint save failed", exc_info=True)
 
     def _check_loop(self, name: str, args: dict) -> str | None:
         sig = self._tool_signature(name, args)

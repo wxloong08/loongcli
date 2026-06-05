@@ -7,6 +7,11 @@ _MAX_FILES = 200
 _MAX_SCAN = 10_000
 _MAX_LIST_ITEMS = 50
 _SIMILAR_THRESHOLD = 0.5
+_SKIP_DIRS = frozenset({
+    ".venv", "venv", ".env", "node_modules", "__pycache__",
+    ".git", ".hg", ".svn", ".tox", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", "dist", "build", ".eggs", "*.egg-info",
+})
 
 
 class GlobTool(Tool):
@@ -40,6 +45,8 @@ class GlobTool(Tool):
                 scan_count += 1
                 if scan_count > _MAX_SCAN:
                     break
+                if any(p in _SKIP_DIRS for p in match.relative_to(base).parts):
+                    continue
                 if match.is_file():
                     files.append(match)
 

@@ -156,7 +156,7 @@ pip install pytest pytest-asyncio
 python -m pytest tests/ -q
 ```
 
-976 unit tests covering agent loop, tool execution, LSP integration, plan mode, sub-agents, permissions, compaction, memory, onboarding, and TUI.
+980 unit tests covering agent loop, tool execution, LSP integration, plan mode, sub-agents, permissions, compaction, memory, onboarding, and TUI.
 
 ## Project Structure
 
@@ -172,7 +172,7 @@ loongcli/
 ├── plan/           # Plan store, step tracking
 ├── skills/         # Skill registry, auto-activation
 └── hooks/          # Lifecycle hook system (4 events)
-tests/              # 968 unit tests
+tests/              # 980 unit tests
 ```
 
 ## License

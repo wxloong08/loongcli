@@ -9,6 +9,11 @@ from loongcli.tools.errors import ToolError
 _MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB per file
 _MAX_RESULTS = 500
 _MAX_TOTAL_FILES = 5000
+_SKIP_DIRS = frozenset({
+    ".venv", "venv", ".env", "node_modules", "__pycache__",
+    ".git", ".hg", ".svn", ".tox", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", "dist", "build", ".eggs",
+})
 
 
 class GrepTool(Tool):
@@ -73,6 +78,13 @@ class GrepTool(Tool):
                 break
             if not file_path.is_file():
                 continue
+            if not single_file:
+                try:
+                    parts = file_path.relative_to(base).parts
+                except ValueError:
+                    parts = ()
+                if any(p in _SKIP_DIRS for p in parts):
+                    continue
             files_searched += 1
 
             try:

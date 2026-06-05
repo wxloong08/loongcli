@@ -75,9 +75,12 @@ class CheckpointManager:
             src = self.cwd / f
             dst = backup_root / f
             dst.parent.mkdir(parents=True, exist_ok=True)
-            if src.exists():
-                shutil.copy2(src, dst)
-                snap.backed_files[f] = dst
+            try:
+                if src.exists():
+                    shutil.copy2(src, dst)
+                    snap.backed_files[f] = dst
+            except (PermissionError, OSError) as e:
+                logger.debug("checkpoint copy skipped %s: %s", f, e)
 
         # Also try git stash (optional optimization)
         if self.is_git_repo:
