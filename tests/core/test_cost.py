@@ -15,12 +15,12 @@ class TestGetPricing:
     def test_exact_match(self):
         p = get_pricing("deepseek-v4-flash")
         assert p is not None
-        assert p.input_per_m == 0.14
+        assert p.input_per_m == 1.0
 
     def test_prefix_match(self):
         p = get_pricing("deepseek-v4-flash-0601")
         assert p is not None
-        assert p.input_per_m == 0.14
+        assert p.input_per_m == 1.0
 
     def test_unknown_model(self):
         assert get_pricing("totally-unknown-model") is None
@@ -73,7 +73,7 @@ class TestCalcCost:
             "completion_tokens": 2_000,
         }
         cost = _calc_cost(pricing, usage)
-        expected = (10_000 * 0.14 + 40_000 * 0.014 + 2_000 * 0.28) / 1_000_000
+        expected = (10_000 * 1.0 + 40_000 * 0.02 + 2_000 * 2.0) / 1_000_000
         assert cost == pytest.approx(expected)
 
 
@@ -154,11 +154,22 @@ class TestFormatCost:
         ct = CostTracker()
         assert ct.format_cost(3.1415) == "$3.14"
 
-    def test_total_cost_default(self):
+    def test_total_cost_default_deepseek(self):
         ct = CostTracker()
         ct.record("main", "deepseek-v4-flash", {"prompt_tokens": 1000, "completion_tokens": 500})
         formatted = ct.format_cost()
+        assert formatted.startswith("¥")
+
+    def test_total_cost_default_openai(self):
+        ct = CostTracker()
+        ct.record("main", "gpt-4o", {"prompt_tokens": 1000, "completion_tokens": 500})
+        formatted = ct.format_cost()
         assert formatted.startswith("$")
+
+    def test_currency_override(self):
+        ct = CostTracker()
+        assert ct.format_cost(0.05, "¥") == "¥0.050"
+        assert ct.format_cost(0.05, "$") == "$0.050"
 
 
 # ── summary_dict ────────────────────────────────────────────────────
@@ -170,7 +181,8 @@ class TestSummaryDict:
         ct = CostTracker()
         ct.record("main", "deepseek-v4-flash", {"prompt_tokens": 1000, "completion_tokens": 500})
         d = ct.summary_dict()
-        assert "total_cost_usd" in d
+        assert "total_cost" in d
+        assert "currency" in d
         assert "roles" in d
         assert "main" in d["roles"]
         role = d["roles"]["main"]
@@ -178,12 +190,13 @@ class TestSummaryDict:
         assert role["prompt_tokens"] == 1000
         assert role["completion_tokens"] == 500
         assert role["calls"] == 1
-        assert role["cost_usd"] > 0
+        assert role["cost"] > 0
+        assert role["currency"] == "¥"
 
     def test_empty_tracker(self):
         ct = CostTracker()
         d = ct.summary_dict()
-        assert d["total_cost_usd"] == 0
+        assert d["total_cost"] == 0
         assert d["roles"] == {}
 
 
@@ -207,3 +220,11 @@ class TestPricingTable:
         assert "deepseek-v4-pro" in PRICING
         assert "gpt-4o" in PRICING
         assert "claude-opus-4-6" in PRICING
+
+    def test_deepseek_currency_is_rmb(self):
+        assert PRICING["deepseek-v4-flash"].currency == "¥"
+        assert PRICING["deepseek-v4-pro"].currency == "¥"
+
+    def test_openai_anthropic_currency_is_usd(self):
+        assert PRICING["gpt-4o"].currency == "$"
+        assert PRICING["claude-opus-4-6"].currency == "$"

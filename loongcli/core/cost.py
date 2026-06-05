@@ -5,17 +5,18 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class ModelPricing:
-    """Price per million tokens (USD)."""
+    """Price per million tokens."""
     input_per_m: float
     cached_per_m: float
     output_per_m: float
+    currency: str = "$"
 
 
 PRICING: dict[str, ModelPricing] = {
-    # DeepSeek
-    "deepseek-v4-flash": ModelPricing(0.14, 0.014, 0.28),
-    "deepseek-v4-pro": ModelPricing(2.19, 0.55, 8.76),
-    # OpenAI
+    # DeepSeek (RMB) — https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+    "deepseek-v4-flash": ModelPricing(1.0, 0.02, 2.0, "¥"),
+    "deepseek-v4-pro": ModelPricing(3.0, 0.025, 6.0, "¥"),
+    # OpenAI (USD)
     "gpt-4o": ModelPricing(2.50, 1.25, 10.00),
     "gpt-4o-mini": ModelPricing(0.15, 0.075, 0.60),
     "gpt-4.1": ModelPricing(2.00, 0.50, 8.00),
@@ -24,7 +25,7 @@ PRICING: dict[str, ModelPricing] = {
     "o3": ModelPricing(10.00, 2.50, 40.00),
     "o3-mini": ModelPricing(1.10, 0.275, 4.40),
     "o4-mini": ModelPricing(1.10, 0.275, 4.40),
-    # Anthropic
+    # Anthropic (USD)
     "claude-opus-4-6": ModelPricing(15.00, 3.75, 75.00),
     "claude-opus-4-7": ModelPricing(15.00, 3.75, 75.00),
     "claude-sonnet-4-6": ModelPricing(3.00, 0.75, 15.00),
@@ -72,7 +73,8 @@ class RoleCost:
     cache_hit_tokens: int = 0
     cache_miss_tokens: int = 0
     reasoning_tokens: int = 0
-    cost_usd: float = 0.0
+    cost: float = 0.0
+    currency: str = "$"
     calls: int = 0
 
 
@@ -81,6 +83,7 @@ class CostTracker:
         self._overrides = pricing_overrides
         self._roles: dict[str, RoleCost] = {}
         self.total_cost: float = 0.0
+        self._currency: str = "$"
 
     def record(self, role: str, model: str, usage: dict) -> float:
         """Record token usage for a role. Returns the incremental cost."""
@@ -99,8 +102,10 @@ class CostTracker:
         pricing = get_pricing(model, self._overrides)
         if pricing:
             delta = _calc_cost(pricing, usage)
-            rc.cost_usd += delta
+            rc.cost += delta
+            rc.currency = pricing.currency
             self.total_cost += delta
+            self._currency = pricing.currency
             return delta
         return 0.0
 
@@ -108,13 +113,18 @@ class CostTracker:
     def roles(self) -> dict[str, RoleCost]:
         return dict(self._roles)
 
-    def format_cost(self, usd: float | None = None) -> str:
-        v = usd if usd is not None else self.total_cost
+    @property
+    def currency(self) -> str:
+        return self._currency
+
+    def format_cost(self, value: float | None = None, currency: str | None = None) -> str:
+        v = value if value is not None else self.total_cost
+        sym = currency or self._currency
         if v < 0.01:
-            return f"${v:.4f}"
+            return f"{sym}{v:.4f}"
         if v < 1.0:
-            return f"${v:.3f}"
-        return f"${v:.2f}"
+            return f"{sym}{v:.3f}"
+        return f"{sym}{v:.2f}"
 
     def summary_dict(self) -> dict:
         roles = {}
@@ -126,10 +136,12 @@ class CostTracker:
                 "cache_hit_tokens": rc.cache_hit_tokens,
                 "cache_miss_tokens": rc.cache_miss_tokens,
                 "reasoning_tokens": rc.reasoning_tokens,
-                "cost_usd": round(rc.cost_usd, 6),
+                "cost": round(rc.cost, 6),
+                "currency": rc.currency,
                 "calls": rc.calls,
             }
         return {
-            "total_cost_usd": round(self.total_cost, 6),
+            "total_cost": round(self.total_cost, 6),
+            "currency": self._currency,
             "roles": roles,
         }

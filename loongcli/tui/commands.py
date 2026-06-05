@@ -259,7 +259,7 @@ class UsageCommand(SlashCommand):
             for role_name, rc in ct.roles.items():
                 if rc.calls > 0:
                     lines.append(
-                        f"    {role_name}: {ct.format_cost(rc.cost_usd)} "
+                        f"    {role_name}: {ct.format_cost(rc.cost, rc.currency)} "
                         f"({rc.calls} calls, {rc.model})"
                     )
 
