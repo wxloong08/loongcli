@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -14,78 +13,10 @@ def ckpt_mgr(tmp_path: Path) -> CheckpointManager:
     return CheckpointManager(cwd=tmp_path)
 
 
-@pytest.fixture
-def git_repo(tmp_path: Path) -> Path:
-    """Create a git repo with a committed file."""
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp_path, capture_output=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=tmp_path, capture_output=True,
-    )
-    (tmp_path / "foo.py").write_text("original")
-    subprocess.run(["git", "add", "foo.py"], cwd=tmp_path, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
-    return tmp_path
+# --- Save / Restore ---
 
 
-# --- Git mode ---
-
-
-def test_save_restore_in_git_repo(git_repo: Path):
-    mgr = CheckpointManager(cwd=git_repo)
-    ckpt_id = mgr.save(["foo.py"])
-    assert ckpt_id is not None
-
-    (git_repo / "foo.py").write_text("modified")
-    assert mgr.restore(ckpt_id)
-    assert (git_repo / "foo.py").read_text() == "original"
-
-
-def test_discard_in_git_repo(git_repo: Path):
-    mgr = CheckpointManager(cwd=git_repo)
-    ckpt_id = mgr.save(["foo.py"])
-    assert ckpt_id is not None
-    assert mgr.discard(ckpt_id)
-    assert ckpt_id not in mgr.list_checkpoints()
-
-
-def test_save_tracked_files_in_git(git_repo: Path):
-    """Both tracked and untracked files are backed up."""
-    (git_repo / "bar.py").write_text("new file, not tracked")
-    mgr = CheckpointManager(cwd=git_repo)
-    ckpt_id = mgr.save(["foo.py", "bar.py"])
-    assert ckpt_id is not None
-    (git_repo / "foo.py").write_text("modified")
-    assert mgr.restore(ckpt_id)
-    assert (git_repo / "foo.py").read_text() == "original"
-
-
-def test_save_does_not_remove_tracked_file(git_repo: Path):
-    """Regression: save() must NOT remove tracked files from the working tree."""
-    (git_repo / "foo.py").write_text("modified before checkpoint")
-    mgr = CheckpointManager(cwd=git_repo)
-    mgr.save(["foo.py"])
-    assert (git_repo / "foo.py").exists(), "Checkpoint removed tracked file!"
-    assert (git_repo / "foo.py").read_text() == "modified before checkpoint"
-
-
-def test_save_does_not_remove_untracked_file(git_repo: Path):
-    """Regression: save() must NOT remove untracked files from the working tree."""
-    (git_repo / "new_file.py").write_text("untracked content")
-    mgr = CheckpointManager(cwd=git_repo)
-    mgr.save(["new_file.py"])
-    assert (git_repo / "new_file.py").exists(), "Checkpoint removed untracked file!"
-    assert (git_repo / "new_file.py").read_text() == "untracked content"
-
-
-# --- File backup mode (no git) ---
-
-
-def test_save_restore_file_backup(ckpt_mgr: CheckpointManager, tmp_path: Path):
+def test_save_restore(ckpt_mgr: CheckpointManager, tmp_path: Path):
     (tmp_path / "bar.py").write_text("original")
     ckpt_id = ckpt_mgr.save(["bar.py"])
     assert ckpt_id is not None
@@ -93,6 +24,26 @@ def test_save_restore_file_backup(ckpt_mgr: CheckpointManager, tmp_path: Path):
     (tmp_path / "bar.py").write_text("modified")
     assert ckpt_mgr.restore(ckpt_id)
     assert (tmp_path / "bar.py").read_text() == "original"
+
+
+def test_save_does_not_remove_file(ckpt_mgr: CheckpointManager, tmp_path: Path):
+    """Regression: save() must NOT remove files from the working tree."""
+    (tmp_path / "foo.py").write_text("content")
+    ckpt_mgr.save(["foo.py"])
+    assert (tmp_path / "foo.py").exists()
+    assert (tmp_path / "foo.py").read_text() == "content"
+
+
+def test_save_absolute_path(ckpt_mgr: CheckpointManager, tmp_path: Path):
+    """Absolute paths should work correctly."""
+    (tmp_path / "foo.py").write_text("original")
+    abs_path = str(tmp_path / "foo.py")
+    ckpt_id = ckpt_mgr.save([abs_path])
+    assert ckpt_id is not None
+
+    (tmp_path / "foo.py").write_text("modified")
+    assert ckpt_mgr.restore(ckpt_id)
+    assert (tmp_path / "foo.py").read_text() == "original"
 
 
 def test_save_multiple_files(ckpt_mgr: CheckpointManager, tmp_path: Path):
@@ -107,6 +58,29 @@ def test_save_multiple_files(ckpt_mgr: CheckpointManager, tmp_path: Path):
     assert (tmp_path / "b.py").read_text() == "b"
 
 
+def test_restore_recreates_deleted_file(ckpt_mgr: CheckpointManager, tmp_path: Path):
+    (tmp_path / "x.py").write_text("content")
+    ckpt_id = ckpt_mgr.save(["x.py"])
+    (tmp_path / "x.py").unlink()
+    assert ckpt_mgr.restore(ckpt_id)
+    assert (tmp_path / "x.py").read_text() == "content"
+
+
+def test_save_empty_list_returns_none(ckpt_mgr: CheckpointManager):
+    assert ckpt_mgr.save([]) is None
+
+
+def test_save_nonexistent_file_returns_none(ckpt_mgr: CheckpointManager):
+    assert ckpt_mgr.save(["nonexistent.py"]) is None
+
+
+def test_restore_nonexistent(ckpt_mgr: CheckpointManager):
+    assert not ckpt_mgr.restore("does-not-exist")
+
+
+# --- Discard ---
+
+
 def test_discard_removes_checkpoint(ckpt_mgr: CheckpointManager, tmp_path: Path):
     (tmp_path / "x.py").write_text("x")
     ckpt_id = ckpt_mgr.save(["x.py"])
@@ -114,12 +88,17 @@ def test_discard_removes_checkpoint(ckpt_mgr: CheckpointManager, tmp_path: Path)
     assert ckpt_id not in ckpt_mgr.list_checkpoints()
 
 
-def test_restore_nonexistent(ckpt_mgr: CheckpointManager):
-    assert not ckpt_mgr.restore("does-not-exist")
-
-
 def test_discard_nonexistent(ckpt_mgr: CheckpointManager):
     assert not ckpt_mgr.discard("ghost")
+
+
+def test_discard_cleans_backup_dir(ckpt_mgr: CheckpointManager, tmp_path: Path):
+    (tmp_path / "y.py").write_text("y")
+    ckpt_id = ckpt_mgr.save(["y.py"])
+    backup_dir = ckpt_mgr._backup_dir / ckpt_id
+    assert backup_dir.exists()
+    ckpt_mgr.discard(ckpt_id)
+    assert not backup_dir.exists()
 
 
 # --- Cleanup ---
@@ -136,19 +115,30 @@ def test_list_checkpoints_empty(ckpt_mgr: CheckpointManager):
     assert ckpt_mgr.list_checkpoints() == []
 
 
+# --- No git dependency ---
+
+
+def test_no_git_dependency(ckpt_mgr: CheckpointManager, tmp_path: Path):
+    """Checkpoint works in a directory without git."""
+    (tmp_path / "foo.py").write_text("content")
+    ckpt_id = ckpt_mgr.save(["foo.py"])
+    assert ckpt_id is not None
+    (tmp_path / "foo.py").write_text("changed")
+    assert ckpt_mgr.restore(ckpt_id)
+    assert (tmp_path / "foo.py").read_text() == "content"
+
+
 # --- MODIFY_TOOLS constant ---
 
 
 def test_modify_tools_constant():
     assert "write_file" in MODIFY_TOOLS
     assert "edit_file" in MODIFY_TOOLS
-    assert "shell" in MODIFY_TOOLS
+    assert "shell" not in MODIFY_TOOLS
 
 
 # --- AgentLoop integration ---
 
-import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock
 from loongcli.core.agent import AgentLoop
 from loongcli.core.llm import LLMClient
 from loongcli.tools.base import ToolRegistry
@@ -169,17 +159,17 @@ def _make_chunk(content=None, finish_reason=None):
 
 
 @pytest.mark.asyncio
-async def test_agent_checkpoints_before_write_file():
-    """Agent saves checkpoint before write_file tool execution."""
+async def test_agent_no_checkpoint_without_tool_calls():
     llm = LLMClient(api_key="test")
-    ckpt = AsyncMock()
+    ckpt = MagicMock()
     ckpt.save = MagicMock(return_value="ckpt-1")
+    ckpt.discard = MagicMock()
 
     agent = AgentLoop(
         llm=llm,
         tool_registry=ToolRegistry(),
         permission_checker=PermissionChecker(),
-        system_prompt="You are helpful.",
+        system_prompt="test",
         checkpoint_manager=ckpt,
     )
 
@@ -194,14 +184,13 @@ async def test_agent_checkpoints_before_write_file():
         events.append(event)
 
     assert any(isinstance(e, AgentDone) for e in events)
-    # No tool calls in this test, so no checkpoint should be saved
+    ckpt.save.assert_not_called()
+    ckpt.discard.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_agent_extracts_file_args():
-    """_extract_file_args returns file paths from tool args."""
     assert AgentLoop._extract_file_args("write_file", {"file_path": "foo.py"}) == ["foo.py"]
     assert AgentLoop._extract_file_args("edit_file", {"file_path": "bar.py"}) == ["bar.py"]
-    assert AgentLoop._extract_file_args("read_file", {"file_path": "x.py"}) == ["x.py"]
-    # Shell without file redirects returns no files
+    assert AgentLoop._extract_file_args("edit_file", {"path": "baz.py"}) == ["baz.py"]
     assert AgentLoop._extract_file_args("shell", {"command": "git diff"}) == []

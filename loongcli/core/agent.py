@@ -195,15 +195,21 @@ class AgentLoop:
         if tool_name not in MODIFY_TOOLS:
             return
         try:
-            if tool_name == "shell":
-                self._last_checkpoint = self.checkpoint_manager.save_workdir()
-                return
             files = self._extract_file_args(tool_name, args)
             self._last_checkpoint = self.checkpoint_manager.save(files)
             if self._last_checkpoint:
                 self._files_modified_this_turn.extend(files)
         except Exception:
             logger.debug("checkpoint save failed", exc_info=True)
+
+    def _discard_checkpoint(self) -> None:
+        """Discard last checkpoint after successful tool execution."""
+        if self._last_checkpoint and self.checkpoint_manager:
+            try:
+                self.checkpoint_manager.discard(self._last_checkpoint)
+            except Exception:
+                logger.debug("checkpoint discard failed", exc_info=True)
+            self._last_checkpoint = None
 
     def _check_loop(self, name: str, args: dict) -> str | None:
         sig = self._tool_signature(name, args)
@@ -556,6 +562,7 @@ class AgentLoop:
                     else:
                         result = f"用户要求修改计划：{user_response}\n请根据反馈调整计划，然后重新调用 exit_plan_mode 提交。"
 
+                self._discard_checkpoint()
                 yield ToolCallResult(tool_name=tool_name, result=result)
 
                 self.messages.append({
