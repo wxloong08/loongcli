@@ -114,8 +114,9 @@ class AgentLoop:
         self._active_plan_id: str | None = None
         self._last_checkpoint: str | None = None
         self._files_modified_this_turn: list[str] = []
-        from loongcli.core.verify_loop import VerifyState
+        from loongcli.core.verify_loop import VerifyState, MAX_VERIFY_ROUNDS
         self._verify_state = VerifyState()
+        self._max_verify_rounds = MAX_VERIFY_ROUNDS
         self._last_prompt_tokens = 0
         self.token_usage = {
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
@@ -404,12 +405,12 @@ class AgentLoop:
                     self._files_modified_this_turn = []
                     continue  # Let LLM process the verify prompt
 
-                # Verify loop: already active, check if we need to retry
-                if self._verify_state.is_active:
+                # Verify loop: check if we need to retry or report exhaustion
+                if self._verify_state.round > 0:
                     is_failure = self._verify_state.test_failed
                     self._verify_state.test_failed = False
 
-                    if is_failure and not self._verify_state.is_exhausted:
+                    if is_failure and self._verify_state.is_active:
                         self._verify_state.last_error = response.content
                         self._verify_state.round += 1
                         prompt = build_verify_prompt(
@@ -421,6 +422,11 @@ class AgentLoop:
                         self.messages.append({"role": "user", "content": prompt})
                         continue  # Retry verification
 
+                    if is_failure and self._verify_state.is_exhausted:
+                        response.content = (
+                            f"⚠ 验证失败：已重试 {self._max_verify_rounds} 轮仍未通过。\n\n"
+                            f"{response.content}"
+                        )
                     self._verify_state.reset()
 
                 self._persist()

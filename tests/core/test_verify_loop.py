@@ -142,6 +142,28 @@ class TestDetectTestFailure:
         assert detect_test_failure(output)
 
 
+class TestVerifyStateExhausted:
+    def test_exhausted_is_not_active(self):
+        vs = VerifyState()
+        vs.start(["foo.py"], "pytest")
+        vs.round = MAX_VERIFY_ROUNDS + 1
+        assert vs.is_exhausted
+        assert not vs.is_active
+
+    def test_round_at_max_is_still_active(self):
+        vs = VerifyState()
+        vs.start(["foo.py"], "pytest")
+        vs.round = MAX_VERIFY_ROUNDS
+        assert vs.is_active
+        assert not vs.is_exhausted
+
+    def test_round_beyond_max_is_exhausted(self):
+        vs = VerifyState()
+        vs.start(["foo.py"], "pytest")
+        vs.round = MAX_VERIFY_ROUNDS + 1
+        assert vs.is_exhausted
+
+
 # --- AgentLoop integration ---
 
 @pytest.mark.asyncio
@@ -200,3 +222,63 @@ async def test_verify_state_not_active_initially():
     )
     assert not agent._verify_state.is_active
     assert agent._verify_state.round == 0
+
+
+@pytest.mark.asyncio
+async def test_verify_exhausted_emits_warning():
+    """When verify is exhausted after max retries, AgentDone should contain a warning."""
+    from loongcli.core.agent import AgentLoop
+    from loongcli.core.llm import LLMClient
+    from loongcli.tools.base import ToolRegistry
+    from loongcli.security.permissions import PermissionChecker
+    from loongcli.core.events import AgentDone
+
+    call_count = 0
+    llm = LLMClient(api_key="test")
+
+    async def mock_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        chunk = MagicMock()
+        chunk.choices = [MagicMock()]
+        delta = MagicMock(spec=[])
+        delta.content = "Tests still failing."
+        delta.tool_calls = None
+        chunk.choices[0].delta = delta
+        chunk.choices[0].finish_reason = "stop"
+        chunk.usage = None
+        yield chunk
+
+    llm.chat_stream = mock_stream
+
+    agent = AgentLoop(
+        llm=llm,
+        tool_registry=ToolRegistry(),
+        permission_checker=PermissionChecker(),
+        system_prompt="test",
+    )
+
+    # Patch reset so we can pre-set verify state before the loop runs
+    original_reset = agent._verify_state.reset
+    first_reset = [True]
+
+    def patched_reset():
+        if first_reset[0]:
+            first_reset[0] = False
+            original_reset()
+            # After reset, set verify to exhausted state
+            agent._verify_state.start(["foo.py"], "pytest")
+            agent._verify_state.round = MAX_VERIFY_ROUNDS + 1
+            agent._verify_state.test_failed = True
+        else:
+            original_reset()
+
+    agent._verify_state.reset = patched_reset
+
+    events = []
+    async for event in agent.run_stream("hi"):
+        events.append(event)
+
+    done_events = [e for e in events if isinstance(e, AgentDone)]
+    assert len(done_events) == 1
+    assert "验证失败" in done_events[0].content

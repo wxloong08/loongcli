@@ -131,7 +131,7 @@ def _tools_section() -> str:
 - read_file: 读取文件内容（带行号），支持 offset/limit 分页读取
 - write_file: 写入/创建文件，自动创建父目录，覆盖已有内容
 - edit_file: 精确字符串替换（old_string 必须在文件中唯一出现）
-- shell: 执行 shell 命令（Windows 用 PowerShell，Linux/Mac 用 bash）
+- shell: 执行 shell 命令（Windows 用 PowerShell 5.x，Linux/Mac 用 bash）。Windows 上不支持 &&，用分号 ; 连接多条命令
 - glob: 按模式搜索文件路径（支持 ** 递归）
 - grep: 按正则搜索文件内容（支持 glob 过滤、大小写忽略）
 - recall: 检索已保存的记忆
