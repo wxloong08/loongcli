@@ -16,5 +16,6 @@ venv/
 .ruff_cache/
 CLAUDE.md
 LOONG.md
+demo/
 docs/
 tasks/
