@@ -7,18 +7,83 @@ def test_tui_init():
     assert tui.console is not None
 
 
-def test_format_tool_result_short():
-    tui = TUI()
-    result = tui._format_tool_result("shell", "hello world")
-    assert "hello world" in result
+class TestFormatToolResult:
+    def setup_method(self):
+        self.tui = TUI()
 
+    def test_empty_result(self):
+        assert self.tui._format_tool_result("shell", "") == ""
 
-def test_format_tool_result_truncated():
-    tui = TUI()
-    long_result = "x" * 2000
-    result = tui._format_tool_result("shell", long_result)
-    assert len(result) < len(long_result)
-    assert "截断" in result or "..." in result
+    def test_read_file_shows_line_count(self):
+        content = "line1\nline2\nline3\n"
+        result = self.tui._format_tool_result("read_file", content)
+        assert "(3 行)" in result
+
+    def test_read_file_single_line(self):
+        result = self.tui._format_tool_result("read_file", "only one line")
+        assert "(1 行)" in result
+
+    def test_shell_pytest_passed(self):
+        output = (
+            "tests/test_foo.py ...\n"
+            "=============== 4 passed in 0.02s ===============\n"
+            "[exit code: 0]"
+        )
+        result = self.tui._format_tool_result("shell", output)
+        assert "passed" in result
+        assert "4 passed" in result
+
+    def test_shell_pytest_failed(self):
+        output = (
+            "FAILED tests/test_foo.py::test_bar\n"
+            "=============== 1 failed, 3 passed in 0.05s ===============\n"
+            "[exit code: 1 — 一般错误]"
+        )
+        result = self.tui._format_tool_result("shell", output)
+        assert "failed" in result
+
+    def test_shell_error_keyword(self):
+        output = "SyntaxError: invalid syntax\n[exit code: 1]"
+        result = self.tui._format_tool_result("shell", output)
+        assert "error" in result.lower()
+
+    def test_shell_fallback_last_line(self):
+        output = "building project...\nDone in 2.3s"
+        result = self.tui._format_tool_result("shell", output)
+        assert "Done in 2.3s" in result
+
+    def test_shell_skips_exit_code_line(self):
+        output = "All good\n[exit code: 0]"
+        result = self.tui._format_tool_result("shell", output)
+        assert "All good" in result
+        assert "[exit code" not in result
+
+    def test_shell_long_line_truncated(self):
+        output = "x" * 200 + " passed\n[exit code: 0]"
+        result = self.tui._format_tool_result("shell", output)
+        assert len(result) <= 124
+        assert result.endswith("...")
+
+    def test_shell_deprecation_warning_skipped(self):
+        output = (
+            "tests/test_foo.py ....\n"
+            "=============== 4 passed in 0.02s ===============\n"
+            "DeprecationWarning: some old API\n"
+            "[exit code: 1 — 一般错误]"
+        )
+        result = self.tui._format_tool_result("shell", output)
+        assert "passed" in result
+        assert "Deprecation" not in result
+
+    def test_other_tool_short_result(self):
+        result = self.tui._format_tool_result("grep", "hello world")
+        assert "hello world" in result
+
+    def test_other_tool_long_result_truncated(self):
+        long_result = "x" * 2000
+        result = self.tui._format_tool_result("grep", long_result)
+        assert len(result) < len(long_result)
+        assert "截断" in result
 
 
 class TestIsInternalMessage:

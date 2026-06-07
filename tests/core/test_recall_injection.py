@@ -105,3 +105,40 @@ async def test_no_recall_engine_works():
 
     done_events = [e for e in events if isinstance(e, AgentDone)]
     assert len(done_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_recall_deduplicates_across_turns():
+    """Multiple run_stream calls should not accumulate duplicate memory injections."""
+    llm = LLMClient(api_key="test")
+
+    async def mock_stream(**kwargs):
+        yield _make_chunk(content="OK")
+        yield _make_chunk(finish_reason="stop")
+
+    llm.chat_stream = mock_stream
+
+    recall_engine = AsyncMock()
+    recall_engine.recall = AsyncMock(return_value=[
+        {"name": "mem-1", "type": "user", "description": "test",
+         "content": "test content", "created_at": "", "updated_at": ""},
+    ])
+    recall_engine.format_for_injection = MagicMock(return_value="# 相关记忆\nmem-1 content")
+
+    agent = AgentLoop(
+        llm=llm,
+        tool_registry=ToolRegistry(),
+        permission_checker=PermissionChecker(),
+        system_prompt="You are helpful.",
+        recall_engine=recall_engine,
+    )
+
+    for _ in range(5):
+        async for _ in agent.run_stream("第一轮对话"):
+            pass
+
+    recall_msgs = [
+        m for m in agent.messages
+        if m.get("role") == "system" and m.get("content", "").startswith("# 相关记忆")
+    ]
+    assert len(recall_msgs) == 1

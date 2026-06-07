@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from loongcli.tools.edit_file import EditFileTool
+from loongcli.tools.edit_file import EditFileTool, _diff_stats
 
 
 @pytest.fixture
@@ -188,3 +188,40 @@ async def test_fuzzy_empty_file(tool, tmp_path):
     f.write_text("", encoding="utf-8")
     result = await tool.execute(path=str(f), old_string="anything", new_string="x")
     assert "空" in result or "错误" in result
+
+
+class TestDiffStats:
+    def test_pure_addition(self):
+        result = _diff_stats("a\n", "a\nb\nc\n")
+        assert "添加 2 行" in result
+        assert "删除" not in result
+
+    def test_pure_deletion(self):
+        result = _diff_stats("a\nb\nc\n", "a\n")
+        assert "删除 2 行" in result
+        assert "添加" not in result
+
+    def test_replacement(self):
+        result = _diff_stats("old line\n", "new line\n")
+        assert "添加 1 行" in result
+        assert "删除 1 行" in result
+
+    def test_mixed_add_and_delete(self):
+        result = _diff_stats("a\nb\nc\n", "a\nx\ny\nz\n")
+        assert "添加" in result
+        assert "删除" in result
+
+    def test_no_change(self):
+        result = _diff_stats("same\n", "same\n")
+        assert result == ""
+
+    def test_empty_to_content(self):
+        result = _diff_stats("", "new\nlines\n")
+        assert "添加 2 行" in result
+
+    def test_content_to_empty(self):
+        result = _diff_stats("old\nlines\n", "")
+        assert "删除 2 行" in result
+
+    def test_both_empty(self):
+        assert _diff_stats("", "") == ""

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from loongcli.skills.registry import (
     SkillRegistry, SkillMeta, MAX_AUTO_SKILLS, MAX_SKILL_CHARS,
-    _parse_skill_file,
+    MAX_INPUT_FOR_TRIGGERS, _parse_skill_file,
 )
 
 
@@ -155,6 +155,20 @@ Content {i}
     def test_match_chinese_triggers(self, tmp_path):
         reg = self._build_registry(tmp_path, {"brainstorm": BRAINSTORM_SKILL})
         matched = reg.match("来一场头脑风暴吧")
+        assert len(matched) == 1
+
+    def test_long_input_skips_triggers(self, tmp_path):
+        """Long user input (e.g. interview answers) should not trigger skills."""
+        reg = self._build_registry(tmp_path, {"debug": DEBUG_SKILL})
+        long_input = "这是一段很长的面试回答内容，" * 20 + "其中偶然提到了 bug 这个词"
+        assert len(long_input) > MAX_INPUT_FOR_TRIGGERS
+        matched = reg.match(long_input)
+        assert matched == []
+
+    def test_short_input_still_triggers(self, tmp_path):
+        """Short input should still trigger as before."""
+        reg = self._build_registry(tmp_path, {"debug": DEBUG_SKILL})
+        matched = reg.match("遇到一个 bug")
         assert len(matched) == 1
 
 

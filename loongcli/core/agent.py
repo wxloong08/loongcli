@@ -319,6 +319,10 @@ class AgentLoop:
             try:
                 recalled = await self.recall_engine.recall(user_input)
                 if recalled:
+                    self.messages = [
+                        m for m in self.messages
+                        if not (m.get("role") == "system" and m.get("content", "").startswith("# 相关记忆"))
+                    ]
                     injection = self.recall_engine.format_for_injection(recalled)
                     insert_idx = 1 if self.messages and self.messages[0].get("role") == "system" else 0
                     self.messages.insert(insert_idx, {"role": "system", "content": injection})

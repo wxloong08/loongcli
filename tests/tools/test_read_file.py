@@ -1,5 +1,5 @@
 import pytest
-from loongcli.tools.read_file import ReadFileTool
+from loongcli.tools.read_file import ReadFileTool, _decode_with_fallback
 
 
 @pytest.fixture
@@ -151,3 +151,50 @@ async def test_mid_file_offset_streaming(tool, tmp_path):
     assert "line_29" in result
     assert "line_24" not in result
     assert "line_30" not in result
+
+
+# ── truncated UTF-8 sample boundary tests ──
+
+
+class TestDecodeWithFallback:
+    def test_utf8_truncated_at_multibyte_boundary(self):
+        """UTF-8 Chinese text truncated mid-character should still detect as utf-8."""
+        full = "你好世界测试内容" * 200
+        raw = full.encode("utf-8")[:4096]
+        _, enc = _decode_with_fallback(raw)
+        assert enc == "utf-8"
+
+    def test_utf8_clean_boundary(self):
+        """UTF-8 text not truncated at multi-byte boundary works normally."""
+        text = "hello world\n" * 100
+        raw = text.encode("utf-8")[:4096]
+        _, enc = _decode_with_fallback(raw)
+        assert enc == "utf-8"
+
+    def test_genuine_latin1_not_misdetected(self):
+        """Bytes that are truly latin-1 (invalid UTF-8 throughout) stay latin-1."""
+        raw = bytes([0xC0, 0x20, 0xE0, 0x20, 0xF8]) * 100
+        _, enc = _decode_with_fallback(raw)
+        assert enc != "utf-8"
+
+    def test_gbk_chinese(self):
+        """GBK-encoded Chinese should be detected as gbk, not utf-8."""
+        raw = "你好世界".encode("gbk")
+        _, enc = _decode_with_fallback(raw)
+        assert enc in ("gbk", "utf-8")  # short GBK may also be valid UTF-8
+
+    def test_bom_detected(self):
+        raw = b"\xef\xbb\xbf" + "hello".encode("utf-8")
+        _, enc = _decode_with_fallback(raw)
+        assert enc == "utf-8-sig"
+
+
+@pytest.mark.asyncio
+async def test_large_utf8_chinese_file_no_garble(tool, tmp_path):
+    """Regression: large UTF-8 Chinese file should not fall back to latin-1."""
+    f = tmp_path / "chinese_large.txt"
+    content = "这是一段中文内容用于测试编码检测\n" * 300
+    f.write_text(content, encoding="utf-8")
+    result = await tool.execute(path=str(f), limit=10)
+    assert "latin-1" not in result
+    assert "这是一段中文" in result

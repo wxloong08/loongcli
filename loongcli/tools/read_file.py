@@ -97,6 +97,11 @@ def _decode_with_fallback(raw: bytes) -> tuple[str, str]:
     for enc in _ENCODING_CHAIN:
         try:
             return raw.decode(enc), enc
-        except (UnicodeDecodeError, LookupError):
+        except UnicodeDecodeError as e:
+            # Sample may truncate a multi-byte UTF-8 char at the boundary
+            if enc == "utf-8" and e.start > len(raw) - 4:
+                return raw[:e.start].decode(enc), enc
+            continue
+        except LookupError:
             continue
     return raw.decode("latin-1"), "latin-1"

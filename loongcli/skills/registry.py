@@ -15,6 +15,7 @@ _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
 MAX_AUTO_SKILLS = 2
 MAX_SKILL_CHARS = 5000
+MAX_INPUT_FOR_TRIGGERS = 150
 
 
 @dataclass
@@ -161,6 +162,8 @@ class SkillRegistry:
         return _extract_body(text)
 
     def match(self, user_input: str) -> list[SkillMeta]:
+        if len(user_input) > MAX_INPUT_FOR_TRIGGERS:
+            return []
         lower = user_input.lower()
         matched: list[SkillMeta] = []
         for meta in self._skills.values():

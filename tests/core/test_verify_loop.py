@@ -7,6 +7,7 @@ from loongcli.core.verify_loop import (
     VerifyState,
     build_verify_prompt,
     detect_test_failure,
+    is_test_command,
     MAX_VERIFY_ROUNDS,
 )
 
@@ -99,6 +100,46 @@ class TestBuildVerifyPrompt:
         # The error in the prompt should be truncated to ~3000 chars
         error_in_prompt = prompt.count("x")
         assert error_in_prompt <= 3100  # allow small overhead
+
+
+class TestIsTestCommand:
+    @pytest.mark.parametrize("cmd", [
+        "pytest",
+        "pytest tests/",
+        "pytest -x tests/core/test_verify_loop.py",
+        "python -m pytest",
+        "python -m pytest --tb=short",
+        "npm test",
+        "npm test -- --coverage",
+        "go test ./...",
+        "cargo test",
+        "make test",
+    ])
+    def test_recognized(self, cmd):
+        assert is_test_command(cmd)
+
+    @pytest.mark.parametrize("cmd", [
+        "python main.py",
+        "ls -la",
+        "git status",
+        "pip install pytest",
+        "echo 'test'",
+        "cat test_file.py",
+        "npm install",
+        "npm run build",
+        "go build",
+        "cargo build",
+        "make build",
+    ])
+    def test_not_recognized(self, cmd):
+        assert not is_test_command(cmd)
+
+    def test_case_insensitive(self):
+        assert is_test_command("PYTEST")
+        assert is_test_command("NPM TEST")
+
+    def test_empty_string(self):
+        assert not is_test_command("")
 
 
 class TestDetectTestFailure:
