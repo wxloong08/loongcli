@@ -225,8 +225,11 @@ description: 项目级调试工作流
 
         reg = SkillRegistry(project_dir=tmp_path, personal_dir=tmp_path / "empty")
         listing = reg.build_listing()
-        assert "debug:" in listing
-        assert "调试" in listing
+        assert "debug" in listing
+
+        verbose = reg.build_listing(verbose=True)
+        assert "debug:" in verbose
+        assert "调试" in verbose
 
     def test_nested_claude_skills(self, tmp_path):
         project = tmp_path / "myproject" / ".claude" / "skills" / "myskill"

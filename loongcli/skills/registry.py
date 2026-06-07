@@ -186,11 +186,10 @@ class SkillRegistry:
             parts.append(f"\n---\n[自动加载 skill: {meta.name}]\n{content}")
         return "".join(parts)
 
-    def build_listing(self, include_model_disabled: bool = True) -> str:
+    def build_listing(self, include_model_disabled: bool = True, verbose: bool = False) -> str:
         skills = self.list_skills(include_model_disabled)
         if not skills:
             return ""
-        lines = []
-        for s in skills:
-            lines.append(f"- {s.name}: {s.description}")
-        return "\n".join(lines)
+        if verbose:
+            return "\n".join(f"- {s.name}: {s.description}" for s in skills)
+        return ", ".join(s.name for s in skills)

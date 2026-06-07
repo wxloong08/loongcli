@@ -265,6 +265,8 @@ class TUI:
         allowed_tools: set[str] | None = None,
     ):
         self.console.print("─" * shutil.get_terminal_size().columns + "\n")
+        usage_before = {k: v for k, v in agent.token_usage.items()}
+        cost_before = agent.cost_tracker.total_cost if agent.cost_tracker else 0
         buffer = ""
         thinking_buffer = ""
         in_thinking = False
@@ -292,27 +294,17 @@ class TUI:
                     if in_thinking:
                         in_thinking = False
                         live.stop()
-                        self.console.print(Padding(
-                            Text.from_markup(
-                                f"[dim]💭 思考完成 ({len(thinking_buffer)} chars)[/dim]"
-                            ), self.PADDING,
-                        ))
                         thinking_buffer = ""
                         live = Live(console=self.console, refresh_per_second=8)
                         live.start()
                     buffer += event.text
-                    live.update(Padding(Text(buffer), self.PADDING))
+                    live.update(Padding(Markdown(buffer), self.PADDING))
 
                 elif isinstance(event, ToolCallStart):
                     live.update(Text(""))
                     live.stop()
                     if in_thinking:
                         in_thinking = False
-                        self.console.print(Padding(
-                            Text.from_markup(
-                                f"[dim]💭 思考完成 ({len(thinking_buffer)} chars)[/dim]"
-                            ), self.PADDING,
-                        ))
                         thinking_buffer = ""
                     if buffer.strip():
                         self.console.print(Padding(Markdown(buffer), self.PADDING))
@@ -455,18 +447,21 @@ class TUI:
                 buffer = ""
 
         u = agent.token_usage
-        if u["total_tokens"] > 0:
-            parts = [f"tokens: {u['total_tokens']:,}"]
-            prompt_detail = f"prompt {u['prompt_tokens']:,}"
-            if u["prompt_cache_hit_tokens"] > 0:
-                prompt_detail += f" (cache hit {u['prompt_cache_hit_tokens']:,})"
+        delta = {k: u[k] - usage_before[k] for k in u}
+        if delta["total_tokens"] > 0:
+            parts = [f"tokens: {delta['total_tokens']:,}"]
+            prompt_detail = f"prompt {delta['prompt_tokens']:,}"
+            if delta["prompt_cache_hit_tokens"] > 0:
+                prompt_detail += f" (cache hit {delta['prompt_cache_hit_tokens']:,})"
             parts.append(prompt_detail)
-            comp_detail = f"completion {u['completion_tokens']:,}"
-            if u["reasoning_tokens"] > 0:
-                comp_detail += f" (thinking {u['reasoning_tokens']:,})"
+            comp_detail = f"completion {delta['completion_tokens']:,}"
+            if delta["reasoning_tokens"] > 0:
+                comp_detail += f" (thinking {delta['reasoning_tokens']:,})"
             parts.append(comp_detail)
-            if agent.cost_tracker and agent.cost_tracker.total_cost > 0:
-                parts.append(f"cost: {agent.cost_tracker.format_cost()}")
+            if agent.cost_tracker:
+                turn_cost = agent.cost_tracker.total_cost - cost_before
+                if turn_cost > 0:
+                    parts.append(f"cost: {agent.cost_tracker.format_cost(turn_cost)}")
             self.console.print(Padding(
                 Text.from_markup(f"[dim]{' | '.join(parts)}[/dim]"),
                 self.PADDING,
@@ -484,6 +479,26 @@ class TUI:
         return ", ".join(parts)
 
     def _format_tool_result(self, tool_name: str, result: str) -> str:
+        if not result:
+            return ""
+        if tool_name == "read_file":
+            line_count = len(result.splitlines())
+            return f"({line_count} 行)"
+        if tool_name == "shell":
+            lines = [l for l in result.strip().splitlines() if l.strip()]
+            if lines:
+                for line in reversed(lines):
+                    stripped = line.strip().strip("=").strip("-").strip()
+                    if any(kw in stripped for kw in ("passed", "failed", "error")):
+                        if len(stripped) > 120:
+                            stripped = stripped[:120] + "..."
+                        return stripped
+                last = lines[-1].strip()
+                if last.startswith("[exit code:"):
+                    last = lines[-2].strip() if len(lines) >= 2 else last
+                if len(last) > 120:
+                    last = last[:120] + "..."
+                return last
         if len(result) > self.MAX_TOOL_RESULT_DISPLAY:
             return result[:self.MAX_TOOL_RESULT_DISPLAY] + "\n... (截断)"
         return result

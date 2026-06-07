@@ -114,6 +114,7 @@ class AgentLoop:
         self._active_plan_id: str | None = None
         self._last_checkpoint: str | None = None
         self._files_modified_this_turn: list[str] = []
+        self._test_ran_this_turn: bool = False
         from loongcli.core.verify_loop import VerifyState, MAX_VERIFY_ROUNDS
         self._verify_state = VerifyState()
         self._max_verify_rounds = MAX_VERIFY_ROUNDS
@@ -311,6 +312,7 @@ class AgentLoop:
         self._last_tool_sig = ""
         self._repeat_count = 0
         self._files_modified_this_turn = []
+        self._test_ran_this_turn = False
         self._verify_state.reset()
 
         if self.recall_engine and len(user_input.strip()) >= _MIN_RECALL_LENGTH:
@@ -396,7 +398,7 @@ class AgentLoop:
                 self.messages.append({"role": "assistant", "content": response.content})
 
                 # Verify loop: if files were modified, kick off verification
-                if self._files_modified_this_turn and not self._verify_state.is_active:
+                if self._files_modified_this_turn and not self._verify_state.is_active and not self._test_ran_this_turn:
                     from loongcli.core.verify_loop import build_verify_prompt
                     from loongcli.core.test_discovery import discover_test_command
 
@@ -529,12 +531,16 @@ class AgentLoop:
                     for fp in self._extract_file_args(tool_name, args):
                         await self.lsp_manager.invalidate_doc(fp)
 
-                if (self._verify_state.is_active
-                        and tool_name == "shell"
-                        and isinstance(result, str)):
-                    from loongcli.core.verify_loop import detect_test_failure
-                    if detect_test_failure(result):
+                if tool_name in ("edit_file", "write_file"):
+                    self._test_ran_this_turn = False
+
+                if tool_name == "shell" and isinstance(result, str):
+                    from loongcli.core.verify_loop import detect_test_failure, is_test_command
+                    if self._verify_state.is_active and detect_test_failure(result):
                         self._verify_state.test_failed = True
+                    cmd = args.get("command", "")
+                    if is_test_command(cmd) and not detect_test_failure(result):
+                        self._test_ran_this_turn = True
 
                 if (tool_name == "exit_plan_mode"
                         and isinstance(result, str)

@@ -78,6 +78,9 @@ class EditFileTool(Tool):
             )
         new_content = content.replace(old, new, 1)
         p.write_text(new_content, encoding="utf-8")
+        stats = _diff_stats(old, new)
+        if stats:
+            return f"成功编辑 {path}（{stats}）"
         return f"成功编辑 {path}"
 
     def _fuzzy_replace(self, content: str, p: Path, path: str, old_string: str, new_string: str) -> str:
@@ -106,7 +109,9 @@ class EditFileTool(Tool):
                 end -= len(matched_text) - len(matched_text.rstrip("\n"))
             new_content = content[:start] + new_string + content[end:]
             p.write_text(new_content, encoding="utf-8")
-            return f"成功编辑 {path}（fuzzy matched, 相似度 {best_ratio:.0%}）"
+            stats = _diff_stats(old_string, new_string)
+            extra = f"，{stats}" if stats else ""
+            return f"成功编辑 {path}（fuzzy {best_ratio:.0%}{extra}）"
 
         if best_ratio >= FUZZY_CANDIDATE_MIN:
             matched_text = content[best_start:best_end]
@@ -151,6 +156,28 @@ class EditFileTool(Tool):
             f"{lines_msg}\n"
             f"请检查 old_string 是否与文件内容一致（注意空格、缩进、引号）。"
         )
+
+
+def _diff_stats(old_string: str, new_string: str) -> str:
+    old_lines = old_string.splitlines()
+    new_lines = new_string.splitlines()
+    sm = SequenceMatcher(None, old_lines, new_lines)
+    added = 0
+    removed = 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "replace":
+            removed += i2 - i1
+            added += j2 - j1
+        elif tag == "delete":
+            removed += i2 - i1
+        elif tag == "insert":
+            added += j2 - j1
+    parts = []
+    if added:
+        parts.append(f"添加 {added} 行")
+    if removed:
+        parts.append(f"删除 {removed} 行")
+    return "，".join(parts)
 
 
 def _normalize_whitespace(s: str) -> str:

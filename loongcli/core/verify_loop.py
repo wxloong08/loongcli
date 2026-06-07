@@ -9,6 +9,14 @@ MAX_VERIFY_ROUNDS = 3
 _EXIT_CODE_RE = re.compile(r"\[exit code: (\d+)")
 _PYTEST_PASSED_RE = re.compile(r"(\d+) passed")
 _PYTEST_FAILED_RE = re.compile(r"(\d+) failed")
+_TEST_CMD_RE = re.compile(
+    r"pytest|python\s+-m\s+pytest|npm\s+test|go\s+test|cargo\s+test|make\s+test",
+    re.IGNORECASE,
+)
+
+
+def is_test_command(command: str) -> bool:
+    return bool(_TEST_CMD_RE.search(command))
 
 
 def detect_test_failure(shell_output: str) -> bool:

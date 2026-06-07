@@ -6,9 +6,7 @@ from loongcli.skills.registry import SkillRegistry
 
 SKILL_TOOL_PREFIX = """\
 调用技能来获取特定任务的详细指令和工作流。
-技能在被调用时才加载完整内容，平时只占用少量上下文。
-
-可用技能：
+用 skill(name) 加载完整内容。可用技能：
 """
 
 NO_SKILLS_DESC = "当前没有可用的技能。"
