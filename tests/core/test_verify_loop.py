@@ -7,6 +7,7 @@ from loongcli.core.verify_loop import (
     VerifyState,
     build_verify_prompt,
     detect_test_failure,
+    filter_code_files,
     is_test_command,
     MAX_VERIFY_ROUNDS,
 )
@@ -203,6 +204,39 @@ class TestVerifyStateExhausted:
         vs.start(["foo.py"], "pytest")
         vs.round = MAX_VERIFY_ROUNDS + 1
         assert vs.is_exhausted
+
+
+class TestFilterCodeFiles:
+    def test_keeps_python_files(self):
+        assert filter_code_files(["src/main.py", "lib/utils.py"]) == ["src/main.py", "lib/utils.py"]
+
+    def test_keeps_js_ts_files(self):
+        result = filter_code_files(["app.js", "index.ts", "Component.tsx"])
+        assert len(result) == 3
+
+    def test_removes_markdown(self):
+        assert filter_code_files(["README.md", "docs/guide.md"]) == []
+
+    def test_removes_config_files(self):
+        assert filter_code_files(["config.yaml", "settings.json", ".env"]) == []
+
+    def test_mixed_files(self):
+        files = ["src/main.py", "README.md", "tests/test_foo.py", "docs/notes.txt"]
+        result = filter_code_files(files)
+        assert result == ["src/main.py", "tests/test_foo.py"]
+
+    def test_empty_list(self):
+        assert filter_code_files([]) == []
+
+    def test_case_insensitive_extension(self):
+        assert filter_code_files(["Main.PY", "app.JS"]) == ["Main.PY", "app.JS"]
+
+    def test_go_rust_java(self):
+        result = filter_code_files(["main.go", "lib.rs", "App.java"])
+        assert len(result) == 3
+
+    def test_shell_scripts(self):
+        assert filter_code_files(["deploy.sh", "build.bash"]) == ["deploy.sh", "build.bash"]
 
 
 # --- AgentLoop integration ---

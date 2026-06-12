@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+import random
 from typing import AsyncIterator
 
 from openai import AsyncOpenAI
@@ -53,8 +54,18 @@ class LLMClient:
             "stream": False,
         }
         self._build_thinking_params(kwargs)
-        response = await self.client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content or ""
+        last_error: Exception | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                response = await self.client.chat.completions.create(**kwargs)
+                return response.choices[0].message.content or ""
+            except Exception as e:
+                last_error = e
+                logger.warning("LLM chat failed (attempt %d/%d): %s", attempt, self.max_retries, e)
+                if attempt < self.max_retries:
+                    delay = self.retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                    await asyncio.sleep(delay)
+        raise last_error
 
     async def chat_stream(
         self,
@@ -82,7 +93,8 @@ class LLMClient:
                 last_error = e
                 logger.warning("LLM request failed (attempt %d/%d): %s", attempt, self.max_retries, e)
                 if attempt < self.max_retries:
-                    await asyncio.sleep(self.retry_delay)
+                    delay = self.retry_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.5)
+                    await asyncio.sleep(delay)
 
         raise last_error
 

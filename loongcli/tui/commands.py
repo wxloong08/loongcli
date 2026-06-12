@@ -356,6 +356,33 @@ class GoalCommand(SlashCommand):
         await ctx.tui.run_goal(ctx.agent, description)
 
 
+class WebCommand(SlashCommand):
+    name = "web"
+    description = "打开 Web 页面：会话浏览（只读）+ 记忆管理"
+
+    _server = None  # 类级缓存，整个 TUI 进程共享一个 server
+
+    async def run(self, args: list[str], ctx: CommandContext) -> None:
+        import threading
+        import webbrowser
+
+        from loongcli.web.server import create_server, server_url
+
+        cls = WebCommand
+        if cls._server is None:
+            try:
+                cls._server = create_server()
+            except OSError as exc:
+                ctx.console.print(f"[red]Web 服务启动失败: {exc}[/red]")
+                return
+            thread = threading.Thread(target=cls._server.serve_forever, daemon=True)
+            thread.start()
+
+        url = server_url(cls._server)
+        ctx.console.print(f"[cyan]Web 页面: [link={url}]{url}[/link]（随 TUI 退出关闭）[/cyan]")
+        webbrowser.open(url)
+
+
 def create_default_registry() -> CommandRegistry:
     registry = CommandRegistry()
     registry.register(HelpCommand())
@@ -372,4 +399,5 @@ def create_default_registry() -> CommandRegistry:
     registry.register(ThinkCommand())
     registry.register(FastCommand())
     registry.register(ProCommand())
+    registry.register(WebCommand())
     return registry

@@ -549,7 +549,36 @@ async def _async_main():
         await lsp_manager.shutdown_all()
 
 
+def _run_web():
+    parser = argparse.ArgumentParser(
+        prog="loongcli web",
+        description="启动本地 Web 页面：会话浏览（只读）+ 记忆管理",
+    )
+    parser.add_argument("--port", type=int, default=None, help="监听端口（默认 8765，被占用自动递增）")
+    parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    args = parser.parse_args(sys.argv[2:])
+
+    import webbrowser
+    from loongcli.web.server import DEFAULT_PORT, create_server, server_url
+
+    server = create_server(port=args.port or DEFAULT_PORT)
+    url = server_url(server)
+    console = Console()
+    console.print(f"[bold cyan]loongcli web[/bold cyan] 运行在 [link={url}]{url}[/link]（Ctrl+C 退出）")
+    if not args.no_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        console.print("\n已停止")
+    finally:
+        server.server_close()
+
+
 def main():
+    if sys.argv[1:2] == ["web"]:
+        _run_web()
+        return
     asyncio.run(_async_main())
 
 

@@ -401,13 +401,21 @@ class AgentLoop:
             if not response.tool_calls:
                 self.messages.append({"role": "assistant", "content": response.content})
 
-                # Verify loop: if files were modified, kick off verification
+                # Verify loop: if code files were modified, kick off verification
                 if self._files_modified_this_turn and not self._verify_state.is_active and not self._test_ran_this_turn:
-                    from loongcli.core.verify_loop import build_verify_prompt
+                    from loongcli.core.verify_loop import build_verify_prompt, filter_code_files
                     from loongcli.core.test_discovery import discover_test_command
 
-                    test_cmd = discover_test_command(changed_files=self._files_modified_this_turn)
-                    self._verify_state.start(self._files_modified_this_turn, test_cmd)
+                    code_files = filter_code_files(self._files_modified_this_turn)
+                    if not code_files:
+                        self._files_modified_this_turn = []
+                        self._persist()
+                        self._schedule_auto_extract()
+                        yield AgentDone(content=response.content)
+                        return
+
+                    test_cmd = discover_test_command(changed_files=code_files)
+                    self._verify_state.start(code_files, test_cmd)
                     prompt = build_verify_prompt(
                         changed_files=self._files_modified_this_turn,
                         test_command=test_cmd,

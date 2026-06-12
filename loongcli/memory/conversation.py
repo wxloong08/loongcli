@@ -14,11 +14,78 @@ def _path_to_slug(project_dir: Path) -> str:
     return raw.strip('-')
 
 
+def _projects_root() -> Path:
+    return Path.home() / ".loongcli" / "projects"
+
+
 def _project_sessions_dir(project_dir: Path | None = None) -> Path:
     if project_dir is None:
         project_dir = Path.cwd()
     slug = _path_to_slug(project_dir)
-    return Path.home() / ".loongcli" / "projects" / slug / "sessions"
+    return _projects_root() / slug / "sessions"
+
+
+def current_project_slug(project_dir: Path | None = None) -> str:
+    return _path_to_slug(project_dir or Path.cwd())
+
+
+def list_all_projects(projects_root: Path | None = None) -> list[dict]:
+    """扫描所有项目，返回 [{slug, session_count, last_active}]，按 last_active 倒序。
+
+    忽略没有 sessions 子目录或会话为空的项目。
+    """
+    root = projects_root or _projects_root()
+    if not root.exists():
+        return []
+
+    projects: list[dict] = []
+    for project_dir in root.iterdir():
+        sessions_dir = project_dir / "sessions"
+        if not sessions_dir.is_dir():
+            continue
+        session_files = list(sessions_dir.glob("*.json"))
+        if not session_files:
+            continue
+        last_mtime = max(f.stat().st_mtime for f in session_files)
+        projects.append({
+            "slug": project_dir.name,
+            "session_count": len(session_files),
+            "last_active": datetime.fromtimestamp(last_mtime, tz=timezone.utc).isoformat(),
+        })
+
+    projects.sort(key=lambda p: p["last_active"], reverse=True)
+    return projects
+
+
+def list_project_sessions(slug: str, limit: int = 50, projects_root: Path | None = None) -> list[dict]:
+    """列出指定项目的会话 meta，按文件 mtime 倒序。损坏的 json 跳过。"""
+    sessions_dir = (projects_root or _projects_root()) / slug / "sessions"
+    if not sessions_dir.is_dir():
+        return []
+
+    sessions: list[dict] = []
+    for f in sorted(sessions_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            meta = dict(data["meta"])
+            meta["file_size"] = f.stat().st_size
+            sessions.append(meta)
+        except (json.JSONDecodeError, KeyError, OSError):
+            continue
+        if len(sessions) >= limit:
+            break
+    return sessions
+
+
+def load_session(slug: str, session_id: str, projects_root: Path | None = None) -> dict | None:
+    """按 slug + session_id 读取单个会话。调用方必须先校验两个参数的格式。"""
+    path = (projects_root or _projects_root()) / slug / "sessions" / f"{session_id}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 class ConversationStore:

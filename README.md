@@ -116,6 +116,17 @@ Markdown-based persistent memory:
 - **Auto-extraction** — fire-and-forget LLM extraction of memorable facts after each turn
 - **Dedup + aging** — Jaccard overlap merge, 90-day hiding for project/reference types
 
+### Web UI (`loongcli/web/`)
+
+Local browser interface for archives — zero new dependencies (stdlib `http.server`):
+
+- **Session browser** — read-only view of full conversation history across all projects, with collapsible tool calls and markdown rendering. Read-only is enforced at the routing layer (only GET handlers exist).
+- **Memory manager** — full CRUD over the markdown memory store, with type filtering and dedup-merge feedback
+- **Two entry points** — `/web` slash command (daemon thread + auto-open browser) or standalone `loongcli web`
+- **Localhost only** — binds 127.0.0.1, path-traversal guarded, tested
+
+![Web UI session view](assets/web-ui-session.png)
+
 ### Multi-Provider Support (`loongcli/core/provider.py`)
 
 - **Unified interface** for DeepSeek, OpenAI, Claude, Ollama
@@ -147,6 +158,7 @@ export DEEPSEEK_API_KEY="sk-..."
 /compact   — Manual compaction          /think [level] — Toggle thinking mode
 /usage     — Token usage & cost         /fast /pro     — Quick model switch
 /remember  — Save memory               /init          — Generate LOONG.md
+/web       — Open Web UI (sessions + memory)
 ```
 
 ## Testing
@@ -156,7 +168,7 @@ pip install pytest pytest-asyncio
 python -m pytest tests/ -q
 ```
 
-1010 unit tests covering agent loop, tool execution, LSP integration, plan mode, sub-agents, permissions, compaction, memory, onboarding, and TUI.
+1110 unit tests covering agent loop, tool execution, LSP integration, plan mode, sub-agents, permissions, compaction, memory, web API, onboarding, and TUI.
 
 ## Project Structure
 
@@ -171,8 +183,9 @@ loongcli/
 ├── memory/         # Markdown store, recall engine, auto-extraction
 ├── plan/           # Plan store, step tracking
 ├── skills/         # Skill registry, auto-activation
-└── hooks/          # Lifecycle hook system (4 events)
-tests/              # 1010 unit tests
+├── hooks/          # Lifecycle hook system (4 events)
+└── web/            # Local Web UI: session browser (read-only) + memory CRUD
+tests/              # 1110 unit tests
 ```
 
 ## License

@@ -6,6 +6,18 @@ from pathlib import Path
 
 MAX_VERIFY_ROUNDS = 3
 
+_CODE_EXTENSIONS = frozenset({
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs",
+    ".go", ".rs", ".java", ".kt", ".c", ".cpp", ".h", ".hpp",
+    ".cs", ".rb", ".php", ".swift", ".scala", ".sh", ".bash",
+    ".sql", ".r", ".lua", ".pl", ".ex", ".exs", ".zig", ".v",
+})
+
+
+def filter_code_files(files: list[str]) -> list[str]:
+    return [f for f in files if Path(f).suffix.lower() in _CODE_EXTENSIONS]
+
+
 _EXIT_CODE_RE = re.compile(r"\[exit code: (\d+)")
 _PYTEST_PASSED_RE = re.compile(r"(\d+) passed")
 _PYTEST_FAILED_RE = re.compile(r"(\d+) failed")
