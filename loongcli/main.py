@@ -86,6 +86,10 @@ def _parse_args() -> argparse.Namespace:
         "--verbose", "-v", action="store_true",
         help="非交互模式下显示工具调用详情（输出到 stderr）",
     )
+    parser.add_argument(
+        "--profile", default=None,
+        help="使用指定的 model profile（config.json 中定义），主要供评测脚本切换模型",
+    )
     return parser.parse_args()
 
 
@@ -276,6 +280,18 @@ async def _async_main():
     sub_llm = router.client("sub")
     if sub_llm.model == llm.model:
         sub_llm = None
+
+    if args.profile:
+        profile = cfg.get_profile(args.profile)
+        if not profile:
+            console.print(f"[red]未找到 profile: {args.profile}[/red]")
+            sys.exit(1)
+        from openai import AsyncOpenAI
+        llm.model = profile.model
+        llm.client = AsyncOpenAI(
+            api_key=profile.effective_api_key(cfg.api_key),
+            base_url=profile.base_url,
+        )
     memory_dir = Path.home() / ".loongcli" / "memory"
     migrate_kv_to_markdown(memory_dir)
     memory = MarkdownMemoryStore(base_dir=memory_dir)

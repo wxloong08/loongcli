@@ -20,3 +20,7 @@ demo/
 docs/
 tasks/
 .playwright-mcp/
+bench/worktrees/
+bench/results/
+bench/patches/
+bench/candidates.jsonl
