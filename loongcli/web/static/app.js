@@ -233,6 +233,9 @@ function renderMessage(m, toolResults) {
     return `<div class="msg msg-system">` +
       `<span class="role-label">TOOL</span>${esc(String(m.content ?? ""))}</div>`;
   }
+  if (m.role === "__boundary__") {
+    return `<div class="archive-boundary">${esc(m.content)}</div>`;
+  }
   return "";
 }
 
@@ -244,6 +247,7 @@ async function renderSessionDetail(slug, id) {
 
   const meta = data.meta || {};
   const hasCompact = Array.isArray(data.compact_messages) && data.compact_messages.length > 0;
+  const archived = Array.isArray(data.archived_segments) ? data.archived_segments : [];
 
   stage.innerHTML = `
     <div class="crumb"><a href="#/sessions">会话</a> / ${esc(shortSlug(slug))} / ${esc(id)}</div>
@@ -255,12 +259,27 @@ async function renderSessionDetail(slug, id) {
       <span>更新 ${relTime(meta.updated_at)}</span>
       <span>${meta.turn_count ?? "?"} 轮</span>
       <label class="toggle-sys"><input type="checkbox" id="toggle-sys"> 显示 system 消息</label>
+      ${archived.length ? `<label class="toggle-sys"><input type="checkbox" id="toggle-archive"> 完整历史（${archived.length} 个归档段）</label>` : ""}
       ${hasCompact ? `<label class="toggle-sys"><input type="checkbox" id="toggle-compact"> 查看压缩后视图</label>` : ""}
     </div>
     <div id="dialog-zone"></div>`;
 
   const renderView = (useCompact) => {
-    const messages = useCompact ? data.compact_messages : (data.messages || []);
+    const showArchive = document.getElementById("toggle-archive")?.checked;
+    let messages = useCompact ? data.compact_messages : (data.messages || []);
+    if (showArchive && !useCompact) {
+      const merged = [];
+      archived.forEach((seg, i) => {
+        merged.push({
+          role: "__boundary__",
+          content: `── 归档段 ${i + 1}/${archived.length} · ${seg.reason || "compact"} · ${relTime(seg.archived_at)} · ${seg.message_count} 条 ──`,
+        });
+        merged.push(...(seg.messages || []));
+      });
+      merged.push({ role: "__boundary__", content: "── 当前工作上下文（压缩后） ──" });
+      merged.push(...messages);
+      messages = merged;
+    }
     const toolResults = pairToolResults(messages);
     const zone = document.getElementById("dialog-zone");
     let start = Math.max(0, messages.length - PAGE_CHUNK);
@@ -287,6 +306,8 @@ async function renderSessionDetail(slug, id) {
 
   document.getElementById("toggle-sys").addEventListener("change", syncSysVisibility);
   document.getElementById("toggle-compact")?.addEventListener("change", e => renderView(e.target.checked));
+  document.getElementById("toggle-archive")?.addEventListener("change", () =>
+    renderView(document.getElementById("toggle-compact")?.checked || false));
   renderView(false);
 }
 

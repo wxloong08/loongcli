@@ -190,11 +190,13 @@ def _fix_role_alternation(prefix: list[dict], kept: list[dict]) -> list[dict]:
 
 
 class Compactor:
-    def __init__(self, llm: LLMClient, threshold: int = 800000, plan_store=None, task_manager=None):
+    def __init__(self, llm: LLMClient, threshold: int = 800000, plan_store=None,
+                 task_manager=None, skill_registry=None):
         self.llm = llm
         self.threshold = threshold
         self.plan_store = plan_store
         self.task_manager = task_manager
+        self.skill_registry = skill_registry
 
     def should_compact(self, prompt_tokens: int, messages: list[dict]) -> bool:
         if prompt_tokens <= 0:
@@ -240,14 +242,20 @@ class Compactor:
         prefix.append({"role": "user", "content": f"{boundary}\n{SUMMARY_MARKER}\n{summary}"})
         prefix.append({"role": "assistant", "content": SUMMARY_ACK})
 
-        attachments = build_attachments(messages, self.plan_store, self.task_manager)
+        attachments = build_attachments(
+            messages, self.plan_store, self.task_manager,
+            skill_registry=self.skill_registry, active_skill=active_skill,
+        )
 
         return _fix_role_alternation(prefix + attachments, kept_messages)
 
     async def _summarize(self, messages: list[dict], active_skill: str | None = None, mode: str = "auto") -> str:
         instruction = COMPACT_INSTRUCTION
         if active_skill:
-            instruction += f"\n\n注意：当前正在执行技能 '{active_skill}'，在「活跃技能」部分详细记录进度。"
+            instruction += (
+                f"\n\n注意：当前正在执行技能 '{active_skill}'。技能指令原文会在压缩后自动重新挂载，"
+                "摘要中只需详细记录执行进度（已完成哪几步、当前在哪一步、产出了什么），不要复述技能指令本身。"
+            )
         if mode == "auto":
             instruction += "\n\n不要在摘要中提出新问题或建议用户回答任何内容。摘要应纯粹记录事实，不包含后续提问。"
 

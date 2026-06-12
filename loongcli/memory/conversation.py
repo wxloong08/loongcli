@@ -108,6 +108,15 @@ class ConversationStore:
     def _session_path(self, session_id: str | None = None) -> Path:
         return self.base_dir / f"{session_id or self.session_id}.json"
 
+    def _read_existing(self) -> dict:
+        path = self._session_path()
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+
     def save(self, messages: list[dict]):
         if not self._meta["title"] and messages:
             for m in messages:
@@ -119,11 +128,52 @@ class ConversationStore:
         self._meta["updated_at"] = datetime.now(timezone.utc).isoformat()
         self._meta["turn_count"] = sum(1 for m in messages if m.get("role") == "user")
 
-        data = {"meta": self._meta, "messages": messages}
+        # 保留归档段等历史字段——messages 字段只代表「当前工作上下文」，
+        # 完整历史 = archived_segments + messages（见 archive_segment / full_history）
+        data = self._read_existing()
+        data["meta"] = self._meta
+        data["messages"] = messages
         self._session_path().write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def archive_segment(self, messages: list[dict], reason: str = "compact"):
+        """在压缩/清空等「就地改写 messages」的操作前归档原始消息。
+
+        compact 会用摘要替换 agent.messages，随后的 save() 会把压缩版覆写进
+        messages 字段——不先归档的话，完整历史在磁盘上也会丢失。
+        """
+        if not messages:
+            return
+        data = self._read_existing()
+        data.setdefault("meta", self._meta)
+        data.setdefault("archived_segments", []).append({
+            "archived_at": datetime.now(timezone.utc).isoformat(),
+            "reason": reason,
+            "message_count": len(messages),
+            "messages": messages,
+        })
+        data.setdefault("messages", messages)
+        self._session_path().write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def full_history(self, session_id: str | None = None) -> list[dict]:
+        """完整历史 = 所有归档段按序拼接 + 当前 messages。
+
+        相邻段之间存在重叠（压缩保留的最近几轮 + 摘要前缀）；
+        检索场景下重叠无害，展示场景由调用方标记边界。
+        """
+        data = self.load(session_id or self.session_id)
+        if not data:
+            return []
+        history: list[dict] = []
+        for seg in data.get("archived_segments", []):
+            history.extend(seg.get("messages", []))
+        history.extend(data.get("messages", []))
+        return history
 
     def load(self, session_id: str) -> dict | None:
         path = self._session_path(session_id)

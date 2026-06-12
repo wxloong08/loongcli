@@ -336,6 +336,9 @@ class AgentLoop:
             yield CompactStart(message_count=before)
             try:
                 active_skill = self._detect_active_skill()
+                if self.conversation_store:
+                    # 压缩会就地替换 messages，先归档原文，否则完整历史在磁盘上也会丢失
+                    self.conversation_store.archive_segment(self.messages, reason="auto-compact")
                 self.messages = await self.compactor.compact(
                     self.messages, active_skill=active_skill,
                     mode="auto", pre_tokens=self._last_prompt_tokens,

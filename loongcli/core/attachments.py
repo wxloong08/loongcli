@@ -67,6 +67,28 @@ def restore_files(paths: list[str]) -> str:
     return "## 最近文件\n" + "\n\n".join(sections)
 
 
+MAX_SKILL_REINJECT_CHARS = 8000
+
+
+def skill_section(skill_registry, active_skill: str | None) -> str:
+    """压缩后从磁盘重读活跃技能原文。
+
+    技能指令是契约类内容：被摘要成梗概会导致后续执行悄悄偏离（静默腐败），
+    且模型不知道自己忘了什么、不会主动找回——必须结构性保活，不能依赖检索。
+    """
+    if not skill_registry or not active_skill:
+        return ""
+    content = skill_registry.load_content(active_skill)
+    if not content:
+        return ""
+    if len(content) > MAX_SKILL_REINJECT_CHARS:
+        content = content[:MAX_SKILL_REINJECT_CHARS] + "\n[... 技能原文已截断]"
+    return (
+        f"## 活跃技能: {active_skill}（原文已重新挂载，以此为准，摘要中的梗概仅供参考）\n"
+        f"{content}"
+    )
+
+
 def plan_status(plan_store) -> str:
     if not plan_store:
         return ""
@@ -98,8 +120,14 @@ def build_attachments(
     messages: list[dict],
     plan_store: PlanStore | None = None,
     task_manager: TaskManager | None = None,
+    skill_registry=None,
+    active_skill: str | None = None,
 ) -> list[dict]:
     sections: list[str] = []
+
+    skill_text = skill_section(skill_registry, active_skill)
+    if skill_text:
+        sections.append(skill_text)
 
     file_paths = extract_recent_files(messages)
     file_section = restore_files(file_paths)

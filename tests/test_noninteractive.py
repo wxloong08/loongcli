@@ -73,6 +73,7 @@ async def test_async_main_uses_module_path_import_before_memory_migration():
         output_format="text",
         no_stream=False,
         verbose=False,
+        profile=None,
     )
     cfg = SimpleNamespace(
         api_key="test-key",

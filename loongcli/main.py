@@ -346,6 +346,8 @@ async def _async_main():
     registry.register(GrepTool())
     registry.register(RecallTool(memory))
     registry.register(MemorizeTool(memory))
+    from loongcli.tools.search_history import SearchHistoryTool
+    registry.register(SearchHistoryTool(conversation))
     plan_store = PlanStore()
     registry.register(PlanTool(plan_store))
 
@@ -405,7 +407,8 @@ async def _async_main():
         max_tokens = router.context_window_for("main")
         threshold = max(0, max_tokens - SUMMARY_TOKEN_RESERVE)
 
-    compactor = Compactor(llm=llm, threshold=threshold, plan_store=plan_store, task_manager=task_manager)
+    compactor = Compactor(llm=llm, threshold=threshold, plan_store=plan_store,
+                          task_manager=task_manager, skill_registry=skill_registry)
 
     utility_llm = router.client("utility")
     recall_engine = RecallEngine(memory=memory, llm=utility_llm)

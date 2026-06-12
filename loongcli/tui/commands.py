@@ -76,6 +76,8 @@ class ClearCommand(SlashCommand):
 
     async def run(self, args: list[str], ctx: CommandContext) -> None:
         agent = ctx.agent
+        if agent.conversation_store:
+            agent.conversation_store.archive_segment(agent.messages, reason="clear")
         system_msgs = [m for m in agent.messages if m["role"] == "system"]
         agent.messages = system_msgs
         agent._last_prompt_tokens = 0
@@ -126,6 +128,8 @@ class CompactCommand(SlashCommand):
         if before <= 12:
             ctx.console.print("[dim]对话太短，无需压缩[/dim]")
             return
+        if agent.conversation_store:
+            agent.conversation_store.archive_segment(agent.messages, reason="manual-compact")
         agent.messages = await agent.compactor.compact(agent.messages)
         after = len(agent.messages)
         ctx.console.print(f"[cyan]✓ 已压缩: {before} → {after} 条消息[/cyan]")
