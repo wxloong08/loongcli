@@ -25,6 +25,24 @@ class TestSkillSection:
         assert "第一步：打开招聘网站" in text
         assert "原文已重新挂载" in text
 
+    def test_reinjected_text_survives_next_compact_detection(self):
+        """回归：重注入头必须能被 _detect_active_skill 识别，否则重注入只存活一代。
+
+        第一次压缩后原始技能工具结果已被摘要掉，第二次压缩的 active_skill
+        检测只能依赖上一次重注入的附件文本——头部格式必须是规范的 '## 技能: <name>'。
+        """
+        from unittest.mock import MagicMock
+        from loongcli.core.agent import AgentLoop
+
+        reg = FakeRegistry({"relay": "规则正文"})
+        agent = AgentLoop(
+            llm=MagicMock(), tool_registry=MagicMock(), permission_checker=MagicMock(),
+        )
+        agent.messages = [
+            {"role": "user", "content": "[压缩后上下文恢复]\n\n" + skill_section(reg, "relay")},
+        ]
+        assert agent._detect_active_skill() == "relay"
+
     def test_no_registry_or_skill(self):
         assert skill_section(None, "jobhunter") == ""
         assert skill_section(FakeRegistry({}), None) == ""

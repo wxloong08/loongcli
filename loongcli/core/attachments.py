@@ -83,8 +83,11 @@ def skill_section(skill_registry, active_skill: str | None) -> str:
         return ""
     if len(content) > MAX_SKILL_REINJECT_CHARS:
         content = content[:MAX_SKILL_REINJECT_CHARS] + "\n[... 技能原文已截断]"
+    # 头部必须用 "## 技能: <name>" 规范格式——_detect_active_skill 靠它在下一次
+    # 压缩时识别活跃技能。换成别的写法会导致重注入只存活一代（已踩过）。
     return (
-        f"## 活跃技能: {active_skill}（原文已重新挂载，以此为准，摘要中的梗概仅供参考）\n"
+        f"## 技能: {active_skill}\n"
+        f"（活跃技能原文已重新挂载，以此为准，摘要中的梗概仅供参考）\n"
         f"{content}"
     )
 
