@@ -319,12 +319,19 @@ class AgentLoop:
             try:
                 recalled = await self.recall_engine.recall(user_input)
                 if recalled:
+                    # 先删掉上一轮的召回注入，避免跨轮累积
                     self.messages = [
                         m for m in self.messages
                         if not (m.get("role") == "system" and m.get("content", "").startswith("# 相关记忆"))
                     ]
                     injection = self.recall_engine.format_for_injection(recalled)
-                    insert_idx = 1 if self.messages and self.messages[0].get("role") == "system" else 0
+                    # 注入到当前 user message 之前：每轮变化的召回内容尽量靠近末尾，
+                    # 不打断 system prompt + 工具 schema + 历史对话的前缀缓存。
+                    # 实测（bench/cache_probe.py）：position 1 注入命中率 ~53%，末尾注入 ~99%。
+                    if self.messages and self.messages[-1].get("role") == "user":
+                        insert_idx = len(self.messages) - 1
+                    else:
+                        insert_idx = len(self.messages)
                     self.messages.insert(insert_idx, {"role": "system", "content": injection})
             except Exception as e:
                 logger.warning("Memory recall failed: %s", e)
