@@ -48,6 +48,19 @@ def _make_turn_messages(with_system: bool = True) -> list[dict]:
     return msgs
 
 
+def _make_messages_with_tools(n_turns: int) -> list[dict]:
+    """>20 轮 + 多个可回收工具结果——snip 和 micro_compact 在这种数据上会真的删改。"""
+    msgs: list[dict] = [{"role": "system", "content": "you are helpful"}]
+    for i in range(n_turns):
+        msgs.append({"role": "user", "content": f"question {i}"})
+        if i < 8:  # 前 8 轮带工具结果（> MICRO_COMPACT_KEEP_RECENT，micro_compact 会清理最老的）
+            msgs.append({"role": "assistant", "content": None,
+                         "tool_calls": [{"id": f"tc{i}", "function": {"name": "read_file", "arguments": "{}"}}]})
+            msgs.append({"role": "tool", "tool_call_id": f"tc{i}", "content": "x" * 500})
+        msgs.append({"role": "assistant", "content": f"answer {i}"})
+    return msgs
+
+
 def _mock_llm(summary_text: str = "<summary>这是摘要</summary>") -> MagicMock:
     llm = MagicMock()
     chunk = MagicMock()
@@ -341,6 +354,89 @@ class TestCompact:
         assert sent[-1]["role"] == "user"
         assert sent[-1]["content"].startswith(COMPACT_INSTRUCTION)
         assert len(sent) == len(msgs) + 1
+
+    async def test_full_history_when_within_window(self):
+        """pre_tokens 在窗口内 → 摘要喂完整历史（命中缓存），即使有大量可删内容也不删减。"""
+        calls: list[dict] = []
+
+        async def capture(**kwargs):
+            calls.append(kwargs)
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta.content = "<summary>s</summary>"
+            chunk.choices[0].delta.tool_calls = None
+            chunk.choices[0].finish_reason = "stop"
+            chunk.usage = None
+            yield chunk
+
+        llm = MagicMock()
+        llm.model = "deepseek-v4-pro"
+        llm.cache_aware = True
+        llm.chat_stream = capture
+        c = Compactor(llm=llm, threshold=100)
+
+        msgs = _make_messages_with_tools(25)  # >20 轮 + 8 个工具结果：snip/micro 本会删改
+        await c.compact(msgs, pre_tokens=500)  # 远在窗口内
+
+        sent = calls[0]["messages"]
+        assert len(sent) == len(msgs) + 1, "窗口内应喂完整历史，不做 snip/micro 删减"
+        assert not any(CLEARED_PLACEHOLDER in str(m.get("content") or "") for m in sent), "不应清理工具结果"
+
+    async def test_degrades_to_snip_when_over_window(self):
+        """pre_tokens 超窗口 → 降级到 snip+micro_compact 兜底（牺牲缓存换不溢出）。"""
+        calls: list[dict] = []
+
+        async def capture(**kwargs):
+            calls.append(kwargs)
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta.content = "<summary>s</summary>"
+            chunk.choices[0].delta.tool_calls = None
+            chunk.choices[0].finish_reason = "stop"
+            chunk.usage = None
+            yield chunk
+
+        llm = MagicMock()
+        llm.model = "deepseek-v4-pro"
+        llm.cache_aware = True
+        llm.chat_stream = capture
+        c = Compactor(llm=llm, threshold=100)
+
+        msgs = _make_messages_with_tools(25)
+        await c.compact(msgs, pre_tokens=10_000_000)  # 远超窗口
+
+        sent = calls[0]["messages"]
+        degraded = len(sent) < len(msgs) + 1 or any(
+            CLEARED_PLACEHOLDER in str(m.get("content") or "") for m in sent)
+        assert degraded, "超窗口应降级到 snip+micro_compact"
+
+    async def test_non_cache_aware_runs_full_pyramid(self):
+        """非 cache-aware provider（无强缓存）→ 摘要走完整金字塔（snip+micro 减 token），即使窗口内。"""
+        calls: list[dict] = []
+
+        async def capture(**kwargs):
+            calls.append(kwargs)
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta.content = "<summary>s</summary>"
+            chunk.choices[0].delta.tool_calls = None
+            chunk.choices[0].finish_reason = "stop"
+            chunk.usage = None
+            yield chunk
+
+        llm = MagicMock()
+        llm.model = "gpt-4o"
+        llm.cache_aware = False
+        llm.chat_stream = capture
+        c = Compactor(llm=llm, threshold=100)
+
+        msgs = _make_messages_with_tools(25)
+        await c.compact(msgs, pre_tokens=500)  # 窗口内，但非 cache-aware → 仍走完整金字塔减 token
+
+        sent = calls[0]["messages"]
+        degraded = len(sent) < len(msgs) + 1 or any(
+            CLEARED_PLACEHOLDER in str(m.get("content") or "") for m in sent)
+        assert degraded, "非 cache-aware 应走完整金字塔（snip+micro），即使窗口内"
 
 
 # --- _extract_summary ---

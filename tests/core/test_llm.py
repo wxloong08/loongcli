@@ -13,6 +13,22 @@ def test_llm_client_custom_model():
     assert client.model == "deepseek-v4-pro"
 
 
+def test_cache_aware_deepseek_base_url():
+    c = LLMClient(api_key="k", model="deepseek-v4-pro", base_url="https://api.deepseek.com")
+    assert c.cache_aware is True
+
+
+def test_cache_aware_deepseek_model_via_proxy():
+    # 走代理：base_url 不含 deepseek（provider_type 误判成 openai），但 model 名兜住，避免静默退化
+    c = LLMClient(api_key="k", model="deepseek-v4-pro", base_url="https://my-proxy.example.com/v1")
+    assert c.cache_aware is True
+
+
+def test_cache_aware_false_for_non_deepseek():
+    c = LLMClient(api_key="k", model="gpt-4o", base_url="https://api.openai.com/v1")
+    assert c.cache_aware is False
+
+
 @pytest.mark.asyncio
 async def test_chat_stream_yields_chunks():
     client = LLMClient(api_key="test-key")

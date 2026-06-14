@@ -374,8 +374,13 @@ class AgentLoop:
             self._result_manager.reset_turn()
             collector = StreamCollector()
 
-            level = should_collapse(self._last_prompt_tokens, model_context_window(self.llm.model))
-            api_messages = collapse(self.messages, level) if level > 0 else self.messages
+            # cache-aware provider（如 DeepSeek）跳过 collapse：保持前缀稳定让缓存命中，
+            # 减 token 在自动缓存场景是负优化。其他 provider 走完整压缩金字塔。
+            if self.llm.cache_aware:
+                api_messages = self.messages
+            else:
+                level = should_collapse(self._last_prompt_tokens, model_context_window(self.llm.model))
+                api_messages = collapse(self.messages, level) if level > 0 else self.messages
 
             try:
                 async for event in collector.collect(

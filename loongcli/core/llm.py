@@ -29,6 +29,19 @@ class LLMClient:
         self.reasoning_effort = reasoning_effort
         self._provider_type = provider_type or _infer_provider(base_url)
 
+    @property
+    def cache_aware(self) -> bool:
+        """该 provider 是否有强自动前缀缓存，值得「保前缀稳定 > 减 token」。
+
+        DeepSeek 自动缓存命中比未命中便宜约 120 倍，故压缩走缓存友好路径（跳过 collapse、
+        摘要优先喂完整历史）。其他 provider 默认 False，走完整压缩金字塔（减 token）。
+
+        判断同时看 base_url 推断的 provider_type 和 model 名——后者是为了兜住「走代理 base_url
+        访问 DeepSeek」的场景：那时 base_url 不含 deepseek、provider_type 会误判，但 model 名
+        通常仍是 deepseek-xxx，靠它避免静默退化回完整金字塔。
+        这是个能力标志而非硬编码——以后给别的强缓存 provider 开，改这里即可。"""
+        return self._provider_type == "deepseek" or self.model.lower().startswith("deepseek")
+
     def _build_thinking_params(self, kwargs: dict) -> None:
         """Inject provider-specific thinking/reasoning parameters."""
         if not self.thinking:
