@@ -348,7 +348,7 @@ async def _async_main():
     registry.register(MemorizeTool(memory))
     from loongcli.tools.search_history import SearchHistoryTool
     registry.register(SearchHistoryTool(conversation))
-    plan_store = PlanStore()
+    plan_store = PlanStore(project_dir=Path.cwd())
     registry.register(PlanTool(plan_store))
 
     mcp = MCPManager(servers=cfg.mcp_servers)

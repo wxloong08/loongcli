@@ -3,7 +3,6 @@ import asyncio
 import shutil
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -13,6 +12,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from loongcli.core.agent import AgentLoop
@@ -21,6 +21,8 @@ from loongcli.core.intent import StopIntent, detect_stop_intent
 from loongcli.memory.markdown_store import MarkdownMemoryStore
 from loongcli.memory.conversation import ConversationStore
 from loongcli.tui.commands import CommandContext, CommandRegistry, create_default_registry
+from loongcli.tui.mdstream import StreamView
+from loongcli.core.sanitize import repair_surrogates
 
 
 _BUILTIN_COMMANDS = [
@@ -77,6 +79,10 @@ class TUI:
     MAX_GOAL_ITERATIONS = 20
     GOAL_STALL_LIMIT = 3
 
+    # 大块粘贴折叠阈值（仿 Claude Code）：超过则在输入区显示占位符，提交时还原完整原文
+    PASTE_COLLAPSE_LINES = 4
+    PASTE_COLLAPSE_CHARS = 300
+
     def __init__(
         self,
         memory: MarkdownMemoryStore | None = None,
@@ -94,6 +100,27 @@ class TUI:
         self._session: PromptSession | None = None
         self._goal_mode: bool = False
         self._goal_description: str = ""
+        self._pastes: dict[str, str] = {}   # 占位符 -> 完整粘贴原文
+        self._paste_counter: int = 0
+
+    def _maybe_collapse_paste(self, data: str) -> str:
+        """大块粘贴 → 折叠成占位符（存原文）；小块 → 原样返回。供 BracketedPaste 绑定调用。"""
+        data = data.replace("\r\n", "\n").replace("\r", "\n")
+        lines = data.splitlines()
+        if len(lines) >= self.PASTE_COLLAPSE_LINES or len(data) >= self.PASTE_COLLAPSE_CHARS:
+            self._paste_counter += 1
+            placeholder = f"[Pasted text #{self._paste_counter} +{len(lines)} lines]"
+            self._pastes[placeholder] = data
+            return placeholder
+        return data
+
+    def _expand_pastes(self, text: str) -> str:
+        """提交时把占位符还原成完整原文，发给 LLM 的是全文。"""
+        if self._pastes:
+            for placeholder, real in self._pastes.items():
+                text = text.replace(placeholder, real)
+            self._pastes.clear()
+        return text
 
     def _get_session(self) -> PromptSession:
         if self._session is None:
@@ -102,6 +129,10 @@ class TUI:
             @kb.add("escape", "enter")
             def _(event):
                 event.current_buffer.insert_text("\n")
+
+            @kb.add(Keys.BracketedPaste)
+            def _(event):
+                event.current_buffer.insert_text(self._maybe_collapse_paste(event.data))
 
             self._session = PromptSession(
                 "❯ ",
@@ -228,7 +259,12 @@ class TUI:
                 self.console.print(f"\n[dim]再见！会话 [cyan]{sid}[/cyan] 已保存，[cyan]loongcli --continue[/cyan] 可继续[/dim]")
                 break
 
-            user_input = user_input.strip()
+            # 还原折叠的大块粘贴：输入区显示的是占位符，发给 agent 的是完整原文。
+            user_input = self._expand_pastes(user_input)
+            # 源头修复：Windows 控制台粘贴 emoji 会以 UTF-16 代理对传入，原样下传会污染
+            # 历史/记忆并在存盘与 LLM 请求的 UTF-8 编码处崩溃。把代理对解码回真 emoji
+            # （孤立代理丢弃），下游全拿到干净且忠实的输入。
+            user_input = repair_surrogates(user_input).strip()
             if not user_input:
                 continue
             if user_input == "/exit":
@@ -267,101 +303,72 @@ class TUI:
         self.console.print("─" * shutil.get_terminal_size().columns + "\n")
         usage_before = {k: v for k, v in agent.token_usage.items()}
         cost_before = agent.cost_tracker.total_cost if agent.cost_tracker else 0
-        buffer = ""
         thinking_buffer = ""
-        in_thinking = False
-        live = Live(
-            Padding(Spinner("dots", text="[dim]思考中...[/dim]"), self.PADDING),
-            console=self.console, refresh_per_second=8,
-        )
-        live.start()
+        view = StreamView(self.console, left_pad=self.PADDING[1])
+        view.status(Padding(Spinner("dots", text="[dim]思考中...[/dim]"), self.PADDING))
 
         try:
             async for event in agent.run_stream(user_input, allowed_tools=allowed_tools):
                 if isinstance(event, ThinkingDelta):
                     thinking_buffer += event.text
-                    in_thinking = True
-                    lines = thinking_buffer.split("\n")
-                    last_line = lines[-1] if lines else ""
+                    last_line = thinking_buffer.split("\n")[-1]
                     if len(last_line) > 80:
                         last_line = last_line[:80] + "..."
-                    live.update(Padding(
+                    view.status(Padding(
                         Text.from_markup(f"[dim italic]💭 思考中... {last_line}[/dim italic]"),
                         self.PADDING,
                     ))
 
                 elif isinstance(event, TextDelta):
-                    if in_thinking:
-                        in_thinking = False
-                        live.stop()
-                        thinking_buffer = ""
-                        live = Live(console=self.console, refresh_per_second=8)
-                        live.start()
-                    buffer += event.text
-                    live.update(Padding(Markdown(buffer), self.PADDING))
+                    thinking_buffer = ""
+                    view.append_text(event.text)
 
                 elif isinstance(event, ToolCallStart):
-                    live.update(Text(""))
-                    live.stop()
-                    if in_thinking:
-                        in_thinking = False
-                        thinking_buffer = ""
-                    if buffer.strip():
-                        self.console.print(Padding(Markdown(buffer), self.PADDING))
-                        buffer = ""
+                    view.flush_text()
                     self.console.print(Padding(
                         Text.from_markup(
                             f"[yellow]⚙ {event.tool_name}[/yellow]"
                             f" [dim]({self._brief_args(event.arguments)})[/dim]"
                         ), self.PADDING,
                     ))
-                    live = Live(
-                        Padding(Spinner("dots", text="[dim]执行中...[/dim]"), self.PADDING),
-                        console=self.console, refresh_per_second=8,
-                    )
-                    live.start()
+                    view.status(Padding(
+                        Spinner("dots", text="[dim]执行中...[/dim]"), self.PADDING,
+                    ))
 
                 elif isinstance(event, ToolCallResult):
-                    live.stop()
+                    view.stop_status()
                     display = self._format_tool_result(event.tool_name, event.result)
                     self.console.print(Padding(
                         Text.from_markup(f"[green]✓ {event.tool_name}[/green] {display}"),
                         self.PADDING,
                     ))
-                    buffer = ""
-                    live = Live(console=self.console, refresh_per_second=8)
-                    live.start()
 
                 elif isinstance(event, CompactStart):
-                    live.update(Padding(
+                    view.status(Padding(
                         Spinner("dots", text=f"[cyan]压缩上下文中... ({event.message_count} 条消息)[/cyan]"),
                         self.PADDING,
                     ))
 
                 elif isinstance(event, CompactNotice):
-                    live.stop()
+                    view.stop_status()
                     self.console.print(Padding(
                         Text.from_markup(f"[cyan]⚡ 上下文已压缩: {event.before} → {event.after} 条消息[/cyan]"),
                         self.PADDING,
                     ))
-                    live = Live(console=self.console, refresh_per_second=8)
-                    live.start()
 
                 elif isinstance(event, TaskNotification):
-                    live.stop()
+                    view.stop_status()
                     self.console.print(Padding(
                         Text.from_markup(
                             f"[magenta]📋 SubAgent {event.task_id} 完成[/magenta] "
                             f"{self._truncate(event.result, 200)}"
                         ), self.PADDING,
                     ))
-                    live = Live(console=self.console, refresh_per_second=8)
-                    live.start()
 
                 elif isinstance(event, ShellOutput):
                     style = "dim" if event.stream == "stdout" else "dim red"
                     display_line = event.line if len(event.line) <= 120 else event.line[:120] + "..."
-                    live.update(Padding(
+                    view.status(Padding(
                         Text.from_markup(f"[{style}]  {display_line}[/{style}]"),
                         self.PADDING,
                     ))
@@ -369,7 +376,7 @@ class TUI:
                 elif isinstance(event, BatchProgress):
                     prompt_preview = event.task_prompt[:50] + "..." if len(event.task_prompt) > 50 else event.task_prompt
                     status_style = "green" if event.status == "completed" else "red"
-                    live.update(Padding(
+                    view.status(Padding(
                         Text.from_markup(
                             f"[cyan]⏳ 并行任务 {event.completed}/{event.total}[/cyan] "
                             f"[{status_style}]{event.status}[/{status_style}] "
@@ -378,7 +385,8 @@ class TUI:
                     ))
 
                 elif isinstance(event, ConfirmRequest):
-                    live.stop()
+                    view.flush_text()
+                    view.stop_status()
                     self.console.print(Padding(
                         Text.from_markup(
                             f"[bold red]⚠ 风险操作:[/bold red] {event.tool_name} — {event.risk_reason}"
@@ -402,12 +410,10 @@ class TUI:
                         self.console.print("  [green]✓ 已确认[/green]")
                     else:
                         self.console.print("  [yellow]✗ 已拒绝[/yellow]")
-                    buffer = ""
-                    live = Live(console=self.console, refresh_per_second=8)
-                    live.start()
 
                 elif isinstance(event, PlanApproval):
-                    live.stop()
+                    view.flush_text()
+                    view.stop_status()
                     self.console.print(Panel(
                         Markdown(event.plan_summary),
                         title="执行计划",
@@ -432,19 +438,12 @@ class TUI:
                     except (EOFError, KeyboardInterrupt):
                         event.future.set_result("cancel")
                         self.console.print("  [yellow]✗ 计划已取消[/yellow]")
-                    buffer = ""
-                    live = Live(console=self.console, refresh_per_second=8)
-                    live.start()
 
                 elif isinstance(event, AgentDone):
                     pass
 
         finally:
-            live.update(Text(""))
-            live.stop()
-            if buffer.strip():
-                self.console.print(Padding(Markdown(buffer), self.PADDING))
-                buffer = ""
+            view.close()
 
         u = agent.token_usage
         delta = {k: u[k] - usage_before[k] for k in u}

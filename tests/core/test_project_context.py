@@ -4,6 +4,17 @@ from pathlib import Path
 from loongcli.core.project_context import find_project_context_files, load_project_context
 
 
+@pytest.fixture(autouse=True)
+def _isolate_home(tmp_path, monkeypatch):
+    """Point Path.home() at an empty temp dir so these tests don't pick up the
+    real user-level ~/.loongcli/LOONG.md (which find_project_context_files loads
+    unconditionally). Without this, exact-equality assertions fail on any machine
+    that actually has a user-level LOONG.md."""
+    fake_home = tmp_path / "_home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda *a, **k: fake_home)
+
+
 def test_find_no_files(tmp_path):
     result = find_project_context_files(start=tmp_path)
     assert result == []

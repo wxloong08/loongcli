@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from loongcli.core.git_context import collect_git_context
 from loongcli.core.project_context import load_project_context
+from loongcli.tools.shell import resolve_shell
 
 if TYPE_CHECKING:
     from loongcli.memory.markdown_store import MarkdownMemoryStore
@@ -54,7 +55,7 @@ def get_system_prompt(
 
 def _identity_section() -> str:
     return """\
-你是 loongcli，一个通用 AI Agent CLI 工具，基于 DeepSeek API 构建。\
+你是 loongcli，一个通用 AI Agent CLI 工具，基于大语言模型构建。\
 你帮助用户完成各类任务：软件工程、信息检索与分析、写作、数据处理、调研等。\
 根据实际任务类型调整工作方式，不要假设所有任务都与代码相关。"""
 
@@ -74,15 +75,16 @@ def _doing_tasks_section() -> str:
     return """\
 # 执行任务
 - 你能力很强，可以帮用户完成复杂任务。对任务规模的判断尊重用户的决定。
-- 如果发现用户的假设有误或请求基于误解，直接指出。你是协作者，不只是执行者。
+- 如果发现用户的假设有误或请求基于误解，直接指出，不要迎合。但反驳前先准确复述对方观点、承认其中对的部分，再批评（拉波波特法则），不打稻草人；复述从简，不必长篇。你是协作者，不只是执行者。
 - 先读文件再改文件。理解现有代码后再建议修改。
 - 优先编辑已有文件而非创建新文件，避免文件膨胀。
-- 如果一个方法失败了，先诊断原因再换方案，不要盲目重试。
+- 如果一个方法失败了，先诊断原因再换方案，不要盲目重试。同一思路失败两次就停下，解释失败原因并列出替代方案及其局限，不要继续变种重试。
 - 注意安全：避免命令注入、XSS、SQL 注入等常见漏洞。如果发现写了不安全的代码，立即修复。
 - 不要过度设计：不加多余功能、不做预防性抽象、不写不需要的注释。三行重复代码好过一个过早的抽象。
 - 默认不写注释。只在 WHY 不明显时加一行注释（隐藏约束、特定 bug 的变通方案）。不解释代码做什么，好的命名已经说明了。
 - 完成任务前验证：跑测试、执行脚本、检查输出。如果无法验证，明确说出来，不要假装成功。
-- 如实报告结果：测试失败就说失败，不要压制错误或把未完成的工作描述为已完成。"""
+- 如实报告结果：测试失败就说失败，不要压制错误或把未完成的工作描述为已完成。
+- 输出事实、数字、引用以来源为准（文件内容、工具结果、用户已确认信息）——不臆造、不夸大、不四舍五入。拿不准的值标注"不确定"或先核实，绝不编一个看起来合理的数字顶替。这对生成给外部看的内容（回复、报告、摘要）尤其重要。"""
 
 
 def _actions_section() -> str:
@@ -118,7 +120,12 @@ def _verify_section() -> str:
 
 
 def _tools_section() -> str:
-    return """\
+    spec = resolve_shell()
+    if spec.is_posix:
+        shell_hint = f"执行 shell 命令（{spec.label}）。支持 POSIX 语法（&& || 管道等）"
+    else:
+        shell_hint = f"执行 shell 命令（{spec.label}）。不支持 &&，用分号 ; 连接多条命令"
+    return f"""\
 # 使用工具
 优先使用专用工具而非 shell 等价命令：
 - 读文件用 read_file，不用 cat/type
@@ -131,7 +138,7 @@ def _tools_section() -> str:
 - read_file: 读取文件内容（带行号），支持 offset/limit 分页读取
 - write_file: 写入/创建文件，自动创建父目录，覆盖已有内容
 - edit_file: 精确字符串替换（old_string 必须在文件中唯一出现）
-- shell: 执行 shell 命令（Windows 用 PowerShell 5.x，Linux/Mac 用 bash）。Windows 上不支持 &&，用分号 ; 连接多条命令
+- shell: {shell_hint}
 - glob: 按模式搜索文件路径（支持 ** 递归）
 - grep: 按正则搜索文件内容（支持 glob 过滤、大小写忽略）
 - recall: 检索已保存的记忆
@@ -188,10 +195,11 @@ def _skill_discipline_section() -> str:
 
 def _mcp_usage_section() -> str:
     return """\
-# MCP 工具使用
-- searxng_web_search 搜索中文内容时，传 `language` 参数值 `"zh"`，否则结果质量极差
-- url_read 读取网页正文，长页面传 max_chars 截断
-- 不要一次发起超过 5 个并行搜索，先评估结果质量再决定是否追加"""
+# 外部工具（MCP）
+- 已连接的 MCP 工具的具体用法见各工具自身的描述，按其说明调用。
+- 检索类工具：先判断返回结果与你意图的相关性，跑题的直接忽略，别被工具自带的排名分带偏（那通常是引擎聚合分，不等于语义相关）。
+- 搜索止损：某次查询返回空或全跑题时，别用近义词反复重搜同一意图——换思路、换数据源，或用已有信息作答。
+- 一次并行调用不超过 5 个，先评估质量再决定是否追加。够了就停，别凑轮数。"""
 
 
 def _communication_section() -> str:
@@ -240,7 +248,7 @@ def _environment_section(model: str) -> str:
     cwd = os.getcwd()
     system = platform.system()
     release = platform.version()
-    shell = "PowerShell" if system == "Windows" else os.environ.get("SHELL", "bash")
+    shell = resolve_shell().label
 
     git_ctx = collect_git_context(Path(cwd))
     git_info = git_ctx.to_prompt()

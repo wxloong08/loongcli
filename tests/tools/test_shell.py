@@ -1,5 +1,6 @@
 import pytest
 import platform
+import loongcli.tools.shell as shell_mod
 from loongcli.tools.shell import ShellTool
 from loongcli.core.events import ShellOutput
 
@@ -25,10 +26,10 @@ async def test_echo_command(tool):
 
 @pytest.mark.asyncio
 async def test_command_timeout(tool):
-    if platform.system() == "Windows":
-        cmd = "ping -n 10 127.0.0.1"
-    else:
+    if tool.is_posix:
         cmd = "sleep 10"
+    else:
+        cmd = "ping -n 10 127.0.0.1"
     result = await tool.execute(command=cmd, timeout=1)
     assert "超时" in result or "timeout" in result.lower()
 
@@ -46,7 +47,11 @@ def test_tool_schema(tool):
 
 def test_detects_platform(tool):
     if platform.system() == "Windows":
-        assert "powershell" in tool._shell_cmd.lower() or "pwsh" in tool._shell_cmd.lower()
+        # git bash when Git is installed, else PowerShell fallback
+        if tool.is_posix:
+            assert tool._shell_cmd.lower().endswith("bash.exe")
+        else:
+            assert "powershell" in tool._shell_cmd.lower() or "pwsh" in tool._shell_cmd.lower()
     else:
         assert "bash" in tool._shell_cmd or "sh" in tool._shell_cmd
 
@@ -57,10 +62,10 @@ def test_supports_progress(tool):
 
 @pytest.mark.asyncio
 async def test_streaming_echo(streaming_tool):
-    if platform.system() == "Windows":
-        cmd = "Write-Output 'line1'; Write-Output 'line2'; Write-Output 'line3'"
-    else:
+    if streaming_tool.is_posix:
         cmd = "echo line1; echo line2; echo line3"
+    else:
+        cmd = "Write-Output 'line1'; Write-Output 'line2'; Write-Output 'line3'"
     result = await streaming_tool.execute(command=cmd)
     assert "line1" in result
     assert "line2" in result
@@ -73,10 +78,10 @@ async def test_streaming_echo(streaming_tool):
 
 @pytest.mark.asyncio
 async def test_streaming_stderr(streaming_tool):
-    if platform.system() == "Windows":
-        cmd = "Write-Error 'oops' 2>&1"
-    else:
+    if streaming_tool.is_posix:
         cmd = "echo oops >&2"
+    else:
+        cmd = "Write-Error 'oops' 2>&1"
     result = await streaming_tool.execute(command=cmd)
     assert "oops" in result
     assert len(streaming_tool._collected) >= 1
@@ -90,10 +95,10 @@ async def test_streaming_no_callback(tool):
 
 @pytest.mark.asyncio
 async def test_streaming_timeout_partial(streaming_tool):
-    if platform.system() == "Windows":
-        cmd = "Write-Output 'before'; Start-Sleep -Seconds 10"
-    else:
+    if streaming_tool.is_posix:
         cmd = "echo before; sleep 10"
+    else:
+        cmd = "Write-Output 'before'; Start-Sleep -Seconds 10"
     result = await streaming_tool.execute(command=cmd, timeout=2)
     assert "超时" in result
     before_events = [e for e in streaming_tool._collected if "before" in e.line]
@@ -142,11 +147,65 @@ async def test_unknown_exit_code_no_hint(tool):
     assert "—" not in result  # no hint appended
 
 
+# ── shell resolution tests ──
+
+
+def test_resolve_shell_prefers_git_bash(monkeypatch):
+    """On Windows with Git installed, git bash wins over PowerShell."""
+    monkeypatch.setattr(shell_mod.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        shell_mod, "_find_git_bash", lambda: r"C:\Program Files\Git\bin\bash.exe",
+    )
+    shell_mod.resolve_shell.cache_clear()
+    try:
+        spec = shell_mod.resolve_shell()
+        assert spec.is_posix is True
+        assert spec.label == "git bash"
+        assert spec.args == ["-c"]
+        assert spec.cmd.lower().endswith("bash.exe")
+    finally:
+        shell_mod.resolve_shell.cache_clear()
+
+
+def test_resolve_shell_falls_back_to_powershell(monkeypatch):
+    """On Windows without git bash, fall back to PowerShell (never breaks)."""
+    monkeypatch.setattr(shell_mod.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(shell_mod, "_find_git_bash", lambda: None)
+    shell_mod.resolve_shell.cache_clear()
+    try:
+        spec = shell_mod.resolve_shell()
+        assert spec.is_posix is False
+        assert spec.label == "PowerShell"
+        assert "powershell" in spec.cmd.lower()
+    finally:
+        shell_mod.resolve_shell.cache_clear()
+
+
+def test_find_git_bash_ignores_wsl_bash(monkeypatch):
+    """_find_git_bash derives from `git`, never picks up System32 WSL bash."""
+    # git resolves under an install root; bash.exe sits at <root>\bin\bash.exe
+    monkeypatch.setattr(
+        shell_mod.shutil, "which",
+        lambda name: r"D:\program\Git\cmd\git.exe" if name == "git" else None,
+    )
+    seen = []
+
+    def fake_isfile(p):
+        seen.append(p)
+        return p == r"D:\program\Git\bin\bash.exe"
+
+    monkeypatch.setattr(shell_mod.os.path, "isfile", fake_isfile)
+    result = shell_mod._find_git_bash()
+    assert result == r"D:\program\Git\bin\bash.exe"
+    # never probes the WSL launcher
+    assert not any("System32" in p for p in seen)
+
+
 @pytest.mark.asyncio
 async def test_timeout_shows_terminated_notice(tool):
-    if platform.system() == "Windows":
-        cmd = "ping -n 10 127.0.0.1"
-    else:
+    if tool.is_posix:
         cmd = "sleep 10"
+    else:
+        cmd = "ping -n 10 127.0.0.1"
     result = await tool.execute(command=cmd, timeout=1)
     assert "终止" in result or "timeout" in result.lower()

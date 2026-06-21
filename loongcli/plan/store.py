@@ -5,6 +5,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from loongcli.memory.conversation import _path_to_slug, _projects_root
+
 
 STEP_STATUSES = ("pending", "in_progress", "completed", "skipped")
 PLAN_STATUSES = ("active", "completed", "abandoned")
@@ -59,9 +61,20 @@ class Plan:
         return cls(steps=steps, **data)
 
 
+def _project_plans_dir(project_dir: Path | None = None) -> Path:
+    """Plans live alongside sessions under the per-project tree.
+
+    Mirrors ``conversation._project_sessions_dir`` so plans are scoped to the
+    cwd they were created in — otherwise a global store leaks unrelated
+    projects' plans into every session (and into the system prompt).
+    """
+    slug = _path_to_slug(project_dir or Path.cwd())
+    return _projects_root() / slug / "plans"
+
+
 class PlanStore:
-    def __init__(self, base_dir: Path | None = None):
-        self.base_dir = base_dir or Path.home() / ".loongcli" / "plans"
+    def __init__(self, base_dir: Path | None = None, project_dir: Path | None = None):
+        self.base_dir = base_dir or _project_plans_dir(project_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, plan_id: str) -> Path:

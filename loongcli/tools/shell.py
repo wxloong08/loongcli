@@ -1,15 +1,69 @@
 from __future__ import annotations
 import asyncio
+import functools
+import os
 import platform
+import shutil
+from pathlib import Path
+from typing import NamedTuple
 from loongcli.tools.base import Tool
 from loongcli.core.events import ShellOutput
 
 _GRACEFUL_WAIT = 3  # seconds to wait between terminate and kill
 
 
+class ShellSpec(NamedTuple):
+    cmd: str            # executable to invoke
+    args: list[str]     # args preceding the command string
+    label: str          # human-readable name for prompt display
+    is_posix: bool      # True for bash-family shells (POSIX syntax)
+
+
+def _find_git_bash() -> str | None:
+    """Locate Git for Windows' bash.exe.
+
+    Deliberately avoids ``shutil.which("bash")``: on machines with WSL that
+    resolves to ``System32\\bash.exe`` (the WSL launcher), a completely
+    different shell. We derive bash from the ``git`` install instead.
+    """
+    candidates: list[str] = []
+    git = shutil.which("git")
+    if git:
+        # git is typically at <root>\cmd\git.exe or <root>\bin\git.exe
+        root = Path(git).parent.parent
+        candidates.append(str(root / "bin" / "bash.exe"))
+    candidates.append(r"C:\Program Files\Git\bin\bash.exe")
+    candidates.append(r"C:\Program Files (x86)\Git\bin\bash.exe")
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def resolve_shell() -> ShellSpec:
+    """Pick the shell for the current OS (stable for the process lifetime).
+
+    Windows prefers git bash and falls back to PowerShell when it is absent,
+    so the tool never breaks on a machine without Git installed.
+    """
+    if platform.system() == "Windows":
+        bash = _find_git_bash()
+        if bash:
+            return ShellSpec(cmd=bash, args=["-c"], label="git bash", is_posix=True)
+        return ShellSpec(
+            cmd="powershell",
+            args=["-NoProfile", "-NonInteractive", "-Command"],
+            label="PowerShell",
+            is_posix=False,
+        )
+    shell = os.environ.get("SHELL", "bash")
+    return ShellSpec(cmd="bash", args=["-c"], label=os.path.basename(shell) or "bash", is_posix=True)
+
+
 class ShellTool(Tool):
     name = "shell"
-    description = "Execute a shell command and return its output. Uses PowerShell on Windows, bash on Linux/Mac."
+    description = "Execute a shell command and return its output. Uses git bash on Windows (falls back to PowerShell if Git is not installed), bash on Linux/Mac."
     parameters = {
         "type": "object",
         "properties": {
@@ -27,13 +81,11 @@ class ShellTool(Tool):
     supports_progress = True
 
     def __init__(self):
-        system = platform.system()
-        if system == "Windows":
-            self._shell_cmd = "powershell"
-            self._shell_args = ["-NoProfile", "-NonInteractive", "-Command"]
-        else:
-            self._shell_cmd = "bash"
-            self._shell_args = ["-c"]
+        spec = resolve_shell()
+        self._shell_cmd = spec.cmd
+        self._shell_args = spec.args
+        self.shell_label = spec.label
+        self.is_posix = spec.is_posix
         self._progress_callback = None
 
     async def _read_stream(self, stream, stream_name: str, lines: list[str]):

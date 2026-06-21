@@ -86,6 +86,50 @@ class TestFormatToolResult:
         assert "截断" in result
 
 
+class TestPasteCollapse:
+    def setup_method(self):
+        self.tui = TUI()
+
+    def test_large_multiline_paste_collapsed(self):
+        data = "\n".join(f"line {i}" for i in range(40))
+        out = self.tui._maybe_collapse_paste(data)
+        assert out == "[Pasted text #1 +40 lines]"
+        assert self.tui._pastes[out] == data  # 完整原文被保存
+
+    def test_long_singleline_paste_collapsed(self):
+        data = "x" * 400
+        out = self.tui._maybe_collapse_paste(data)
+        assert out.startswith("[Pasted text #")
+        assert self.tui._pastes[out] == data
+
+    def test_small_paste_not_collapsed(self):
+        out = self.tui._maybe_collapse_paste("短文本 a b c")
+        assert out == "短文本 a b c"
+        assert self.tui._pastes == {}
+
+    def test_crlf_normalized(self):
+        out = self.tui._maybe_collapse_paste("a\r\nb\r\nc\r\nd\r\ne")
+        assert "\r" not in self.tui._pastes[out]
+
+    def test_expand_restores_full_text_and_clears(self):
+        data = "\n".join(["广告"] * 40)
+        ph = self.tui._maybe_collapse_paste(data)
+        expanded = self.tui._expand_pastes(f"我的问题？{ph}")
+        assert data in expanded
+        assert ph not in expanded
+        assert self.tui._pastes == {}  # 提交后清空
+
+    def test_expand_noop_without_pastes(self):
+        assert self.tui._expand_pastes("普通输入") == "普通输入"
+
+    def test_multiple_pastes_each_expanded(self):
+        a = self.tui._maybe_collapse_paste("\n".join(["A"] * 10))
+        b = self.tui._maybe_collapse_paste("\n".join(["B"] * 10))
+        assert a != b  # 计数器递增
+        out = self.tui._expand_pastes(f"{a} 和 {b}")
+        assert "A\nA" in out and "B\nB" in out
+
+
 class TestIsInternalMessage:
     def test_compact_boundary(self):
         assert TUI._is_internal_message("[compact-boundary] mode=auto | pre_tokens=100")

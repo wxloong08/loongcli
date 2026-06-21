@@ -51,9 +51,12 @@ class CheckpointManager:
 
         backup_root = self._backup_dir / ckpt_id
         backup_root.mkdir(parents=True, exist_ok=True)
-        for f in existing:
+        for i, f in enumerate(existing):
             src = self._resolve(f)
-            dst = backup_root / src.name
+            # Index-prefix the backup name so two files sharing a basename
+            # (e.g. pkg_a/__init__.py and pkg_b/__init__.py) don't clobber each
+            # other in the backup dir and corrupt each other on restore.
+            dst = backup_root / f"{i:03d}_{src.name}"
             dst.parent.mkdir(parents=True, exist_ok=True)
             try:
                 shutil.copy2(src, dst)

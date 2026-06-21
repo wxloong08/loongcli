@@ -58,6 +58,23 @@ def test_save_multiple_files(ckpt_mgr: CheckpointManager, tmp_path: Path):
     assert (tmp_path / "b.py").read_text() == "b"
 
 
+def test_save_same_basename_no_collision(ckpt_mgr: CheckpointManager, tmp_path: Path):
+    """Two files sharing a basename must back up and restore independently."""
+    (tmp_path / "pkg_a").mkdir()
+    (tmp_path / "pkg_b").mkdir()
+    (tmp_path / "pkg_a" / "__init__.py").write_text("a-original")
+    (tmp_path / "pkg_b" / "__init__.py").write_text("b-original")
+
+    ckpt_id = ckpt_mgr.save(["pkg_a/__init__.py", "pkg_b/__init__.py"])
+
+    (tmp_path / "pkg_a" / "__init__.py").write_text("a-changed")
+    (tmp_path / "pkg_b" / "__init__.py").write_text("b-changed")
+
+    assert ckpt_mgr.restore(ckpt_id)
+    assert (tmp_path / "pkg_a" / "__init__.py").read_text() == "a-original"
+    assert (tmp_path / "pkg_b" / "__init__.py").read_text() == "b-original"
+
+
 def test_restore_recreates_deleted_file(ckpt_mgr: CheckpointManager, tmp_path: Path):
     (tmp_path / "x.py").write_text("content")
     ckpt_id = ckpt_mgr.save(["x.py"])

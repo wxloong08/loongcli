@@ -15,7 +15,7 @@ def test_prompt_contains_all_sections():
     assert "# 使用工具" in prompt
     assert "# 计划（Plan）使用" in prompt
     assert "# 技能执行规则" in prompt
-    assert "# MCP 工具使用" in prompt
+    assert "# 外部工具（MCP）" in prompt
     assert "# 交流风格" in prompt
     assert "# 环境" in prompt
 
@@ -69,10 +69,15 @@ def test_prompt_skill_discipline():
 
 
 def test_prompt_mcp_usage():
-    prompt = get_system_prompt(model="deepseek-v4-flash")
-    assert "MCP 工具使用" in prompt
-    assert "language" in prompt
-    assert "zh" in prompt
+    # loongcli 核心提示应保持 MCP-无关：只给通用工具纪律，不硬编码具体 MCP 工具名/参数
+    # （searxng 等工具的具体用法由各 MCP 自带描述提供）。直接查该节，避免误命中
+    # 动态注入的 git 提交信息等无关内容。
+    from loongcli.core.prompts import _mcp_usage_section
+    section = _mcp_usage_section()
+    assert "# 外部工具（MCP）" in section
+    assert "搜索止损" in section
+    assert "searxng" not in section   # 不耦合私有 MCP
+    assert "language=" not in section
 
 
 def test_prompt_identity_general_purpose():
@@ -81,10 +86,31 @@ def test_prompt_identity_general_purpose():
     assert "信息检索" in prompt
 
 
+def test_prompt_identity_model_agnostic():
+    # 身份不应硬编码具体 provider——loongcli 支持多 provider（动态模型名在环境节）。
+    from loongcli.core.prompts import _identity_section
+    assert "DeepSeek" not in _identity_section()
+    assert "大语言模型" in _identity_section()
+
+
+def test_prompt_critical_thinking_principles():
+    # 通用推理原则：拉波波特法则（反稻草人）+ 同一思路失败两次止损（反 flailing）。
+    prompt = get_system_prompt(model="deepseek-v4-flash")
+    assert "拉波波特" in prompt
+    assert "失败两次就停" in prompt
+
+
 def test_prompt_compact_recovery_guidance():
     prompt = get_system_prompt(model="deepseek-v4-flash")
     assert "技能（skill）" in prompt
     assert "重新加载" in prompt
+
+
+def test_prompt_content_accuracy_clause():
+    """Must instruct against fabricating/inflating facts & numbers in output."""
+    prompt = get_system_prompt(model="deepseek-v4-flash")
+    assert "以来源为准" in prompt
+    assert "不臆造" in prompt
 
 
 def test_prompt_plan_usage():
