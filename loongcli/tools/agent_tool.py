@@ -9,7 +9,7 @@ from loongcli.tools.routing import AgentRole, filter_tools, COORDINATOR_ALLOWED
 from loongcli.core.task import TaskManager, TaskStatus as TS
 from loongcli.core.agent import AgentLoop
 from loongcli.core.compact import Compactor
-from loongcli.security.permissions import PermissionChecker, PermissionMode
+from loongcli.security.permissions import PermissionChecker
 
 if TYPE_CHECKING:
     from loongcli.core.llm import LLMClient
@@ -139,17 +139,20 @@ class AgentTool(Tool):
             max_iter = 30
 
         compactor = Compactor(llm=self._sub_llm, threshold=16000)
-        sub_checker = PermissionChecker(PermissionMode.SKIP)
 
+        # 继承父级的权限检查器（同 mode + 会话学习到的白名单），而非一律 SKIP：
+        # 子代理绝不能绕过主 agent 所受的确认层，否则 delegate/提示注入就成了提权路径。
+        # interactive=False 让任何 CONFIRM 确定性地降级为 DENY（子代理内没有人可应答）。
         sub_agent = AgentLoop(
             llm=self._sub_llm,
             tool_registry=sub_registry,
-            permission_checker=sub_checker,
+            permission_checker=self._permission_checker,
             system_prompt=system_prompt,
             max_iterations=max_iter,
             compactor=compactor,
             task_manager=self._task_manager if coordinator else None,
             role=role,
+            interactive=False,
         )
 
         task = await self._task_manager.create_and_run(

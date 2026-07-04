@@ -23,6 +23,9 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-sonnet-4-6": 200_000,
     "claude-opus-4-6": 200_000,
     "claude-haiku-4-5": 200_000,
+    # qwen3.7 旗舰系（plus/max 均 1M，百炼官方；前缀匹配覆盖 -latest 等变体）
+    "qwen3.7-plus": 1_048_576,
+    "qwen3.7-max": 1_048_576,
 }
 
 DEFAULT_CONTEXT_WINDOW = 131_072
@@ -41,6 +44,8 @@ class ProviderConfig:
         url = self.base_url.lower()
         if "deepseek" in url:
             return "deepseek"
+        if "dashscope" in url or "aliyuncs" in url:
+            return "qwen"
         if "openai" in url or "api.openai.com" in url:
             return "openai"
         if "anthropic" in url:
@@ -58,6 +63,9 @@ class RoleBinding:
     thinking: bool = False
     reasoning_effort: str = "max"
     context_window: int = 0
+    # 该 role 的模型是否具备视觉能力（能吃图片）。只认显式配置，不按模型名猜——
+    # 原生多模态旗舰（如 qwen3.7-plus）名字里没 -vl-，名字表必然误判。
+    vision: bool = False
 
 
 DEFAULT_ROLES: dict[str, RoleBinding] = {
@@ -115,6 +123,7 @@ class ModelRouter:
             thinking=binding.thinking,
             reasoning_effort=binding.reasoning_effort,
             provider_type=provider.provider_type,
+            vision=binding.vision,
         )
         self._clients[role] = client
         return client

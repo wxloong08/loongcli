@@ -28,7 +28,8 @@ def _staleness_caveat(updated_at: str) -> str:
     return ""
 
 _RECALL_PROMPT = """\
-你是一个记忆检索系统。给定用户的消息和一组记忆条目的描述，判断哪些记忆与当前对话相关。
+你是记忆检索器。下面是用户当前这条消息，和记忆库里每条记忆的一行描述。
+判断哪些记忆**与当前消息直接相关、取出后会改变你的回答**。
 
 用户消息：
 {user_input}
@@ -36,8 +37,18 @@ _RECALL_PROMPT = """\
 可用记忆：
 {memory_list}
 
-请只返回相关记忆的 name（逗号分隔），最多 5 个。如果没有相关记忆，返回空。
-只返回 name 列表，不要解释。"""
+## 判定标准（严格）
+
+只在「这条记忆会实际影响如何回应**这条**消息」时才选它。问自己：不看它，回答会变差吗？只有「会」才选。
+
+- **默认返回空。大多数消息没有相关记忆——交白卷是常态，不是失败。**
+- 只是话题/关键词沾边、同属一个领域，**不算相关**（用户让你写排序函数，不要因为他是 Agent 工程师就塞他的背景记忆）。
+- 通用请求（写代码、改 bug）、闲聊、确认/继续类消息（"好的"、"继续吧"），通常没有相关记忆——返回空。
+- 宁可漏，不可滥：错塞一条无关记忆会污染上下文、误导后续判断，比漏召回更糟——记忆索引一直在上下文里，真漏了用户也看得到。
+
+## 输出
+
+只返回相关记忆的 name（逗号分隔），最多 5 个。没有就返回空（最常见的正确答案）。只返回 name，不要解释。"""
 
 
 class RecallEngine:
@@ -48,14 +59,28 @@ class RecallEngine:
         self.memory = memory
         self.llm = llm
 
-    def _build_prompt(self, user_input: str) -> str:
+    def _build_prompt(self, user_input: str, entries: list[dict] | None = None) -> str:
         """Build the sideQuery prompt listing all memory descriptions."""
-        entries = self.memory.list_all()
+        if entries is None:
+            entries = self.memory.list_all()
         lines = []
         for entry in entries:
             lines.append(f"- {entry['name']}: {entry['description']} [{entry['type']}]")
         memory_list = "\n".join(lines)
         return _RECALL_PROMPT.format(user_input=user_input, memory_list=memory_list)
+
+    async def auto_recall(self, user_input: str) -> list[dict]:
+        """Gated entry point for per-turn automatic recall.
+
+        Skips the LLM call when the always-loaded index already shows every
+        memory: the model sees all descriptions and can call the recall tool on
+        demand, so automatic semantic pre-selection is redundant cost. Only
+        fires once stale-trim / line-cap / byte-truncation has hidden memories
+        from the index — exactly when surfacing them proactively has value.
+        """
+        if self.memory.index_is_complete():
+            return []
+        return await self.recall(user_input)
 
     async def recall(self, user_input: str) -> list[dict]:
         """Return up to 5 relevant memories for the given user input.
@@ -66,7 +91,7 @@ class RecallEngine:
         if not entries:
             return []
 
-        prompt = self._build_prompt(user_input)
+        prompt = self._build_prompt(user_input, entries)
 
         try:
             response = await self.llm.chat(prompt)

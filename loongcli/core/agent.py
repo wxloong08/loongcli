@@ -11,6 +11,9 @@ from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, Agent
 from loongcli.core.stream_collector import StreamCollector
 from loongcli.core.compact import Compactor, model_context_window
 from loongcli.core.context_collapse import should_collapse, collapse
+from loongcli.core.messages import (
+    message_text, has_images, build_user_content, recycle_old_images, parse_image_sentinel,
+)
 from loongcli.core.circuit_breaker import CompactCircuitBreaker
 from loongcli.core.tool_result_manager import ToolResultManager
 from loongcli.tools.base import ToolRegistry
@@ -25,6 +28,20 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_CALLS_PER_TURN = 200
 LOOP_DETECT_THRESHOLD = 3
 _MIN_RECALL_LENGTH = 4
+
+NO_VISION_MSG = (
+    "⚠ 当前模型未开启视觉能力，无法处理图片。"
+    "请在 roles 配置 vision: true 并使用支持图片的模型。"
+)
+
+# read_file 读到图片但模型无视觉时喂给模型的工具结果（明确失败，不静默注入垃圾）
+NO_VISION_READ_MSG = (
+    "该文件是图片，但当前模型未开启视觉能力，无法查看图片内容。"
+    "如需看图，请让用户在 roles 配置 vision: true 并使用支持图片的模型。"
+)
+
+# 图片 sentinel 被拦截后，tool 消息里的占位文本（图片走下一条 user 消息）
+IMAGE_READ_PLACEHOLDER = "[图片已读取（{n} 张），内容见下一条消息]"
 
 PLAN_MODE_TOOLS = frozenset({
     "read_file", "glob", "grep",
@@ -90,11 +107,15 @@ class AgentLoop:
         recall_engine=None,
         auto_extractor=None,
         checkpoint_manager=None,
+        interactive: bool = True,
     ):
         self.llm = llm
         self.tool_registry = tool_registry
         self.permission_checker = permission_checker
         self.role = role
+        # 无人工交互通道（子代理 / 后台任务）：CONFIRM 无人应答，故直接当 DENY 处理，
+        # 而不是 yield 一个无人消费的 ConfirmRequest（那会 await future 永久挂起）。见 run_stream。
+        self.interactive = interactive
         self.hook_manager = hook_manager
         self.max_iterations = max_iterations
         self.conversation_store = conversation_store
@@ -118,6 +139,7 @@ class AgentLoop:
         from loongcli.core.verify_loop import VerifyState, MAX_VERIFY_ROUNDS
         self._verify_state = VerifyState()
         self._max_verify_rounds = MAX_VERIFY_ROUNDS
+        self._turn_tools: list[dict] | None = None
         self._last_prompt_tokens = 0
         self.token_usage = {
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
@@ -127,6 +149,15 @@ class AgentLoop:
         self._tool_call_count = 0
         self._last_tool_sig: str = ""
         self._repeat_count: int = 0
+        # read_file 读到的图片先攒着，本轮全部 tool 结果落库后再以 user 消息注入
+        self._pending_images: list[dict] = []
+        # 自动记忆写入通知（写入可见化：落库即曝光，人眼是第五道闸）
+        self.memory_notices: list[dict] = []
+        # 本轮允许调用的工具名集合；None = 无限制（派发层硬闸用，区别于 _turn_tools 的 API 参数语义）
+        self._turn_tool_names: set[str] | None = None
+        # 撞单轮工具上限后置位：收走工具只留文字总结；模型仍硬发调用则计振出局
+        self._tools_exhausted: bool = False
+        self._exhausted_strikes: int = 0
         self._result_manager = ToolResultManager()
         self._compact_breaker = CompactCircuitBreaker()
         self.messages: list[dict] = []
@@ -136,7 +167,19 @@ class AgentLoop:
     def _schedule_auto_extract(self):
         if self.auto_extractor:
             task = asyncio.create_task(self.auto_extractor.extract(list(self.messages)))
-            task.add_done_callback(_log_task_exception)
+
+            def _collect(t):
+                _log_task_exception(t)
+                try:
+                    saved = t.result()
+                except Exception:
+                    return
+                if saved:
+                    # 写入可见化：攒进 notices，TUI 在下一轮开始时展示
+                    #（后台任务完成时用户可能正停在输入行，直接打印会破坏提示符）
+                    self.memory_notices.extend(saved)
+
+            task.add_done_callback(_collect)
 
     def _persist(self):
         if self.conversation_store:
@@ -210,6 +253,19 @@ class AgentLoop:
                 self.checkpoint_manager.discard(self._last_checkpoint)
             except Exception:
                 logger.debug("checkpoint discard failed", exc_info=True)
+            self._last_checkpoint = None
+
+    def _restore_checkpoint(self) -> None:
+        """修改类工具抛异常后回滚到最近一次 checkpoint。
+
+        恢复修改前的文件内容，使执行中途抛异常（磁盘满、编码崩溃等）
+        不会留下半写的文件。
+        """
+        if self._last_checkpoint and self.checkpoint_manager:
+            try:
+                self.checkpoint_manager.restore(self._last_checkpoint)
+            except Exception:
+                logger.debug("checkpoint restore failed", exc_info=True)
             self._last_checkpoint = None
 
     def _check_loop(self, name: str, args: dict) -> str | None:
@@ -290,7 +346,8 @@ class AgentLoop:
 
     def _detect_active_skill(self) -> str | None:
         for msg in reversed(self.messages):
-            content = msg.get("content") or ""
+            # content 可能是多模态 list，经 message_text 取纯文本再做正则匹配
+            content = message_text(msg)
             match = re.search(r"\[自动加载 skill:\s*(\S+)\]", content)
             if match:
                 return match.group(1)
@@ -299,30 +356,300 @@ class AgentLoop:
                 return match.group(1)
         return None
 
+    async def _dispatch_tool_call(self, tc: dict) -> AsyncIterator:
+        """处理单次工具调用：解析参数 → 各类短路检查 → 权限 → 执行 → 结果落库。
+
+        作为异步生成器，把事件（ToolCallStart/Result、ConfirmRequest、PlanApproval、
+        执行进度）透传给 run_stream 再上抛给调用方——ConfirmRequest/PlanApproval 的
+        future 由调用方在请求下一个事件前 resolve，委托对 await 时序透明。plan 审批
+        对工具集的调整写回 self._turn_tools。从 run_stream 抽出以缩小主循环、隔离这段
+        安全攸关的逻辑，便于独立阅读与测试。
+        """
+        tool_name = tc["function"]["name"]
+        # 模型以自由文本流式拼接工具参数；流被截断或调用是幻觉时会产出非法 JSON。
+        # 绝不能让它逃出循环（会击穿整个 TUI）——转成一条工具错误喂回模型，
+        # 让它下一轮自行改正。
+        raw_args = tc["function"].get("arguments") or ""
+        try:
+            args = json.loads(raw_args) if raw_args.strip() else {}
+        except (json.JSONDecodeError, TypeError) as e:
+            result = (
+                f"⚠ 工具参数不是合法 JSON，无法解析：{e}。"
+                "请检查参数格式后重新调用。"
+            )
+            yield ToolCallResult(tool_name=tool_name, result=result)
+            self.messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": result,
+            })
+            return
+        self._tool_call_count += 1
+        yield ToolCallStart(tool_name=tool_name, arguments=args)
+
+        # 派发层硬闸：schema 过滤只是"告知"，有的模型（真机：qwen 在规划模式下
+        # 直接发 shell）会无视工具列表硬调。凡不在本轮允许集里的调用一律拒绝——
+        # 闸门必须确定性，不赌模型自觉。
+        if self._turn_tool_names is not None:
+            if tool_name not in self._turn_tool_names:
+                if self._plan_mode:
+                    result = (
+                        f"⚠ 规划模式下工具 {tool_name} 不可用，只能用只读调研工具"
+                        "（read_file/glob/grep/lsp_*）。请完成调研后用 plan 工具制定计划，"
+                        "再调用 exit_plan_mode 提交用户审批——审批通过后所有工具自动恢复。"
+                    )
+                elif self._tools_exhausted:
+                    result = "⚠ 已达单轮工具调用上限，本轮工具已收走，请直接文字总结当前进展。"
+                else:
+                    result = f"⚠ 工具 {tool_name} 不在本轮允许的工具列表中。"
+                yield ToolCallResult(tool_name=tool_name, result=result)
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result,
+                })
+                return
+
+        if self._tool_call_count > self.max_tool_calls:
+            # 标记撞限：run_stream 下一迭代会收走全部工具（不带 tools 参数），只留
+            # 文字总结一条路。此前的实现是"无限拒绝不终止"——模型每次重试都膨胀一轮
+            # 上下文（真机：单轮烧掉 97 万 prompt tokens），且连 plan/exit_plan_mode
+            # 的收场通道也一起拒，模型只能挣扎到 max_iterations 耗尽。
+            self._tools_exhausted = True
+            result = (
+                f"⚠ 已达到单轮工具调用上限（{self.max_tool_calls}次），"
+                "请总结当前进展并回复用户。"
+            )
+            yield ToolCallResult(tool_name=tool_name, result=result)
+            self.messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": result,
+            })
+            return
+
+        loop_warning = self._check_loop(tool_name, args)
+        if loop_warning:
+            yield ToolCallResult(tool_name=tool_name, result=loop_warning)
+            self.messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": loop_warning,
+            })
+            return
+
+        if self.hook_manager:
+            pre = await self.hook_manager.run(
+                HookEvent.PRE_TOOL_USE,
+                {"tool": tool_name, "arguments": args},
+                tool_name=tool_name,
+            )
+            if pre.blocked:
+                result = f"⚠ Hook 拦截: {pre.reason}"
+                yield ToolCallResult(tool_name=tool_name, result=result)
+                self.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result,
+                })
+                return
+
+        # 外部 MCP 工具能做任意 I/O，且是提示注入的主要目标——必须走确认层。
+        # 由工具实例的 is_mcp 标记判定，而非按名字猜（MCP 工具名形如 server__tool）。
+        tool_obj = self.tool_registry._tools.get(tool_name)
+        is_mcp_tool = bool(getattr(tool_obj, "is_mcp", False))
+        decision, reason = self.permission_checker.check_tool(
+            tool_name, args, is_mcp=is_mcp_tool,
+        )
+        tool_errored = False
+
+        if decision == Decision.DENY:
+            result = f"⚠ 操作被禁止: {reason}"
+        elif decision == Decision.CONFIRM and not self.interactive:
+            result = f"⚠ 需用户确认的操作在子代理/非交互上下文中自动拒绝（{reason}）"
+        elif decision == Decision.CONFIRM:
+            future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+            yield ConfirmRequest(
+                tool_name=tool_name,
+                arguments=args,
+                risk_reason=reason,
+                future=future,
+            )
+            approved = await future
+            if approved:
+                self.permission_checker.record_approval(tool_name, args, is_mcp=is_mcp_tool)
+                result = None
+                async for kind, data in self._exec_tool_stream(tool_name, args):
+                    if kind == "__progress__":
+                        yield data
+                    else:
+                        result = data
+                        tool_errored = kind == "__error__"
+            else:
+                result = f"⚠ 用户拒绝了此操作（{reason}）"
+        else:
+            result = None
+            async for kind, data in self._exec_tool_stream(tool_name, args):
+                if kind == "__progress__":
+                    yield data
+                else:
+                    result = data
+                    tool_errored = kind == "__error__"
+
+        if self.hook_manager:
+            await self.hook_manager.run(
+                HookEvent.POST_TOOL_USE,
+                {"tool": tool_name, "arguments": args, "result": result},
+                tool_name=tool_name,
+            )
+
+        if self.lsp_manager and tool_name in ("edit_file", "write_file"):
+            for fp in self._extract_file_args(tool_name, args):
+                await self.lsp_manager.invalidate_doc(fp)
+
+        if tool_name in ("edit_file", "write_file"):
+            self._test_ran_this_turn = False
+
+        if tool_name == "shell" and isinstance(result, str):
+            from loongcli.core.verify_loop import detect_test_failure, is_test_command
+            if self._verify_state.is_active and detect_test_failure(result):
+                self._verify_state.test_failed = True
+            cmd = args.get("command", "")
+            if is_test_command(cmd) and not detect_test_failure(result):
+                self._test_ran_this_turn = True
+
+        approval_data = None
+        if (tool_name == "exit_plan_mode"
+                and isinstance(result, str)
+                and result.startswith('{"__plan_approval__":')):
+            try:
+                parsed = json.loads(result)
+                # 两个 key 都必需——载荷畸形时落到「按普通工具结果处理」，不崩溃。
+                approval_data = (parsed["plan_id"], parsed["plan_summary"])
+            except (json.JSONDecodeError, KeyError, TypeError):
+                approval_data = None
+
+        if approval_data is not None:
+            plan_id, plan_summary = approval_data
+            approval_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+            yield PlanApproval(
+                plan_id=plan_id,
+                plan_summary=plan_summary,
+                future=approval_future,
+            )
+            user_response = await approval_future
+            if user_response in ("approve", "approve_auto_edits"):
+                self.exit_plan_mode(plan_id=plan_id)
+                if user_response == "approve_auto_edits":
+                    # 安全语义收在 agent 层：TUI 只回传选择字符串
+                    self.permission_checker.auto_accept_edits = True
+                    result = (
+                        "计划已批准（本会话文件编辑自动接受，敏感路径除外）。"
+                        f"现在按计划执行，所有工具已恢复。\n\n{plan_summary}"
+                    )
+                else:
+                    result = f"计划已批准。现在按计划执行，所有工具已恢复。\n\n{plan_summary}"
+                self._rebuild_system_prompt()
+                self._turn_tools = self.tool_registry.get_tool_schemas(role=self.role)
+                self._turn_tool_names = {s["function"]["name"] for s in self._turn_tools}
+            elif user_response == "cancel":
+                self._plan_mode = False
+                result = "用户取消了计划。已退出规划模式。"
+                self._rebuild_system_prompt()
+                self._turn_tools = self.tool_registry.get_tool_schemas(role=self.role)
+                self._turn_tool_names = {s["function"]["name"] for s in self._turn_tools}
+            else:
+                result = f"用户要求修改计划：{user_response}\n请根据反馈调整计划，然后重新调用 exit_plan_mode 提交。"
+
+        # 修改类工具执行中抛异常时留有备份——回滚该文件，避免半写损坏；
+        # 否则丢弃备份。
+        if tool_errored:
+            self._restore_checkpoint()
+        else:
+            self._discard_checkpoint()
+
+        # read_file 读到图片：结果是 sentinel。tool 消息只放占位文本，图片攒进
+        # _pending_images、由 run_stream 在本轮全部 tool 结果之后以 user 消息注入
+        # ——不能插在 tool 结果中间（破坏 assistant(tool_calls)→tool×N 序列），
+        # 也不放 tool 消息里（provider 对 tool-role 图片支持不一，设计 §4）。
+        # 模型无视觉时给明确失败文本，不静默注入。
+        sentinel = parse_image_sentinel(result) if isinstance(result, str) else None
+        if sentinel:
+            images, extra_text = sentinel
+            if getattr(self.llm, "vision", False):
+                placeholder = IMAGE_READ_PLACEHOLDER.format(n=len(images))
+                # MCP 工具可能图文混排（如截图 + 页面说明），文本部分留在 tool 消息里
+                result = f"{extra_text}\n{placeholder}" if extra_text else placeholder
+                source = args.get("path") or ""
+                label = f"[工具 {tool_name} 返回的图片{'：' + source if source else ''}]"
+                self._pending_images.append({"role": "user", "content": [
+                    {"type": "text", "text": label},
+                    *({"type": "image_url", "image_url": {"url": ref}} for ref, _ in images),
+                ]})
+            else:
+                result = f"{extra_text}\n{NO_VISION_READ_MSG}" if extra_text else NO_VISION_READ_MSG
+
+        yield ToolCallResult(tool_name=tool_name, result=result)
+
+        self.messages.append({
+            "role": "tool",
+            "tool_call_id": tc["id"],
+            "content": self._result_manager.process(tool_name, result) if isinstance(result, str) else result,
+        })
+
     async def run_stream(
         self,
         user_input: str,
         disable_tools: bool = False,
         allowed_tools: set[str] | None = None,
+        images: list[str] | None = None,
     ) -> AsyncIterator:
         if self.skill_registry:
             user_input = self.skill_registry.enrich_prompt(user_input)
-        self.messages.append({"role": "user", "content": user_input})
+
+        # 带图但模型未开视觉 → 立刻拒绝，连文件都不读（首要配置错误，早失败）。
+        if images and not getattr(self.llm, "vision", False):
+            yield AgentDone(content=NO_VISION_MSG)
+            return
+        # 有图则把 user 消息构造成多模态 list content；图片加载失败给明确错误。
+        if images:
+            try:
+                content = build_user_content(user_input, images)
+            except (FileNotFoundError, ValueError, OSError) as e:
+                yield AgentDone(content=f"⚠ 图片加载失败：{e}")
+                return
+        else:
+            content = user_input
+        self.messages.append({"role": "user", "content": content})
+        # 旧图回收：全局只保留最近 N 张，更旧的替换为占位文本。图片每轮全量重发
+        # 且无法被文本摘要，不回收会撑爆 context/成本；原图仍在本地图片库。
+        self.messages, recycled = recycle_old_images(self.messages)
+        if recycled:
+            logger.info("已回收 %d 张旧图片（超出保留窗口），原图仍在本地图片库", recycled)
         self._tool_call_count = 0
         self._last_tool_sig = ""
         self._repeat_count = 0
+        self._tools_exhausted = False
+        self._exhausted_strikes = 0
+        self._pending_images = []  # 防上一轮异常中断的残留
         self._files_modified_this_turn = []
         self._test_ran_this_turn = False
         self._verify_state.reset()
 
+        # 视觉门控兜底：消息里含图片（含未来 read_file 等其他来源）但模型未开视觉
+        # → 明确拒绝，不发任何请求（放在 recall/compact 之前，别把图喂给瞎的模型）。
+        if has_images(self.messages) and not getattr(self.llm, "vision", False):
+            yield AgentDone(content=NO_VISION_MSG)
+            return
+
         if self.recall_engine and len(user_input.strip()) >= _MIN_RECALL_LENGTH:
             try:
-                recalled = await self.recall_engine.recall(user_input)
+                recalled = await self.recall_engine.auto_recall(user_input)
                 if recalled:
                     # 先删掉上一轮的召回注入，避免跨轮累积
                     self.messages = [
                         m for m in self.messages
-                        if not (m.get("role") == "system" and m.get("content", "").startswith("# 相关记忆"))
+                        if not (m.get("role") == "system" and message_text(m).startswith("# 相关记忆"))
                     ]
                     injection = self.recall_engine.format_for_injection(recalled)
                     # 注入到当前 user message 之前：每轮变化的召回内容尽量靠近末尾，
@@ -358,20 +685,29 @@ class AgentLoop:
             yield CompactNotice(before=before, after=len(self.messages))
 
         if disable_tools:
-            tools = None
+            self._turn_tools = None
+            self._turn_tool_names = set()
         else:
-            schemas = self.tool_registry.get_tool_schemas(role=self.role)
+            schemas = self.tool_registry.get_tool_schemas(role=self.role) or []
             if self._plan_mode:
                 schemas = [s for s in schemas if s["function"]["name"] in PLAN_MODE_TOOLS]
             if allowed_tools is not None:
                 schemas = [s for s in schemas if s["function"]["name"] in allowed_tools]
-            tools = schemas or None
+            self._turn_tools = schemas or None
+            # 允许集单独存：schemas 为空时 _turn_tools 塌缩成 None（API 参数语义），
+            # 但派发层硬闸必须能区分「空允许集」和「无限制」
+            self._turn_tool_names = {s["function"]["name"] for s in schemas}
 
         if self._plan_mode or self._active_plan_id:
             self._rebuild_system_prompt()
 
         for iteration in range(self.max_iterations):
             self._result_manager.reset_turn()
+            # 撞限后收走全部工具（请求不带 tools），只留文字总结一条路
+            if self._tools_exhausted:
+                self._turn_tools = None
+                self._turn_tool_names = set()
+            exhausted_this_iter = self._tools_exhausted
             collector = StreamCollector()
 
             # cache-aware provider（如 DeepSeek）跳过 collapse：保持前缀稳定让缓存命中，
@@ -384,7 +720,7 @@ class AgentLoop:
 
             try:
                 async for event in collector.collect(
-                    self.llm.chat_stream(messages=api_messages, tools=tools),
+                    self.llm.chat_stream(messages=api_messages, tools=self._turn_tools),
                 ):
                     yield event
             except Exception as e:
@@ -472,137 +808,31 @@ class AgentLoop:
             self.messages.append(response.to_message())
 
             for tc in response.tool_calls:
-                tool_name = tc["function"]["name"]
-                args = json.loads(tc["function"]["arguments"])
-                self._tool_call_count += 1
-                yield ToolCallStart(tool_name=tool_name, arguments=args)
+                async for event in self._dispatch_tool_call(tc):
+                    yield event
 
-                if self._tool_call_count > self.max_tool_calls:
-                    result = (
-                        f"⚠ 已达到单轮工具调用上限（{self.max_tool_calls}次），"
-                        "请总结当前进展并回复用户。"
+            # 工具已收走仍硬发调用（qwen 前科）：拒两轮就强制终止本轮，
+            # 不陪它耗到 max_iterations——每多一轮都在膨胀上下文烧钱
+            if exhausted_this_iter and response.tool_calls:
+                self._exhausted_strikes += 1
+                if self._exhausted_strikes >= 2:
+                    msg = (
+                        "⚠ 已达单轮工具调用上限，且工具收走后模型仍持续尝试调用，"
+                        "已强制结束本轮。请拆分任务或换个说法重试。"
                     )
-                    yield ToolCallResult(tool_name=tool_name, result=result)
-                    self.messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": result,
-                    })
-                    continue
+                    self.messages.append({"role": "assistant", "content": msg})
+                    self._persist()
+                    yield AgentDone(content=msg)
+                    return
 
-                loop_warning = self._check_loop(tool_name, args)
-                if loop_warning:
-                    yield ToolCallResult(tool_name=tool_name, result=loop_warning)
-                    self.messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": loop_warning,
-                    })
-                    continue
-
-                if self.hook_manager:
-                    pre = await self.hook_manager.run(
-                        HookEvent.PRE_TOOL_USE,
-                        {"tool": tool_name, "arguments": args},
-                        tool_name=tool_name,
-                    )
-                    if pre.blocked:
-                        result = f"⚠ Hook 拦截: {pre.reason}"
-                        yield ToolCallResult(tool_name=tool_name, result=result)
-                        self.messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "content": result,
-                        })
-                        continue
-
-                decision, reason = self.permission_checker.check_tool(tool_name, args)
-
-                if decision == Decision.DENY:
-                    result = f"⚠ 操作被禁止: {reason}"
-                elif decision == Decision.CONFIRM:
-                    future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-                    yield ConfirmRequest(
-                        tool_name=tool_name,
-                        arguments=args,
-                        risk_reason=reason,
-                        future=future,
-                    )
-                    approved = await future
-                    if approved:
-                        self.permission_checker.record_approval(tool_name, args)
-                        result = None
-                        async for kind, data in self._exec_tool_stream(tool_name, args):
-                            if kind == "__progress__":
-                                yield data
-                            else:
-                                result = data
-                    else:
-                        result = f"⚠ 用户拒绝了此操作（{reason}）"
-                else:
-                    result = None
-                    async for kind, data in self._exec_tool_stream(tool_name, args):
-                        if kind == "__progress__":
-                            yield data
-                        else:
-                            result = data
-
-                if self.hook_manager:
-                    await self.hook_manager.run(
-                        HookEvent.POST_TOOL_USE,
-                        {"tool": tool_name, "arguments": args, "result": result},
-                        tool_name=tool_name,
-                    )
-
-                if self.lsp_manager and tool_name in ("edit_file", "write_file"):
-                    for fp in self._extract_file_args(tool_name, args):
-                        await self.lsp_manager.invalidate_doc(fp)
-
-                if tool_name in ("edit_file", "write_file"):
-                    self._test_ran_this_turn = False
-
-                if tool_name == "shell" and isinstance(result, str):
-                    from loongcli.core.verify_loop import detect_test_failure, is_test_command
-                    if self._verify_state.is_active and detect_test_failure(result):
-                        self._verify_state.test_failed = True
-                    cmd = args.get("command", "")
-                    if is_test_command(cmd) and not detect_test_failure(result):
-                        self._test_ran_this_turn = True
-
-                if (tool_name == "exit_plan_mode"
-                        and isinstance(result, str)
-                        and result.startswith('{"__plan_approval__":')):
-                    approval_data = json.loads(result)
-                    plan_id = approval_data["plan_id"]
-                    plan_summary = approval_data["plan_summary"]
-                    approval_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-                    yield PlanApproval(
-                        plan_id=plan_id,
-                        plan_summary=plan_summary,
-                        future=approval_future,
-                    )
-                    user_response = await approval_future
-                    if user_response == "approve":
-                        self.exit_plan_mode(plan_id=plan_id)
-                        result = f"计划已批准。现在按计划执行，所有工具已恢复。\n\n{plan_summary}"
-                        self._rebuild_system_prompt()
-                        tools = self.tool_registry.get_tool_schemas(role=self.role)
-                    elif user_response == "cancel":
-                        self._plan_mode = False
-                        result = "用户取消了计划。已退出规划模式。"
-                        self._rebuild_system_prompt()
-                        tools = self.tool_registry.get_tool_schemas(role=self.role)
-                    else:
-                        result = f"用户要求修改计划：{user_response}\n请根据反馈调整计划，然后重新调用 exit_plan_mode 提交。"
-
-                self._discard_checkpoint()
-                yield ToolCallResult(tool_name=tool_name, result=result)
-
-                self.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": self._result_manager.process(tool_name, result) if isinstance(result, str) else result,
-                })
+            # read_file 读到的图片在全部 tool 结果之后统一注入，随即回收超窗旧图
+            # （一次读多图也不让在途数量越过保留窗口太多）。
+            if self._pending_images:
+                self.messages.extend(self._pending_images)
+                self._pending_images = []
+                self.messages, recycled = recycle_old_images(self.messages)
+                if recycled:
+                    logger.info("已回收 %d 张旧图片（超出保留窗口），原图仍在本地图片库", recycled)
 
             if self.task:
                 for mail in self.task.drain_mailbox():

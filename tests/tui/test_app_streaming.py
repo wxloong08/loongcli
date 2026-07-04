@@ -29,7 +29,7 @@ class _FakeAgent:
         }
         self.cost_tracker = _FakeCost()
 
-    async def run_stream(self, user_input, allowed_tools=None):
+    async def run_stream(self, user_input, allowed_tools=None, images=None):
         for e in self._events:
             yield e
             await asyncio.sleep(0)
@@ -81,12 +81,41 @@ def test_tool_call_interleaves_cleanly():
     out = _drive(events)
     # 正文在工具行之前完整落盘
     assert "要点三" in out
-    assert "⚙ read_file" in out
-    assert "✓ read_file" in out and "(3 行)" in out
+    # 折叠模式（默认）：● 工具行 + ⎿ 统计，无 ⚙ 常驻行
+    assert "● read_file" in out and "x.py" in out
+    assert "⎿ 3 行" in out
+    assert "⚙" not in out
     # 工具后续写正常
     assert "收尾：完成" in out
     # 正文整体不重复
     assert out.count("要点二") == 1
+
+
+def test_tool_call_verbose_mode_keeps_old_format():
+    events = (
+        [ToolCallStart(tool_name="read_file", arguments={"path": "x.py"})]
+        + [ToolCallResult(tool_name="read_file", result="a\nb\nc\n")]
+        + [AgentDone(content="")]
+    )
+    buf = io.StringIO()
+    tui = TUI()
+    tui.verbose = True
+    tui.console = Console(file=buf, force_terminal=True, width=80)
+    asyncio.run(tui._handle_agent_response(_FakeAgent(events), "q"))
+    out = _strip_ansi(buf.getvalue())
+    assert "⚙ read_file" in out
+    assert "✓ read_file" in out and "(3 行)" in out
+
+
+def test_tool_error_shows_cross():
+    events = (
+        [ToolCallStart(tool_name="edit_file", arguments={"path": "x.py", "old_string": "a", "new_string": "b"})]
+        + [ToolCallResult(tool_name="edit_file", result="错误：未找到目标字符串")]
+        + [AgentDone(content="")]
+    )
+    out = _drive(events)
+    assert "✗ edit_file" in out
+    assert "未找到目标字符串" in out
 
 
 def test_text_only_turn_renders_and_no_live_leak():
@@ -94,3 +123,70 @@ def test_text_only_turn_renders_and_no_live_leak():
     events = _text_events("简单一段回答。\n\n第二段。\n") + [AgentDone(content="")]
     out = _drive(events)
     assert "简单一段回答" in out and "第二段" in out
+
+
+def test_confirm_args_display_full_command():
+    """确认框的 command 必须完整输出——看不全的命令没法判断安全，等于盲签。"""
+    tui = TUI()
+    long_cmd = "find /d -maxdepth 4 -type d -name 'loongcli' 2>/dev/null | head -5 && echo " + "x" * 100
+    text = tui._confirm_args_display({"command": long_cmd})
+    assert long_cmd in text.plain          # 一个字符不少
+    assert "…" not in text.plain
+
+
+def test_confirm_args_display_long_content_previewed():
+    """非 command 长值（如 write_file 的 content）给 500 字符预览并标注总长。"""
+    tui = TUI()
+    text = tui._confirm_args_display({"path": "a.py", "content": "z" * 2000})
+    assert "a.py" in text.plain
+    assert "共 2000 字符" in text.plain
+    assert "z" * 501 not in text.plain
+
+
+def test_memory_notices_shown_and_drained():
+    """写入可见化：上一轮后台记忆落库，在新一轮开头曝光一行并清空。"""
+    events = [TextDelta(text="好的。"), AgentDone(content="好的。")]
+    agent = _FakeAgent(events)
+    agent.memory_notices = [{"name": "project-x-fact", "description": "某项目事实"}]
+    buf = io.StringIO()
+    tui = TUI()
+    tui.console = Console(file=buf, force_terminal=True, width=100)
+    asyncio.run(tui._handle_agent_response(agent, "q"))
+    out = _strip_ansi(buf.getvalue())
+    assert "已记忆: project-x-fact" in out
+    assert "某项目事实" in out
+    assert "/forget project-x-fact" in out
+    assert agent.memory_notices == []  # 展示后清空，不重复提示
+
+
+def test_diff_text_not_dimmed_true_white():
+    """⎿ 前缀的 dim 不得污染 diff 文字（整行基础样式 dim 会把 #ffffff 压成灰——三轮发灰的真凶）。"""
+    events = (
+        [ToolCallStart(tool_name="edit_file", arguments={
+            "path": "x.py", "old_string": "def hello():", "new_string": "def greet():",
+        })]
+        + [ToolCallResult(tool_name="edit_file", result="成功编辑 x.py")]
+        + [AgentDone(content="")]
+    )
+    buf = io.StringIO()
+    tui = TUI()
+    tui.console = Console(file=buf, force_terminal=True, width=100, color_system="truecolor")
+    asyncio.run(tui._handle_agent_response(_FakeAgent(events), "q"))
+    raw = buf.getvalue()
+    # truecolor 纯白前景码必须出现在 diff 行（38;2;255;255;255），且带背景色块（48;2;）
+    assert "38;2;255;255;255" in raw
+    assert "48;2;" in raw
+
+
+def test_block_spacing_at_most_one_blank_line():
+    """块间距统一：文本→工具块→文本 全程不得出现连续 2 个以上空行。"""
+    events = (
+        _text_events("第一段正文。\n")
+        + [ToolCallStart(tool_name="read_file", arguments={"path": "x.py"})]
+        + [ToolCallResult(tool_name="read_file", result="a\nb\nc\n")]
+        + [TextDelta(text="第二段正文。\n"), AgentDone(content="")]
+    )
+    out = _drive(events)
+    assert "第一段正文" in out and "⎿ 3 行" in out and "第二段正文" in out
+    # 不允许 ≥2 个连续空行（3 个连续换行含首尾内容行 = 2 空行）
+    assert "\n\n\n\n" not in out

@@ -4,7 +4,15 @@ from unittest.mock import MagicMock
 
 from rich.console import Console
 
-from loongcli.tui.mdstream import MarkdownStream, StreamView
+from loongcli.tui.mdstream import MarkdownStream, StreamView, LeftMarkdown
+
+
+def test_left_markdown_headings_left_aligned():
+    """LeftMarkdown 的 h1 应左对齐（默认 Rich 会居中，观感很怪）。"""
+    buf = io.StringIO()
+    Console(file=buf, width=40, color_system=None).print(LeftMarkdown("# 标题"))
+    line = next(l for l in buf.getvalue().splitlines() if "标题" in l)
+    assert line.index("标题") <= 1  # 左对齐，非居中（居中会有约 18 个前导空格）
 
 
 def _make_md(render_sequences, live_window=3):

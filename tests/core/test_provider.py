@@ -22,6 +22,11 @@ class TestProviderConfig:
         p = ProviderConfig(name="local", api_key="k", base_url="http://localhost:11434/v1")
         assert p.provider_type == "local"
 
+    def test_qwen_detection(self):
+        p = ProviderConfig(name="qwen", api_key="k",
+                           base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
+        assert p.provider_type == "qwen"
+
     def test_unknown_defaults_to_openai(self):
         p = ProviderConfig(name="x", api_key="k", base_url="https://custom.api.com")
         assert p.provider_type == "openai"
@@ -91,6 +96,17 @@ class TestModelRouter:
         router = self._make_router()
         client = router.client("main")
         assert client._provider_type == "deepseek"
+
+    def test_vision_defaults_false(self):
+        assert RoleBinding(provider="_default", model="m").vision is False
+        router = self._make_router()
+        assert router.client("main").vision is False
+
+    def test_vision_propagated_to_client(self):
+        router = self._make_router(
+            main=RoleBinding(provider="_default", model="qwen3.7-plus", vision=True),
+        )
+        assert router.client("main").vision is True
 
 
 class TestMultiProvider:

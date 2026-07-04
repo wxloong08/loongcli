@@ -115,3 +115,42 @@ async def test_empty_directory_shown(tool, tmp_path):
     assert "未找到" in result
     # Should show the one file that exists
     assert "just_this.txt" in result
+
+
+@pytest.mark.asyncio
+async def test_glob_skips_unstatable_entry(tmp_path, monkeypatch):
+    """单个条目 is_file 抛 OSError → 只计跳过，其余文件正常列出（不再整个扫描报错）。"""
+    (tmp_path / "a.py").write_text("x", encoding="utf-8")
+    (tmp_path / "badlink.py").write_text("x", encoding="utf-8")
+
+    real_is_file = Path.is_file
+
+    def fake_is_file(self, *a, **kw):
+        if self.name == "badlink.py":
+            raise OSError(1920, "系统无法访问此文件")
+        return real_is_file(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "is_file", fake_is_file)
+
+    result = await GlobTool().execute(pattern="*.py", path=str(tmp_path))
+    assert "a.py" in result
+    assert "跳过 1 个" in result
+    assert not result.startswith("错误")
+
+
+@pytest.mark.asyncio
+async def test_glob_budget_not_burned_by_skip_dirs(tmp_path, monkeypatch):
+    """同 grep：.venv 条目不得消耗 _MAX_SCAN 预算。"""
+    import loongcli.tools.glob_tool as mod
+
+    venv = tmp_path / ".venv" / "lib"
+    venv.mkdir(parents=True)
+    for i in range(30):
+        (venv / f"junk{i:02d}.py").write_text("x", encoding="utf-8")
+    (tmp_path / "zz_target.py").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(mod, "_MAX_SCAN", 5)
+
+    result = await mod.GlobTool().execute(pattern="**/*.py", path=str(tmp_path))
+    assert "zz_target.py" in result
+    assert "扫描已截断" not in result

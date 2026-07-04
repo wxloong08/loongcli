@@ -50,9 +50,10 @@ def git(*args: str, cwd: Path = REPO):
     return result.stdout
 
 
-def make_isolated_home() -> Path:
+def make_isolated_home(compact_threshold: int = 0) -> Path:
     """临时 HOME：复制真实 config.json（保留 API key 和 profiles），
-    不带记忆/会话/MCP，保证评测不被真实记忆污染、也不污染真实数据。"""
+    不带记忆/会话/MCP，保证评测不被真实记忆污染、也不污染真实数据。
+    compact_threshold>0 时写入 config，制造 compact 压力（不碰真实 config）。"""
     home = Path(tempfile.mkdtemp(prefix="loongbench-home-"))
     cfg_dir = home / ".loongcli"
     cfg_dir.mkdir(parents=True)
@@ -61,6 +62,8 @@ def make_isolated_home() -> Path:
         cfg = json.loads(real_cfg.read_text(encoding="utf-8"))
         cfg.pop("mcp_servers", None)  # MCP 与评测无关，避免连接开销
         cfg.pop("mcpServers", None)
+        if compact_threshold:
+            cfg["compact_threshold"] = compact_threshold
         (cfg_dir / "config.json").write_text(
             json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     return home
@@ -139,6 +142,8 @@ def main():
     parser.add_argument("--tasks", default=str(BENCH_DIR / "tasks.jsonl"))
     parser.add_argument("--only", default=None, help="逗号分隔的任务 id 子集")
     parser.add_argument("--keep-worktrees", action="store_true")
+    parser.add_argument("--compact-threshold", type=int, default=0,
+                        help="覆盖 compact 阈值（token），制造 compact 压力")
     args = parser.parse_args()
 
     tasks = [json.loads(line) for line in Path(args.tasks).read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -148,10 +153,10 @@ def main():
 
     RESULTS_DIR.mkdir(exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-    label = args.profile or "default"
+    label = args.profile or ("default" if not args.compact_threshold else f"ct{args.compact_threshold}")
     results_path = RESULTS_DIR / f"run-{run_id}-{label}.jsonl"
 
-    home = make_isolated_home()
+    home = make_isolated_home(args.compact_threshold)
     print(f"loong-bench: {len(tasks)} 题 | profile={label} | 隔离 HOME={home}")
 
     resolved_count = 0

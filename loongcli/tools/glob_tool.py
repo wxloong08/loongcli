@@ -2,6 +2,7 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 from pathlib import Path
 from loongcli.tools.base import Tool
+from loongcli.tools.grep_tool import _is_walk_pattern, _walk_files
 
 _MAX_FILES = 200
 _MAX_SCAN = 10_000
@@ -40,15 +41,28 @@ class GlobTool(Tool):
 
             files: list[Path] = []
             scan_count = 0
+            skipped = 0
 
-            for match in sorted(base.glob(pattern)):
+            # '**/名字型' 模式走 os.walk 剪枝：rglob 枚举 .venv/.git 内的条目会烧光
+            # _MAX_SCAN 预算（同 grep 的真机问题），剪枝后预算只花在真实候选上
+            if _is_walk_pattern(pattern):
+                match_iter = _walk_files(base, pattern)
+            else:
+                match_iter = sorted(base.glob(pattern))
+            for match in match_iter:
                 scan_count += 1
                 if scan_count > _MAX_SCAN:
                     break
                 if any(p in _SKIP_DIRS for p in match.relative_to(base).parts):
                     continue
-                if match.is_file():
-                    files.append(match)
+                # Windows reparse 点/OneDrive 占位 stat 会抛 OSError（如 WinError 1920），
+                # 单个坏条目只计跳过，不让整次扫描变成一条错误
+                try:
+                    if match.is_file():
+                        files.append(match)
+                except OSError:
+                    skipped += 1
+                    continue
 
             if not files:
                 return self._zero_result_report(base, pattern, scan_count)
@@ -66,6 +80,8 @@ class GlobTool(Tool):
                 result += f"\n... 共 {len(files)} 个文件，仅显示前 {_MAX_FILES} 个"
             if scan_count > _MAX_SCAN:
                 result += f"\n... 扫描已截断（超过 {_MAX_SCAN} 条记录），请缩小搜索范围"
+            if skipped:
+                result += f"\n⚠ 跳过 {skipped} 个无法访问的条目"
             return result
         except Exception as e:
             return f"错误：{e}"

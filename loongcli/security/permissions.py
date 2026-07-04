@@ -67,6 +67,22 @@ ALWAYS_CONFIRM_GIT_SUBS = frozenset({
     "push", "reset", "clean", "branch -D", "branch -d",
 })
 
+# 能在首 token 之后追加或重定向出「第二条命令」的操作符——它们可绕过对首 token
+# 的前缀/白名单匹配。命令替换（$(...)、`...`、<(...)）与重定向（>、<）一律不放行：
+# 像 `echo ` 这种「安全前缀」照样能写文件（echo x > f）或执行代码（echo $(rm -rf x)）。
+_SUBSTITUTION_RE = re.compile(r"\$\(|`|<\(|>|<")
+# 用于把一条命令按链式操作符拆成可逐段独立校验的子命令。
+_CHAIN_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
+
+
+def _split_commands(command: str) -> list[str]:
+    """按链式操作符（&&、||、;、|）把 shell 命令拆成若干子命令。
+
+    朴素拆分——带引号的操作符（如 echo "a;b"）也会被拆开，但这只会多要一次确认，
+    绝不会漏掉一次。对安全闸而言，偏向「多确认」正是正确方向。
+    """
+    return [p.strip() for p in _CHAIN_SPLIT_RE.split(command) if p.strip()]
+
 
 def _detect_project_root() -> Path | None:
     try:
@@ -144,12 +160,26 @@ class PermissionChecker:
         self.mode = mode
         self.project_root = _detect_project_root()
         self._session_allowed: set[str] = set()
+        # 计划审批选「批准并自动接受编辑」后置位：项目外非敏感写免确认（敏感路径底线不动）。
+        # 注意 loongcli 项目内写本就 ALLOW，此标志的增量只是项目外路径。
+        self.auto_accept_edits: bool = False
         if extra_safe_prefixes:
             SAFE_SHELL_PREFIXES.extend(extra_safe_prefixes)
 
-    def record_approval(self, tool_name: str, args: dict) -> None:
-        """Record a user approval so the same pattern won't ask again this session."""
-        key = self._make_key(tool_name, args)
+    def record_approval(self, tool_name: str, args: dict, is_mcp: bool = False) -> None:
+        """记录一次用户批准，使同类调用本会话内不再重复询问。
+
+        shell 按子命令片段逐个记 key——check 侧要求链式命令每个片段都在白名单，
+        只记整条首 token（如 `cd x && python y` 只记 shell:cd）会导致同一条命令
+        下次仍要确认。always_confirm 类片段（rm/kill 等）永不入白名单。
+        """
+        if tool_name == "shell":
+            for sc in _split_commands(args.get("command", "")):
+                key, always = _shell_pattern(sc)
+                if key and not always:
+                    self._session_allowed.add(key)
+            return
+        key = self._make_key(tool_name, args, is_mcp=is_mcp)
         if key:
             self._session_allowed.add(key)
 
@@ -159,6 +189,9 @@ class PermissionChecker:
 
         if tool_name in ("write_file", "edit_file"):
             return self._check_file_write(args.get("path", ""))
+
+        if tool_name == "read_file":
+            return self._check_file_read(args.get("path", ""))
 
         if is_mcp:
             if self.mode == PermissionMode.SKIP:
@@ -178,16 +211,27 @@ class PermissionChecker:
         if self.mode == PermissionMode.SKIP:
             return Decision.ALLOW, ""
 
-        cmd_stripped = command.strip()
-        for prefix in SAFE_SHELL_PREFIXES:
-            if cmd_stripped == prefix.strip() or cmd_stripped.startswith(prefix):
-                return Decision.ALLOW, ""
+        # 前缀/白名单命中只证明「首 token」安全。命令替换和重定向能把第二条命令
+        # 藏进参数里，或把输出写到任意文件，所以它们一律不走快路径。
+        if _SUBSTITUTION_RE.search(command):
+            return Decision.CONFIRM, "shell 命令含命令替换或重定向，需要确认"
 
-        key, always_confirm = _shell_pattern(command)
-        if not always_confirm and key in self._session_allowed:
+        # 链式（a && b）、管道（a | b）、顺序（a; b）都能追加一条未经校验的第二命令。
+        # 仅当「每个」子命令都独立安全时才自动放行。
+        subcommands = _split_commands(command)
+        if subcommands and all(self._shell_fragment_safe(sc) for sc in subcommands):
             return Decision.ALLOW, ""
 
         return Decision.CONFIRM, "shell 命令需要确认"
+
+    def _shell_fragment_safe(self, command: str) -> bool:
+        """单条（未链式）命令命中安全前缀或会话白名单则返回 True。"""
+        cmd_stripped = command.strip()
+        for prefix in SAFE_SHELL_PREFIXES:
+            if cmd_stripped == prefix.strip() or cmd_stripped.startswith(prefix):
+                return True
+        key, always_confirm = _shell_pattern(command)
+        return (not always_confirm) and key in self._session_allowed
 
     def _check_file_write(self, path: str) -> tuple[Decision, str]:
         if not path:
@@ -208,14 +252,31 @@ class PermissionChecker:
         if self.mode == PermissionMode.SKIP:
             return Decision.ALLOW, ""
 
+        # 「批准并自动接受编辑」生效范围：项目外的非敏感写（敏感路径已在上方拦下）
+        if self.auto_accept_edits:
+            return Decision.ALLOW, ""
+
         key = _write_pattern(path)
         if key in self._session_allowed:
             return Decision.ALLOW, ""
 
         return Decision.CONFIRM, "项目目录外写文件"
 
-    def _make_key(self, tool_name: str, args: dict) -> str | None:
-        """Build allowlist key for a tool call. Returns None if always-confirm."""
+    def _check_file_read(self, path: str) -> tuple[Decision, str]:
+        """敏感路径读取门：.env/.ssh/credentials 等是密钥外泄的主通道，读取一律确认。
+
+        刻意不进会话白名单（_make_key 无 read 分支）——每次读敏感文件都值得人眼
+        看一次。普通文件读取放行（与 Claude Code 的读策略一致）。
+        """
+        if not path or self.mode == PermissionMode.SKIP:
+            return Decision.ALLOW, ""
+        for pattern in SENSITIVE_PATHS:
+            if pattern.search(path):
+                return Decision.CONFIRM, "敏感文件读取"
+        return Decision.ALLOW, ""
+
+    def _make_key(self, tool_name: str, args: dict, is_mcp: bool = False) -> str | None:
+        """构造工具调用的会话白名单 key；始终需确认的调用返回 None。"""
         if tool_name == "shell":
             key, always = _shell_pattern(args.get("command", ""))
             return key if not always else None
@@ -225,6 +286,9 @@ class PermissionChecker:
                 if pattern.search(path):
                     return None
             return _write_pattern(path)
-        if tool_name.startswith("mcp_"):
+        # MCP 由调用方显式告知（工具实例的 is_mcp），不再按名字前缀猜——
+        # 真实 MCP 工具名形如 server__tool，永不以 "mcp_" 开头。key 与
+        # check_tool 的 is_mcp 分支保持一致，批准才能被正确记住。
+        if is_mcp:
             return f"mcp:{tool_name}"
         return None

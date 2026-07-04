@@ -26,6 +26,26 @@ def test_render_history_basic():
     assert "what is" in output
 
 
+def test_render_history_with_image_message_no_crash():
+    """含图片的多模态 user 消息不能让 render_history 崩（list content 回归）。"""
+    tui = TUI()
+    tui.console = Console(file=StringIO(), force_terminal=True)
+
+    messages = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "看这个截图"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,X"}},
+        ]},
+        {"role": "assistant", "content": "这是一个界面"},
+    ]
+    tui.render_history(messages)  # 不抛异常
+
+    tui.console.file.seek(0)
+    output = tui.console.file.read()
+    assert "看这个截图" in output
+    assert "图片" in output  # 图片计为 [图片] 占位
+
+
 def test_render_history_skips_system():
     tui = TUI()
     tui.console = Console(file=StringIO(), force_terminal=True)

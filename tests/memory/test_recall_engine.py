@@ -65,6 +65,36 @@ async def test_recall_empty_store(tmp_path, mock_llm):
 
 
 @pytest.mark.asyncio
+async def test_auto_recall_skips_when_index_complete(store, mock_llm):
+    """Small fresh store -> index shows everything -> no LLM call."""
+    engine = RecallEngine(memory=store, llm=mock_llm)
+    results = await engine.auto_recall("How do I push code?")
+    assert results == []
+    mock_llm.chat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auto_recall_fires_when_index_incomplete(tmp_path, mock_llm):
+    """A stale-trimmed memory is hidden from the index -> auto_recall must fire."""
+    store = MarkdownMemoryStore(base_dir=tmp_path)
+    store.save("fresh-fb", "fresh feedback note", "feedback", "content")
+    (tmp_path / "stale-proj.md").write_text(
+        "---\nname: stale-proj\ndescription: old decision\ntype: project\n"
+        "created_at: 2020-01-01T00:00:00+00:00\n"
+        "updated_at: 2020-01-01T00:00:00+00:00\n---\n\nbody",
+        encoding="utf-8",
+    )
+    store._rebuild_index()
+    assert store.index_is_complete() is False
+
+    mock_llm.chat.return_value = "fresh-fb"
+    engine = RecallEngine(memory=store, llm=mock_llm)
+    results = await engine.auto_recall("anything")
+    mock_llm.chat.assert_called_once()
+    assert [m["name"] for m in results] == ["fresh-fb"]
+
+
+@pytest.mark.asyncio
 async def test_recall_max_5(store, mock_llm):
     for i in range(10):
         store.save(name=f"mem-{i}", description=f"Memory {i}", type="project", content=f"Content {i}")

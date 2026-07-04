@@ -230,6 +230,19 @@ def test_dedup_no_match_below_threshold(store: MarkdownMemoryStore):
     assert len(store.list_all()) == 2
 
 
+def test_dedup_does_not_merge_across_types(store: MarkdownMemoryStore):
+    """Identical descriptions but different types must not clobber each other.
+
+    Guards the data-loss path: without the same-type guard in save(), the second
+    write would redirect onto the first and overwrite its content.
+    """
+    store.save("a-user", "branch strategy notes", "user", "user content")
+    store.save("a-project", "branch strategy notes", "project", "project content")
+    assert len(store.list_all()) == 2
+    assert store.load("a-user")["content"] == "user content"
+    assert store.load("a-project")["content"] == "project content"
+
+
 def test_persistence_across_instances(tmp_path: Path):
     """Data written by one instance is readable by another."""
     s1 = MarkdownMemoryStore(base_dir=tmp_path)
@@ -330,6 +343,34 @@ def test_stale_index_removed_when_no_fresh_entries(tmp_path: Path):
     )
     store._rebuild_index()
     assert not (tmp_path / "MEMORY.md").exists()
+
+
+# ---- index_is_complete (auto-recall gating) tests ----
+
+def test_index_complete_when_empty(tmp_path: Path):
+    store = MarkdownMemoryStore(base_dir=tmp_path)
+    assert store.index_is_complete() is True
+
+
+def test_index_complete_when_all_fresh(tmp_path: Path):
+    store = MarkdownMemoryStore(base_dir=tmp_path)
+    store.save("a", "first decision", "project", "x")
+    store.save("b", "user is a dev", "user", "y")
+    assert store.index_is_complete() is True
+
+
+def test_index_incomplete_when_stale_trimmed(tmp_path: Path):
+    """A stale-trimmed project memory is hidden from the index -> incomplete."""
+    from datetime import datetime, timezone, timedelta
+    store = MarkdownMemoryStore(base_dir=tmp_path)
+    recent = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    _write_memory_file(tmp_path / "fresh.md", "fresh", "fresh ref", "reference", recent)
+    _write_memory_file(
+        tmp_path / "old-proj.md", "old-proj", "old project", "project",
+        "2020-01-01T00:00:00+00:00",
+    )
+    store._rebuild_index()
+    assert store.index_is_complete() is False
 
 
 def test_missing_updated_at_not_stale(tmp_path: Path):

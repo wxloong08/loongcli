@@ -65,3 +65,26 @@ def test_list_sessions(tmp_path):
 def test_load_nonexistent(tmp_path):
     cs = ConversationStore(base_dir=tmp_path)
     assert cs.load("nonexistent") is None
+
+
+def test_save_image_session_json_has_no_base64(tmp_path):
+    """带图消息落盘：session JSON 只含 loongimg:// 引用，不含 base64（防膨胀）。"""
+    from loongcli.core import messages as messages_mod
+    from loongcli.core.messages import store_image
+
+    p = tmp_path / "shot.png"
+    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 1024)
+    ref = store_image(str(p))
+
+    store = ConversationStore(base_dir=tmp_path / "sessions")
+    store.save([{"role": "user", "content": [
+        {"type": "text", "text": "看图"},
+        {"type": "image_url", "image_url": {"url": ref}},
+    ]}])
+
+    raw = store.session_path.read_text(encoding="utf-8")
+    assert "data:image" not in raw
+    assert "loongimg://" in raw
+    # 往返一致：引用原样恢复
+    loaded = store.load(store.session_id)
+    assert loaded["messages"][0]["content"][1]["image_url"]["url"] == ref

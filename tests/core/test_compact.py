@@ -61,7 +61,7 @@ def _make_messages_with_tools(n_turns: int) -> list[dict]:
     return msgs
 
 
-def _mock_llm(summary_text: str = "<summary>这是摘要</summary>") -> MagicMock:
+def _mock_llm(summary_text: str = "<summary>本轮对话完成了压缩测试所需的全部准备工作，包括消息构造、角色交替修复、附件重建与边界标记，所有细节均已核对无误。</summary>") -> MagicMock:
     llm = MagicMock()
     chunk = MagicMock()
     chunk.choices = [MagicMock()]
@@ -301,7 +301,7 @@ class TestCompact:
             calls.append(kwargs)
             chunk = MagicMock()
             chunk.choices = [MagicMock()]
-            chunk.choices[0].delta.content = "<summary>摘要</summary>"
+            chunk.choices[0].delta.content = "<summary>本轮对话完成了压缩测试所需的全部准备工作，包括消息构造、角色交替修复、附件重建与边界标记，所有细节均已核对无误。</summary>"
             chunk.choices[0].delta.tool_calls = None
             chunk.choices[0].finish_reason = "stop"
             chunk.usage = None
@@ -337,7 +337,7 @@ class TestCompact:
             calls.append(kwargs)
             chunk = MagicMock()
             chunk.choices = [MagicMock()]
-            chunk.choices[0].delta.content = "<summary>摘要</summary>"
+            chunk.choices[0].delta.content = "<summary>本轮对话完成了压缩测试所需的全部准备工作，包括消息构造、角色交替修复、附件重建与边界标记，所有细节均已核对无误。</summary>"
             chunk.choices[0].delta.tool_calls = None
             chunk.choices[0].finish_reason = "stop"
             chunk.usage = None
@@ -363,7 +363,7 @@ class TestCompact:
             calls.append(kwargs)
             chunk = MagicMock()
             chunk.choices = [MagicMock()]
-            chunk.choices[0].delta.content = "<summary>s</summary>"
+            chunk.choices[0].delta.content = "<summary>本轮对话完成了压缩测试所需的全部准备工作，包括消息构造、角色交替修复、附件重建与边界标记，所有细节均已核对无误。</summary>"
             chunk.choices[0].delta.tool_calls = None
             chunk.choices[0].finish_reason = "stop"
             chunk.usage = None
@@ -390,7 +390,7 @@ class TestCompact:
             calls.append(kwargs)
             chunk = MagicMock()
             chunk.choices = [MagicMock()]
-            chunk.choices[0].delta.content = "<summary>s</summary>"
+            chunk.choices[0].delta.content = "<summary>本轮对话完成了压缩测试所需的全部准备工作，包括消息构造、角色交替修复、附件重建与边界标记，所有细节均已核对无误。</summary>"
             chunk.choices[0].delta.tool_calls = None
             chunk.choices[0].finish_reason = "stop"
             chunk.usage = None
@@ -418,7 +418,7 @@ class TestCompact:
             calls.append(kwargs)
             chunk = MagicMock()
             chunk.choices = [MagicMock()]
-            chunk.choices[0].delta.content = "<summary>s</summary>"
+            chunk.choices[0].delta.content = "<summary>本轮对话完成了压缩测试所需的全部准备工作，包括消息构造、角色交替修复、附件重建与边界标记，所有细节均已核对无误。</summary>"
             chunk.choices[0].delta.tool_calls = None
             chunk.choices[0].finish_reason = "stop"
             chunk.usage = None
@@ -537,7 +537,7 @@ class TestSuppressFollowUp:
             calls.append(kwargs)
             chunk = MagicMock()
             chunk.choices = [MagicMock()]
-            chunk.choices[0].delta.content = "<summary>摘要</summary>"
+            chunk.choices[0].delta.content = "<summary>本轮对话完成了压缩测试所需的全部准备工作，包括消息构造、角色交替修复、附件重建与边界标记，所有细节均已核对无误。</summary>"
             chunk.choices[0].delta.tool_calls = None
             chunk.choices[0].finish_reason = "stop"
             chunk.usage = None
@@ -557,7 +557,7 @@ class TestSuppressFollowUp:
             calls.append(kwargs)
             chunk = MagicMock()
             chunk.choices = [MagicMock()]
-            chunk.choices[0].delta.content = "<summary>摘要</summary>"
+            chunk.choices[0].delta.content = "<summary>本轮对话完成了压缩测试所需的全部准备工作，包括消息构造、角色交替修复、附件重建与边界标记，所有细节均已核对无误。</summary>"
             chunk.choices[0].delta.tool_calls = None
             chunk.choices[0].finish_reason = "stop"
             chunk.usage = None
@@ -577,7 +577,7 @@ class TestSuppressFollowUp:
             calls.append(kwargs)
             chunk = MagicMock()
             chunk.choices = [MagicMock()]
-            chunk.choices[0].delta.content = "<summary>摘要</summary>"
+            chunk.choices[0].delta.content = "<summary>本轮对话完成了压缩测试所需的全部准备工作，包括消息构造、角色交替修复、附件重建与边界标记，所有细节均已核对无误。</summary>"
             chunk.choices[0].delta.tool_calls = None
             chunk.choices[0].finish_reason = "stop"
             chunk.usage = None
@@ -731,3 +731,34 @@ class TestMicroCompact:
             msgs.append({"role": "assistant", "content": f"found {i}"})
         result = micro_compact(msgs)
         assert result == msgs
+
+
+# ── 含图历史的 token 兜底估算 ────────────────────────────────────────
+
+def test_estimate_tokens_counts_images():
+    """兜底估算：文本按字符 // 2，每张图片加固定估值（message_text 只计 [图片] 会严重低估）。"""
+    from loongcli.core.compact import _estimate_tokens, IMAGE_TOKEN_ESTIMATE
+    from loongcli.core.messages import message_text
+
+    msgs = [
+        {"role": "user", "content": [
+            {"type": "text", "text": "看这两张图"},
+            {"type": "image_url", "image_url": {"url": "loongimg://a.png"}},
+            {"type": "image_url", "image_url": {"url": "loongimg://b.png"}},
+        ]},
+        {"role": "assistant", "content": "好的"},
+    ]
+    text_est = sum(len(message_text(m)) for m in msgs) // 2
+    assert _estimate_tokens(msgs) == text_est + 2 * IMAGE_TOKEN_ESTIMATE
+
+
+# ── 空摘要守卫：prompt 禁令赌不得，空摘要绝不能替换全史 ──
+
+@pytest.mark.asyncio
+async def test_empty_summary_aborts_compact():
+    """摘要为空/过短（模型硬发 tool_calls、截断）→ 放弃压缩抛异常，原历史由调用方保留。"""
+    llm = _mock_llm(summary_text="<summary></summary>")
+    compactor = Compactor(llm=llm, threshold=1)
+    msgs = _make_messages(6)
+    with pytest.raises(ValueError, match="过短"):
+        await compactor.compact(msgs, mode="auto")

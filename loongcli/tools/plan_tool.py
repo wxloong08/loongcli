@@ -58,6 +58,12 @@ class PlanTool(Tool):
 
     def __init__(self, plan_store: PlanStore):
         self._store = plan_store
+        self._agent = None
+        self._last_created: str | None = None
+
+    def bind_agent(self, agent) -> None:
+        """获知当前活跃计划——草稿覆盖时绝不误删已批准的计划。"""
+        self._agent = agent
 
     async def execute(
         self,
@@ -89,10 +95,23 @@ class PlanTool(Tool):
         if not step_descs:
             return "错误：需要 steps"
 
+        # 覆盖上一份未动工的草稿：规划阶段反复 create 属于正常迭代，但旧草稿会变成
+        # 孤儿垃圾（真机：一轮连开三个 plan，两个成孤儿）。三重保护缺一不删——
+        # 非当前活跃计划、状态 active、所有步骤仍 pending（动过工的绝不删）。
+        replaced = ""
+        prev = self._last_created
+        active_id = getattr(self._agent, "_active_plan_id", None) if self._agent else None
+        if prev and prev != active_id:
+            old = self._store.load(prev)
+            if old and old.status == "active" and all(s.status == "pending" for s in old.steps):
+                self._store.delete(prev)
+                replaced = f"（已覆盖未动工草稿 {prev}）"
+
         plan_steps = [PlanStep(index=i, description=d) for i, d in enumerate(step_descs)]
         plan = Plan(title=title, steps=plan_steps)
         self._store.save(plan)
-        return f"计划已创建: {plan.id}\n{plan.format_summary()}"
+        self._last_created = plan.id
+        return f"计划已创建: {plan.id}{replaced}\n{plan.format_summary()}"
 
     def _update_step(
         self, plan_id: str | None, step_index: int | None,

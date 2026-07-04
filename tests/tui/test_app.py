@@ -107,6 +107,54 @@ class TestPasteCollapse:
         assert out == "短文本 a b c"
         assert self.tui._pastes == {}
 
+    def test_image_paste_collapses_to_placeholder(self, tmp_path):
+        p = tmp_path / "shot.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\ndata")
+        out = self.tui._maybe_collapse_paste(str(p))
+        assert out == "[Image #1]"
+        assert self.tui._paste_images["[Image #1]"] == str(p)
+
+    def test_quoted_image_paste_collapses(self, tmp_path):
+        d = tmp_path / "my shots"
+        d.mkdir()
+        p = d / "a.png"
+        p.write_bytes(b"\x89PNG\r\n\x1a\ndata")
+        out = self.tui._maybe_collapse_paste(f'"{p}"')
+        assert out == "[Image #1]"
+        assert self.tui._paste_images["[Image #1]"] == str(p)
+
+
+class TestResolveImages:
+    def setup_method(self):
+        self.tui = TUI()
+
+    def test_placeholder_vision_extracts(self, tmp_path):
+        p = tmp_path / "x.png"
+        p.write_bytes(b"\x89PNGd")
+        self.tui._paste_images["[Image #1]"] = str(p)
+        text, imgs = self.tui._resolve_images("这是什么 [Image #1]", vision=True)
+        assert imgs == [str(p)]
+        assert text == "这是什么"
+        assert self.tui._paste_images == {}  # 已清空
+
+    def test_placeholder_no_vision_restores_path(self, tmp_path):
+        p = tmp_path / "x.png"
+        p.write_bytes(b"\x89PNGd")
+        self.tui._paste_images["[Image #1]"] = str(p)
+        text, imgs = self.tui._resolve_images("看 [Image #1]", vision=False)
+        assert imgs == []
+        assert str(p) in text  # 占位符还原成路径文本
+
+    def test_typed_path_vision(self, tmp_path):
+        p = tmp_path / "y.png"
+        p.write_bytes(b"\x89PNGd")
+        text, imgs = self.tui._resolve_images(f"描述 {p}", vision=True)
+        assert imgs == [str(p)]
+        assert text == "描述"
+
+    def test_no_images(self):
+        assert self.tui._resolve_images("hello", vision=True) == ("hello", [])
+
     def test_crlf_normalized(self):
         out = self.tui._maybe_collapse_paste("a\r\nb\r\nc\r\nd\r\ne")
         assert "\r" not in self.tui._pastes[out]
@@ -204,3 +252,32 @@ def test_render_history_skips_internal_messages():
     assert conversations[0] == ("user", "hello")
     assert conversations[1] == ("assistant", "hi there")
     assert conversations[2] == ("user", "continue working")
+
+
+# ── Shift+Tab 规划模式切换 ──
+
+def test_toggle_plan_mode_roundtrip():
+    from io import StringIO
+    from unittest.mock import MagicMock
+    from rich.console import Console
+    from loongcli.tui.app import TUI
+
+    tui = TUI()
+    buf = StringIO()
+    tui.console = Console(file=buf, force_terminal=True, width=80)
+
+    tui._toggle_plan_mode()  # 无 agent → 静默 no-op
+    assert buf.getvalue() == ""
+
+    agent = MagicMock()
+    agent.plan_mode = False
+    tui._agent = agent
+    tui._toggle_plan_mode()
+    agent.enter_plan_mode.assert_called_once()
+    assert "已进入规划模式" in buf.getvalue()
+
+    agent.plan_mode = True
+    tui._toggle_plan_mode()
+    assert agent._plan_mode is False
+    agent._rebuild_system_prompt.assert_called_once()  # 退出必须重建系统提示
+    assert "已退出规划模式" in buf.getvalue()

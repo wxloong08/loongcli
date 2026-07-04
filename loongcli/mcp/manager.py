@@ -1,5 +1,7 @@
 from __future__ import annotations
 import asyncio
+import base64
+import binascii
 import logging
 from contextlib import AsyncExitStack
 from typing import Any
@@ -9,6 +11,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.exceptions import McpError
 
+from loongcli.core.messages import make_image_sentinel, store_image_bytes
 from loongcli.tools.base import Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -20,6 +23,8 @@ _BACKOFF_BASE = 1.0
 
 class MCPTool(Tool):
     """Adapts a single MCP server tool into the loongcli Tool interface."""
+
+    is_mcp = True
 
     def __init__(self, server_name: str, tool: types.Tool, session: ClientSession):
         self.name = f"{server_name}__{tool.name}"
@@ -34,15 +39,28 @@ class MCPTool(Tool):
             try:
                 result = await self._session.call_tool(self._remote_name, arguments=kwargs)
                 parts: list[str] = []
+                images: list[tuple[str, str]] = []
                 for block in result.content:
                     if isinstance(block, types.TextContent):
                         parts.append(block.text)
                     elif isinstance(block, types.ImageContent):
-                        parts.append(f"[image: {block.mimeType}]")
+                        # 图片（如 Playwright 截图）存入本地图片库，经 sentinel 走
+                        # agent 的 user 消息注入通道进对话（视觉闭环的回路）。
+                        # 单图失败降级为错误文本，不炸整个工具结果。
+                        try:
+                            raw = base64.b64decode(block.data)
+                            images.append((
+                                store_image_bytes(raw),
+                                block.mimeType or "image",
+                            ))
+                        except (ValueError, OSError, binascii.Error) as e:
+                            parts.append(f"[图片处理失败: {e}]")
                     elif isinstance(block, types.EmbeddedResource):
                         parts.append(f"[resource: {block.resource.uri}]")
                     else:
                         parts.append(str(block))
+                if images:
+                    return make_image_sentinel(images, text="\n".join(parts))
                 return "\n".join(parts) if parts else "(empty result)"
             except McpError:
                 raise

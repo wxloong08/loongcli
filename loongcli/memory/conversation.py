@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from loongcli.core.messages import message_text
+
 
 def _path_to_slug(project_dir: Path) -> str:
     raw = str(project_dir.resolve())
@@ -121,7 +123,8 @@ class ConversationStore:
         if not self._meta["title"] and messages:
             for m in messages:
                 if m.get("role") == "user":
-                    text = m.get("content", "")
+                    # content 可能是多模态 list，经 message_text 取纯文本作标题
+                    text = message_text(m)
                     self._meta["title"] = text.replace("\n", " ").strip()[:60]
                     break
 

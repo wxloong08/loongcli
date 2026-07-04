@@ -6,10 +6,15 @@ import re
 from loongcli.core.llm import LLMClient
 from loongcli.core.stream_collector import StreamCollector
 from loongcli.core.attachments import build_attachments
+from loongcli.core.messages import message_text, to_content_parts, count_images
 
 logger = logging.getLogger(__name__)
 
 SUMMARY_TOKEN_RESERVE = 13000
+
+# 兜底估算里每张图片的固定 token 估值（Qwen 默认每图 token 预算约 1280，设计文档 §7）。
+# message_text 把图片计为 "[图片]" 几个字符，不加这项会严重低估含图历史的体积。
+IMAGE_TOKEN_ESTIMATE = 1280
 
 
 def model_context_window(model: str) -> int:
@@ -169,6 +174,14 @@ def _replace_tool_results(messages: list[dict]) -> list[dict]:
     return result
 
 
+def _merge_user_content(a, b):
+    """合并相邻 user 消息的 content：纯文本走字符串拼接；任一为多模态 list 时，
+    归一成内容块列表拼接，保留图片块不丢。"""
+    if isinstance(a, str) and isinstance(b, str):
+        return a + "\n\n" + b
+    return to_content_parts(a) + to_content_parts(b)
+
+
 def _fix_role_alternation(prefix: list[dict], kept: list[dict]) -> list[dict]:
     result = list(prefix)
     for msg in kept:
@@ -176,14 +189,16 @@ def _fix_role_alternation(prefix: list[dict], kept: list[dict]) -> list[dict]:
             result.append(msg)
             continue
         if result and msg["role"] == result[-1]["role"] == "assistant":
+            # assistant content 恒为纯文本（模型只吐字），走 message_text 收口即安全
             prev = result[-1]
-            merged_content = ((prev.get("content") or "") + "\n\n" + (msg.get("content") or "")).strip() or None
+            merged_content = (message_text(prev) + "\n\n" + message_text(msg)).strip() or None
             result[-1] = {**prev, "content": merged_content}
             if msg.get("tool_calls"):
                 result[-1]["tool_calls"] = msg["tool_calls"]
                 result[-1]["content"] = result[-1].get("content") or None
         elif result and msg["role"] == result[-1]["role"] == "user":
-            result[-1] = {**result[-1], "content": result[-1]["content"] + "\n\n" + msg["content"]}
+            # user content 可能含图片（多模态 list），必须保图片地合并
+            result[-1] = {**result[-1], "content": _merge_user_content(result[-1].get("content"), msg.get("content"))}
         else:
             result.append(msg)
     return result
@@ -267,7 +282,7 @@ class Compactor:
         if self.llm.cache_aware:
             window = model_context_window(self.llm.model)
             budget = window - SUMMARY_TOKEN_RESERVE
-            est_tokens = pre_tokens if pre_tokens > 0 else sum(len(str(m.get("content") or "")) for m in messages) // 2
+            est_tokens = pre_tokens if pre_tokens > 0 else _estimate_tokens(messages)
             if est_tokens < budget:
                 compact_messages = list(messages) + [{"role": "user", "content": instruction}]
             else:
@@ -285,7 +300,21 @@ class Compactor:
         ):
             pass
 
-        return _extract_summary(collector.response.content)
+        summary = _extract_summary(collector.response.content)
+        # 确定性守卫：摘要为空/过短（模型无视"严禁调用工具"的 prompt 禁令硬发
+        # tool_calls、输出被截断等）时放弃本次压缩——prompt 禁令赌不得，而拿
+        # 空摘要替换全史等于销毁当前工作上下文。抛异常走调用方的失败路径，原历史保留。
+        if len(summary.strip()) < 50:
+            raise ValueError(f"压缩摘要过短（{len(summary.strip())} 字符），放弃本次压缩以保留原历史")
+        return summary
+
+
+def _estimate_tokens(messages: list[dict]) -> int:
+    """无 API 真实值时的 token 兜底估算：文本按字符数 // 2，每张图片加固定估值。"""
+    return (
+        sum(len(message_text(m)) for m in messages) // 2
+        + count_images(messages) * IMAGE_TOKEN_ESTIMATE
+    )
 
 
 def _extract_summary(raw: str) -> str:

@@ -33,8 +33,8 @@ def _make_ctx(memory=None, tui=None):
     agent._plan_mode = False
     agent._active_plan_id = None
     agent.plan_store = None
-    agent.llm = MagicMock()
-    agent.llm.model = "deepseek-v4-flash"
+    from loongcli.core.llm import LLMClient
+    agent.llm = LLMClient(api_key="k", model="deepseek-v4-flash")
     agent.compactor = MagicMock()
     agent.compactor.compact = AsyncMock(return_value=[
         {"role": "system", "content": "sys"},
@@ -107,6 +107,47 @@ async def test_model_command_switch():
     assert ctx.agent.llm.model == "deepseek-v4-pro"
     out = _output(ctx)
     assert "deepseek-v4-pro" in out
+
+
+@pytest.mark.asyncio
+async def test_model_command_provider_syntax():
+    """/model provider:model 跨供应商切换：端点/密钥/vision 一起换。"""
+    from loongcli.core.config import Config
+    from loongcli.core.provider import ProviderConfig, RoleBinding
+
+    ctx = _make_ctx()
+    cfg = Config()
+    cfg.providers = {"qwen": ProviderConfig(
+        name="qwen", api_key="qk", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )}
+    cfg.role_bindings = {"main": RoleBinding(provider="qwen", model="qwen3.7-plus", vision=True)}
+    ctx.config = cfg
+
+    await ModelCommand().run(["qwen:qwen3.7-plus"], ctx)
+    llm = ctx.agent.llm
+    assert llm.model == "qwen3.7-plus"
+    assert "dashscope" in llm.base_url
+    assert llm.vision is True  # 从 roles 同名绑定继承
+
+
+@pytest.mark.asyncio
+async def test_model_command_provider_syntax_unknown_provider():
+    from loongcli.core.config import Config
+
+    ctx = _make_ctx()
+    ctx.config = Config()
+    await ModelCommand().run(["nope:some-model"], ctx)
+    assert ctx.agent.llm.model == "deepseek-v4-flash"  # 未切换
+    assert "未配置 provider" in _output(ctx)
+
+
+@pytest.mark.asyncio
+async def test_model_command_bare_switch_resets_stale_vision():
+    """裸模型名切换：roles 里查不到 vision 的一律关掉，防止 vision 残留把图喂给纯文本模型。"""
+    ctx = _make_ctx()
+    ctx.agent.llm.vision = True  # 模拟此前是视觉模型
+    await ModelCommand().run(["deepseek-v4-flash"], ctx)
+    assert ctx.agent.llm.vision is False
 
 
 @pytest.mark.asyncio
@@ -197,3 +238,31 @@ async def test_plan_command_no_args():
     await cmd.run([], ctx)
     out = _output(ctx)
     assert "用法" in out
+
+
+@pytest.mark.asyncio
+async def test_verbose_command_toggles():
+    from loongcli.tui.commands import VerboseCommand
+
+    class _FakeTui:
+        verbose = False
+
+    tui = _FakeTui()
+    ctx = _make_ctx(tui=tui)
+    cmd = VerboseCommand()
+
+    await cmd.run([], ctx)
+    assert tui.verbose is True
+    assert "详细模式已开启" in _output(ctx)
+
+    await cmd.run([], ctx)
+    assert tui.verbose is False
+    assert "折叠模式已恢复" in _output(ctx)
+
+
+@pytest.mark.asyncio
+async def test_verbose_command_no_tui():
+    ctx = _make_ctx(tui=None)
+    from loongcli.tui.commands import VerboseCommand
+    await VerboseCommand().run([], ctx)
+    assert "无法切换" in _output(ctx)

@@ -21,9 +21,30 @@ import time
 
 from rich.console import Console
 from rich.live import Live
-from rich.markdown import Markdown
+from rich.markdown import Markdown, Heading
 from rich.padding import Padding
 from rich.text import Text
+
+
+class _LeftHeading(Heading):
+    """所有级别标题一律左对齐、不画盒子。
+
+    Rich（14.x）的 Heading.__rich_console__ 硬编码 justify="center"，h1 还套
+    Panel 盒子——agent 回复里出现居中带框标题，观感很怪。没有对齐配置钩子
+    （LEVEL_ALIGN 之类的类属性不存在），只能覆写渲染方法本身。
+    """
+
+    def __rich_console__(self, console, options):
+        text = self.text
+        text.justify = "left"
+        if self.tag in ("h1", "h2"):
+            yield Text("")  # 大标题前留一空行，替代原 Panel 的视觉分隔
+        yield text
+
+
+class LeftMarkdown(Markdown):
+    """标题一律左对齐的 Markdown（用于流式渲染、历史回放、计划展示）。"""
+    elements = {**Markdown.elements, "heading_open": _LeftHeading}
 
 
 class MarkdownStream:
@@ -38,7 +59,11 @@ class MarkdownStream:
 
     def _ensure_live(self) -> None:
         if self._live is None:
-            self._live = Live(Text(""), console=self.console, refresh_per_second=20)
+            # auto_refresh=False：只在 update(refresh=True) 时重绘，杜绝 20fps 后台重绘
+            # 与 console.print 交错造成的闪烁；重绘频率由 update() 的自适应节流控制。
+            # transient=True：stop 时擦除 Live 区而非固化最后一帧——非 transient 的
+            # stop 会把空帧固化成一个空行，每段正文冲刷都漏一行（块间距失控的根源）。
+            self._live = Live(Text(""), console=self.console, auto_refresh=False, transient=True)
             self._live.start()
 
     def _render_to_lines(self, text: str) -> list[str]:
@@ -48,7 +73,7 @@ class MarkdownStream:
             file=buf, force_terminal=True, width=width,
             color_system=self.console.color_system or "standard",
         )
-        tmp.print(Markdown(text))
+        tmp.print(LeftMarkdown(text))
         return buf.getvalue().splitlines(keepends=True)
 
     def _pad(self, text: Text):
@@ -91,7 +116,7 @@ class MarkdownStream:
 
         # Live 窗口始终刷新尾部剩余行（max 守护总行数 < live_window 的情形）
         rest = lines[max(num_lines, 0):]
-        self._live.update(self._pad(Text.from_ansi("".join(rest))))
+        self._live.update(self._pad(Text.from_ansi("".join(rest))), refresh=True)
 
     def _teardown(self) -> None:
         if self._live is not None:
@@ -149,7 +174,8 @@ class StreamView:
         """显示/更新单行状态。会先冲刷未结束的正文块（状态意味着正文已暂停/结束）。"""
         self.flush_text()
         if self._spinner is None:
-            self._spinner = Live(renderable, console=self.console, refresh_per_second=8)
+            # transient：spinner 停止即擦除，不把空帧固化成空行（同 MarkdownStream）
+            self._spinner = Live(renderable, console=self.console, refresh_per_second=8, transient=True)
             self._spinner.start()
         else:
             self._spinner.update(renderable)

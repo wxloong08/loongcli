@@ -101,3 +101,88 @@ async def test_grep_single_file_no_match(tool, project_dir):
 async def test_grep_nonexistent_path(tool):
     result = await tool.execute(pattern="hello", path="/does/not/exist")
     assert "不存在" in result
+
+
+# ── Windows 不可访问文件（WinError 1920 等 OSError）只跳过不炸 ──
+
+@pytest.mark.asyncio
+async def test_grep_skips_unreadable_oserror(tmp_path, monkeypatch):
+    """单个文件 read 抛 OSError（如 reparse 点）→ 记跳过，搜索继续。"""
+    good = tmp_path / "good.py"
+    good.write_text("cache_aware = True\n", encoding="utf-8")
+    bad = tmp_path / "bad.py"
+    bad.write_text("cache_aware = False\n", encoding="utf-8")
+
+    real_read = Path.read_text
+
+    def fake_read(self, *a, **kw):
+        if self.name == "bad.py":
+            raise OSError(1920, "系统无法访问此文件")
+        return real_read(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", fake_read)
+
+    result = await GrepTool().execute(pattern="cache_aware", path=str(tmp_path))
+    assert "good.py:1:" in result
+    assert "跳过 1 个" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_skips_is_file_oserror(tmp_path, monkeypatch):
+    """is_file() 本身抛 OSError（真机截图里的炸点）→ 同样只跳过。"""
+    good = tmp_path / "good.py"
+    good.write_text("target_here\n", encoding="utf-8")
+    bad = tmp_path / "badlink"
+    bad.write_text("x", encoding="utf-8")
+
+    real_is_file = Path.is_file
+
+    def fake_is_file(self, *a, **kw):
+        if self.name == "badlink":
+            raise OSError(1920, "系统无法访问此文件")
+        return real_is_file(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "is_file", fake_is_file)
+
+    result = await GrepTool().execute(pattern="target_here", path=str(tmp_path))
+    assert "good.py:1:" in result
+    assert "跳过 1 个" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_budget_not_burned_by_skip_dirs(tmp_path, monkeypatch):
+    """真机回归：.venv 里的海量条目不得消耗扫描预算（此前项目根只搜到 16 个文件就截断）。"""
+    import loongcli.tools.grep_tool as mod
+
+    venv = tmp_path / ".venv" / "lib"
+    venv.mkdir(parents=True)
+    for i in range(30):
+        (venv / f"junk{i:02d}.py").write_text("cache_aware = 'noise'\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "target.py").write_text("cache_aware = True\n", encoding="utf-8")
+
+    # 预算 5：旧实现 .venv 的 30 条枚举就触顶、src 永远轮不到
+    monkeypatch.setattr(mod, "_MAX_TOTAL_FILES", 5)
+
+    result = await mod.GrepTool().execute(pattern="cache_aware", path=str(tmp_path))
+    assert "target.py:1:" in result
+    assert "扫描已截断" not in result
+
+
+@pytest.mark.asyncio
+async def test_grep_output_states_search_root(tmp_path):
+    """结果必须标明搜索根——模型把 cwd 的结果说成别的项目"里没有"是毒记忆的认知源头。"""
+    (tmp_path / "a.py").write_text("needle = 1\n", encoding="utf-8")
+    result = await GrepTool().execute(pattern="needle", path=str(tmp_path))
+    assert result.startswith("[搜索根: ")
+    assert str(tmp_path) in result.splitlines()[0]
+
+
+@pytest.mark.asyncio
+async def test_grep_not_found_disclaims_scope(tmp_path):
+    """未找到时明确"只能说明该范围内没搜到"，不给否定断言留空间。"""
+    (tmp_path / "a.py").write_text("nothing here\n", encoding="utf-8")
+    result = await GrepTool().execute(pattern="ghost_needle", path=str(tmp_path))
+    assert "[搜索根: " in result
+    assert "不代表其他目录/项目里不存在" in result

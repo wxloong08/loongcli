@@ -11,7 +11,7 @@ from loongcli.core.task import TaskManager, TaskStatus
 from loongcli.core.agent import AgentLoop
 from loongcli.core.compact import Compactor
 from loongcli.core.events import BatchProgress
-from loongcli.security.permissions import PermissionChecker, PermissionMode
+from loongcli.security.permissions import PermissionChecker
 
 if TYPE_CHECKING:
     from loongcli.core.llm import LLMClient
@@ -87,17 +87,19 @@ class BatchDelegateTool(Tool):
         task_objs: list[tuple[int, object, str]] = []
         for i, t in enumerate(tasks):
             sub_registry = self._build_sub_registry(t.get("tools"))
-            sub_checker = PermissionChecker(PermissionMode.SKIP)
             compactor = Compactor(llm=self._sub_llm, threshold=16000)
 
+            # 继承父级 checker（而非一律 SKIP），并以非交互方式运行，
+            # 使 CONFIRM 自动拒绝——详见 AgentTool.execute。
             sub_agent = AgentLoop(
                 llm=self._sub_llm,
                 tool_registry=sub_registry,
-                permission_checker=sub_checker,
+                permission_checker=self._permission_checker,
                 system_prompt=SUBAGENT_SYSTEM_PROMPT,
                 max_iterations=30,
                 compactor=compactor,
                 role=AgentRole.SUBAGENT,
+                interactive=False,
             )
 
             task_obj = await self._task_manager.create_and_run(

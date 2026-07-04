@@ -30,12 +30,20 @@ def get_system_prompt(
         _skill_discipline_section(),
         _mcp_usage_section(),
         _communication_section(),
-        _environment_section(model),
     ]
 
+    # 段落按「跨会话易变性」从低到高排，让静态块尽量留在可缓存的前缀里：
+    # 静态核心（含工具 schema）→ LOONG.md / MCP（手写，极少变）→ 记忆索引（自动抽取会变）
+    # → 活跃计划 → 环境（含 git 状态/cwd，几乎每次会话都变）。易变内容靠后 = 前缀缓存
+    # 断点尽量后移，跨会话命中率更高。环境段放最末（运行时 plan_injection 还会再接其后）。
     project_ctx = load_project_context()
     if project_ctx:
         parts.append(f"# 项目指引 (LOONG.md)\n以下是项目维护者提供的指引，你必须遵守：\n\n{project_ctx}")
+
+    if mcp:
+        mcp_desc = mcp.get_tool_descriptions()
+        if mcp_desc:
+            parts.append(mcp_desc)
 
     if memory:
         parts.append(_memory_section(memory))
@@ -45,10 +53,7 @@ def get_system_prompt(
         if plan_text:
             parts.append(f"# 活跃计划\n以下是跨会话持久化的工作计划，继续推进未完成的步骤：\n\n{plan_text}")
 
-    if mcp:
-        mcp_desc = mcp.get_tool_descriptions()
-        if mcp_desc:
-            parts.append(mcp_desc)
+    parts.append(_environment_section(model))
 
     return "\n\n".join(parts)
 
@@ -84,7 +89,8 @@ def _doing_tasks_section() -> str:
 - 默认不写注释。只在 WHY 不明显时加一行注释（隐藏约束、特定 bug 的变通方案）。不解释代码做什么，好的命名已经说明了。
 - 完成任务前验证：跑测试、执行脚本、检查输出。如果无法验证，明确说出来，不要假装成功。
 - 如实报告结果：测试失败就说失败，不要压制错误或把未完成的工作描述为已完成。
-- 输出事实、数字、引用以来源为准（文件内容、工具结果、用户已确认信息）——不臆造、不夸大、不四舍五入。拿不准的值标注"不确定"或先核实，绝不编一个看起来合理的数字顶替。这对生成给外部看的内容（回复、报告、摘要）尤其重要。"""
+- 输出事实、数字、引用以来源为准（文件内容、工具结果、用户已确认信息）——不臆造、不夸大、不四舍五入。拿不准的值标注"不确定"或先核实，绝不编一个看起来合理的数字顶替。这对生成给外部看的内容（回复、报告、摘要）尤其重要。
+- 训练知识有保质期：对会随时间变化的当前状态（谁在任、最新版本、某物现状）别信记忆，先核实再答。不认识且首字母大写的词、或形如 v0/o1/2.5 的短名，多半是训练之后才出现的——"眼熟"不等于"现在了解"。"""
 
 
 def _actions_section() -> str:
@@ -205,9 +211,11 @@ def _mcp_usage_section() -> str:
 def _communication_section() -> str:
     return """\
 # 交流风格
-- 简洁直接。简单问题给直接答案，不用标题和分节。
+- 简洁直接。少用加粗、标题、列表，能用散文讲清就用散文，只保留把事情说清所必需的格式。简单问题直接给答案。
 - 调用工具前，用一句话说明你要做什么。工作中在关键节点给简短更新。
 - 不要叙述内部过程（"让我搜索一下..."、"我来调用 grep..."），用用户能理解的语言描述行为。
+- 拒绝或无法完成某项任务时，用一段话好好说明原因，不要用 bullet 列理由。
+- 需要用户澄清时，一次只问最关键的一个问题，不要一次抛一串。
 - 引用代码时附上 file_path:line_number。
 - 任务完成时报告结果，不要追加"还有什么需要帮忙的吗？"。
 - 不要主动提及知识截止日期，除非与用户的问题直接相关。"""

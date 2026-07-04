@@ -30,7 +30,7 @@ async def test_recall_injects_memories():
     llm.chat_stream = mock_stream
 
     recall_engine = AsyncMock()
-    recall_engine.recall = AsyncMock(return_value=[
+    recall_engine.auto_recall = AsyncMock(return_value=[
         {"name": "user-role", "type": "user", "description": "Python dev",
          "content": "Senior Python dev", "created_at": "", "updated_at": ""},
     ])
@@ -48,7 +48,7 @@ async def test_recall_injects_memories():
     async for event in agent.run_stream("帮我查看项目记忆"):
         events.append(event)
 
-    recall_engine.recall.assert_called_once_with("帮我查看项目记忆")
+    recall_engine.auto_recall.assert_called_once_with("帮我查看项目记忆")
     system_msgs = [m for m in agent.messages if m.get("role") == "system"]
     assert any("相关记忆" in (m.get("content") or "") for m in system_msgs)
 
@@ -64,7 +64,7 @@ async def test_recall_failure_does_not_block():
     llm.chat_stream = mock_stream
 
     recall_engine = AsyncMock()
-    recall_engine.recall = AsyncMock(side_effect=Exception("API down"))
+    recall_engine.auto_recall = AsyncMock(side_effect=Exception("API down"))
 
     agent = AgentLoop(
         llm=llm,
@@ -119,7 +119,7 @@ async def test_recall_deduplicates_across_turns():
     llm.chat_stream = mock_stream
 
     recall_engine = AsyncMock()
-    recall_engine.recall = AsyncMock(return_value=[
+    recall_engine.auto_recall = AsyncMock(return_value=[
         {"name": "mem-1", "type": "user", "description": "test",
          "content": "test content", "created_at": "", "updated_at": ""},
     ])

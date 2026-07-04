@@ -239,3 +239,68 @@ async def test_connect_server_uses_http_for_url():
             )
             assert len(tools) == 1
             assert tools[0].name == "remote__search"
+
+
+# ── ImageContent → sentinel（三期截图闭环：MCP 图片进图片通道） ──
+
+async def test_mcp_tool_execute_image_returns_sentinel():
+    import base64
+    from mcp import types
+    from loongcli.core.messages import parse_image_sentinel, inline_image_refs
+
+    png = b"\x89PNG\r\n\x1a\nscreenshot-bytes"
+    mock_session = AsyncMock()
+    mock_session.call_tool.return_value = types.CallToolResult(
+        content=[
+            types.TextContent(type="text", text="页面已截图"),
+            types.ImageContent(
+                type="image",
+                data=base64.b64encode(png).decode("ascii"),
+                mimeType="image/png",
+            ),
+        ]
+    )
+
+    mock_tool = MagicMock()
+    mock_tool.name = "browser_take_screenshot"
+    mock_tool.description = "Take screenshot"
+    mock_tool.inputSchema = {"type": "object", "properties": {}}
+
+    tool = MCPTool(server_name="playwright", tool=mock_tool, session=mock_session)
+    result = await tool.execute()
+
+    parsed = parse_image_sentinel(result)
+    assert parsed is not None
+    images, text = parsed
+    assert text == "页面已截图"
+    assert len(images) == 1 and images[0][1] == "image/png"
+
+    # 引用可还原出原始截图字节（经内联通道）
+    msg = {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": images[0][0]}},
+    ]}
+    inlined = inline_image_refs([msg])
+    url = inlined[0]["content"][0]["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")
+    assert base64.b64decode(url.split(",", 1)[1]) == png
+
+
+async def test_mcp_tool_bad_image_degrades_to_text():
+    from mcp import types
+
+    mock_session = AsyncMock()
+    mock_session.call_tool.return_value = types.CallToolResult(
+        content=[
+            types.ImageContent(type="image", data="bm90LWFuLWltYWdl", mimeType="image/png"),
+        ]
+    )
+
+    mock_tool = MagicMock()
+    mock_tool.name = "shot"
+    mock_tool.description = ""
+    mock_tool.inputSchema = {"type": "object", "properties": {}}
+
+    tool = MCPTool(server_name="x", tool=mock_tool, session=mock_session)
+    result = await tool.execute()
+    # 字节不是图片（magic 校验不过）→ 降级为错误文本，不抛异常、不产生 sentinel
+    assert "图片处理失败" in result

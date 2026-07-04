@@ -12,7 +12,7 @@ from loongcli.tools.read_file import ReadFileTool
 from loongcli.tools.shell import ShellTool
 from loongcli.tools.glob_tool import GlobTool
 from loongcli.tools.grep_tool import GrepTool
-from loongcli.security.checker import SecurityChecker
+from loongcli.security.permissions import PermissionChecker, PermissionMode
 
 
 async def run_test(name: str, prompt: str, agent: AgentLoop):
@@ -53,24 +53,24 @@ async def main():
     registry.register(ShellTool())
     registry.register(GlobTool())
     registry.register(GrepTool())
-    security = SecurityChecker()
+    security = PermissionChecker(PermissionMode.SKIP)
 
     results = []
 
     # Test 1: pure text (no tool call)
-    agent1 = AgentLoop(llm=llm, tool_registry=registry, security=security,
+    agent1 = AgentLoop(llm=llm, tool_registry=registry, permission_checker=security,
                        system_prompt="你是一个助手。简洁回答。")
     results.append(await run_test("纯文本回复", "1+1等于几？一个字回答。", agent1))
 
     # Test 2: tool call — read file
-    agent2 = AgentLoop(llm=llm, tool_registry=registry, security=security,
+    agent2 = AgentLoop(llm=llm, tool_registry=registry, permission_checker=security,
                        system_prompt="你是一个助手。用工具完成任务。")
     results.append(await run_test("工具调用 - read_file",
                                   f"读取文件 {Path.cwd() / 'pyproject.toml'} 的前5行，告诉我项目名称。",
                                   agent2))
 
     # Test 3: tool call — glob
-    agent3 = AgentLoop(llm=llm, tool_registry=registry, security=security,
+    agent3 = AgentLoop(llm=llm, tool_registry=registry, permission_checker=security,
                        system_prompt="你是一个助手。用工具完成任务。")
     results.append(await run_test("工具调用 - glob",
                                   f"在 {Path.cwd()} 目录下找所有 .py 文件，告诉我有多少个。",

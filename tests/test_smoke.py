@@ -6,7 +6,7 @@ def test_packages_importable():
     from loongcli.memory.markdown_store import MarkdownMemoryStore
     from loongcli.memory.conversation import ConversationStore
     from loongcli.tools.recall import RecallTool
-    from loongcli.security.checker import SecurityChecker
+    from loongcli.security.permissions import PermissionChecker
 
 
 def test_tool_registry_empty():

@@ -29,6 +29,28 @@ def test_cache_aware_false_for_non_deepseek():
     assert c.cache_aware is False
 
 
+def test_cache_aware_qwen_base_url():
+    # 2026-07-03 真机实测（tests/e2e_cache.py）：隐式缓存稳态命中 72%、命中 2 折、位置敏感
+    c = LLMClient(
+        api_key="k", model="qwen3.7-plus",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    assert c.cache_aware is True
+
+
+def test_cache_aware_qwen_model_via_proxy():
+    c = LLMClient(api_key="k", model="qwen3.7-plus", base_url="https://my-proxy.example.com/v1")
+    assert c.cache_aware is True
+
+
+def test_cache_aware_false_for_untested_providers():
+    # Kimi/GLM 有隐式缓存但未接入未实测——接入后跑 e2e_cache 再开
+    c = LLMClient(api_key="k", model="kimi-k2.6", base_url="https://api.moonshot.cn/v1")
+    assert c.cache_aware is False
+    c = LLMClient(api_key="k", model="glm-5.2", base_url="https://open.bigmodel.cn/api/paas/v4")
+    assert c.cache_aware is False
+
+
 @pytest.mark.asyncio
 async def test_chat_stream_yields_chunks():
     client = LLMClient(api_key="test-key")
@@ -108,3 +130,31 @@ async def test_chat_stream_retries_on_error():
 
     assert call_count == 2
     assert len(chunks) == 1
+
+
+def test_switch_same_provider_keeps_client():
+    c = LLMClient(api_key="k", model="deepseek-v4-flash", base_url="https://api.deepseek.com")
+    old_client = c.client
+    c.switch(model="deepseek-v4-pro")
+    assert c.model == "deepseek-v4-pro"
+    assert c.client is old_client  # 端点/密钥没变，连接复用
+
+
+def test_switch_cross_provider_rebuilds_all():
+    c = LLMClient(api_key="dk", model="deepseek-v4-pro",
+                  base_url="https://api.deepseek.com", vision=False)
+    old_client = c.client
+    c.switch(model="qwen3.7-plus", api_key="qk",
+             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", vision=True)
+    assert c.model == "qwen3.7-plus"
+    assert "dashscope" in c.base_url
+    assert c.client is not old_client
+    assert c.vision is True
+    assert c._provider_type == "qwen"  # provider_type 已按新端点重推断
+
+
+def test_switch_vision_none_keeps():
+    c = LLMClient(api_key="k", model="qwen3.7-plus",
+                  base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", vision=True)
+    c.switch(model="qwen3.7-plus")
+    assert c.vision is True

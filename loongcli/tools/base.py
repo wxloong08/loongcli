@@ -10,6 +10,8 @@ class Tool(ABC):
     description: str
     parameters: dict
     supports_progress: bool = False
+    # 外部 MCP 工具置 True，权限层据此对其强制确认（内置工具默认 False）。
+    is_mcp: bool = False
 
     @abstractmethod
     async def execute(self, **kwargs) -> str:

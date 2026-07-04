@@ -1,5 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
+from loongcli.core.messages import detect_image_mime, make_image_sentinel, store_image
 from loongcli.tools.base import Tool
 from loongcli.tools.errors import ToolError
 
@@ -39,6 +40,16 @@ class ReadFileTool(Tool):
             if not p.is_file():
                 return f"错误：'{path}' 不是文件"
 
+            # 图片分支：存入图片库返回 sentinel，由 agent 循环转成带图 user 消息注入
+            # （设计 §4）。放在 20MB 文本上限前——图片有自己的 10MB 上限与错误文案，
+            # "用 offset/limit 分段读"对图片没有意义。offset/limit 对图片忽略。
+            mime = detect_image_mime(str(p))
+            if mime:
+                try:
+                    return make_image_sentinel([(store_image(str(p)), mime)])
+                except (ValueError, OSError) as e:
+                    return f"错误：{e}"
+
             size_mb = p.stat().st_size / (1024 * 1024)
             if size_mb > _MAX_FILE_MB:
                 return (
@@ -68,7 +79,8 @@ class ReadFileTool(Tool):
                     if i > end_line:
                         has_more = True
                         break
-                    numbered.append(f"{i}\t{line.rstrip('\n\r')}")
+                    stripped = line.rstrip("\n\r")
+                    numbered.append(f"{i}\t{stripped}")
 
             parts = []
             if enc != "utf-8":

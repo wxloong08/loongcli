@@ -84,35 +84,88 @@ class ClearCommand(SlashCommand):
         ctx.console.print("[cyan]✓ 对话已清空[/cyan]")
 
 
+def _vision_for_model(config, model: str) -> bool:
+    """从 roles 配置里查该模型是否标了 vision（同模型继承）。查不到按 False——
+    宁可拒图也别把图喂给可能是纯文本的模型（显式失败优于静默腐败）。"""
+    if config and getattr(config, "role_bindings", None):
+        for bind in config.role_bindings.values():
+            if bind.model == model and bind.vision:
+                return True
+    return False
+
+
+def _deepseek_provider(config):
+    """找 deepseek 供应商配置：显式名字优先，其次 base_url 含 deepseek 的（含 _default）。"""
+    providers = getattr(config, "providers", None) if config else None
+    if not providers:
+        return None
+    if "deepseek" in providers:
+        return providers["deepseek"]
+    for prov in providers.values():
+        if "deepseek" in (prov.base_url or ""):
+            return prov
+    return None
+
+
 class ModelCommand(SlashCommand):
     name = "model"
-    description = "查看或切换模型（支持 profile 名称或直接模型名）"
-    usage = "[profile|model_name]"
+    description = "查看或切换模型（provider:model 跨供应商 / profile / 直接模型名）"
+    usage = "[provider:model|profile|model_name]"
 
     async def run(self, args: list[str], ctx: CommandContext) -> None:
+        llm = ctx.agent.llm
         if not args:
-            ctx.console.print(f"当前模型: [bold cyan]{ctx.agent.llm.model}[/bold cyan]")
+            vision_label = " [magenta](vision)[/magenta]" if getattr(llm, "vision", False) else ""
+            ctx.console.print(
+                f"当前模型: [bold cyan]{llm.model}[/bold cyan]{vision_label} "
+                f"[dim]{getattr(llm, 'base_url', '')}[/dim]"
+            )
             if ctx.config and ctx.config.model_profiles:
                 names = ", ".join(ctx.config.list_profiles())
                 ctx.console.print(f"可用 profiles: [dim]{names}[/dim]")
+            if ctx.config and ctx.config.providers:
+                names = ", ".join(ctx.config.providers)
+                ctx.console.print(f"可用 providers: [dim]{names}[/dim]（跨供应商用 /model <provider>:<model>）")
             return
 
         name = args[0]
+
+        # provider:model 语法——跨供应商切换，端点/密钥/provider_type/vision 一起换
+        if ":" in name:
+            prov_name, _, model = name.partition(":")
+            prov = (ctx.config.providers or {}).get(prov_name) if ctx.config else None
+            if not prov or not model:
+                ctx.console.print(f"[red]未配置 provider '{prov_name}'[/red]（见 config.json providers 段）")
+                return
+            llm.switch(model=model, api_key=prov.api_key, base_url=prov.base_url,
+                       vision=_vision_for_model(ctx.config, model))
+            ctx.console.print(
+                f"[green]✓ 已切换到[/green] [bold cyan]{model}[/bold cyan] "
+                f"[dim]@ {prov.base_url}[/dim]"
+            )
+            return
+
         if ctx.config:
             profile = ctx.config.get_profile(name)
             if profile:
-                ctx.agent.llm.model = profile.model
-                api_key = profile.effective_api_key(ctx.config.api_key)
-                from openai import AsyncOpenAI
-                ctx.agent.llm.client = AsyncOpenAI(api_key=api_key, base_url=profile.base_url)
+                llm.switch(
+                    model=profile.model,
+                    api_key=profile.effective_api_key(ctx.config.api_key),
+                    base_url=profile.base_url,
+                    vision=_vision_for_model(ctx.config, profile.model),
+                )
                 ctx.console.print(
                     f"[green]✓ 已切换到 profile[/green] [bold cyan]{name}[/bold cyan] "
                     f"(model={profile.model}, base_url={profile.base_url})"
                 )
                 return
 
-        ctx.agent.llm.model = name
-        ctx.console.print(f"[green]✓ 模型已切换为[/green] [bold cyan]{name}[/bold cyan]")
+        # 裸模型名：同供应商换模型（端点不动）；vision 按 roles 同名绑定解析
+        llm.switch(model=name, vision=_vision_for_model(ctx.config, name))
+        ctx.console.print(
+            f"[green]✓ 模型已切换为[/green] [bold cyan]{name}[/bold cyan] "
+            f"[dim]（端点不变: {getattr(llm, 'base_url', '')}）[/dim]"
+        )
 
 
 class CompactCommand(SlashCommand):
@@ -130,7 +183,12 @@ class CompactCommand(SlashCommand):
             return
         if agent.conversation_store:
             agent.conversation_store.archive_segment(agent.messages, reason="manual-compact")
-        agent.messages = await agent.compactor.compact(agent.messages)
+        try:
+            agent.messages = await agent.compactor.compact(agent.messages)
+        except Exception as e:
+            # 压缩失败（如空摘要守卫触发）保留原历史，不让手动 /compact 击穿 TUI
+            ctx.console.print(f"[yellow]压缩失败，历史未变动: {e}[/yellow]")
+            return
         after = len(agent.messages)
         ctx.console.print(f"[cyan]✓ 已压缩: {before} → {after} 条消息[/cyan]")
 
@@ -276,16 +334,36 @@ MODEL_ALIASES = {
 }
 
 
+async def _switch_deepseek(ctx: CommandContext, alias: str, label: str) -> None:
+    """/fast /pro 共用：切到 DeepSeek 目标模型，端点/密钥随 provider 配置一起换。
+
+    主力若是其他供应商（如 qwen），只换模型名会拿 deepseek 模型名打错端点（400）——
+    必须找到 deepseek provider 配置整体切换；找不到且当前端点也不是 DeepSeek 则明确拒绝。
+    """
+    llm = ctx.agent.llm
+    target = MODEL_ALIASES[alias]
+    prov = _deepseek_provider(ctx.config)
+    if prov:
+        llm.switch(model=target, api_key=prov.api_key, base_url=prov.base_url, vision=False)
+    elif "deepseek" in (getattr(llm, "base_url", "") or ""):
+        llm.switch(model=target, vision=False)
+    else:
+        ctx.console.print(
+            "[red]未配置 deepseek provider，无法切换[/red]"
+            "（当前端点非 DeepSeek，需在 config.json providers 段配置 deepseek）"
+        )
+        return
+    ctx.console.print(
+        f"[green]✓ 已切换到[/green] [bold cyan]{target}[/bold cyan] [dim]({label})[/dim]"
+    )
+
+
 class FastCommand(SlashCommand):
     name = "fast"
     description = "切换到 deepseek-v4-flash（快速、低成本）"
 
     async def run(self, args: list[str], ctx: CommandContext) -> None:
-        ctx.agent.llm.model = MODEL_ALIASES["flash"]
-        ctx.console.print(
-            f"[green]✓ 已切换到[/green] [bold cyan]{MODEL_ALIASES['flash']}[/bold cyan] "
-            f"[dim](快速模式)[/dim]"
-        )
+        await _switch_deepseek(ctx, "flash", "快速模式")
 
 
 class ProCommand(SlashCommand):
@@ -293,11 +371,7 @@ class ProCommand(SlashCommand):
     description = "切换到 deepseek-v4-pro（强推理、高质量）"
 
     async def run(self, args: list[str], ctx: CommandContext) -> None:
-        ctx.agent.llm.model = MODEL_ALIASES["pro"]
-        ctx.console.print(
-            f"[green]✓ 已切换到[/green] [bold cyan]{MODEL_ALIASES['pro']}[/bold cyan] "
-            f"[dim](专业模式)[/dim]"
-        )
+        await _switch_deepseek(ctx, "pro", "专业模式")
 
 
 LOONG_TEMPLATE = """\
@@ -387,6 +461,21 @@ class WebCommand(SlashCommand):
         webbrowser.open(url)
 
 
+class VerboseCommand(SlashCommand):
+    name = "verbose"
+    description = "切换工具输出模式：折叠（默认）↔ 详细"
+
+    async def run(self, args: list[str], ctx: CommandContext) -> None:
+        if ctx.tui is None:
+            ctx.console.print("[yellow]当前上下文没有 TUI，无法切换[/yellow]")
+            return
+        ctx.tui.verbose = not getattr(ctx.tui, "verbose", False)
+        if ctx.tui.verbose:
+            ctx.console.print("[cyan]✓ 详细模式已开启[/cyan]（⚙ 常驻行 + 结果原文）")
+        else:
+            ctx.console.print("[cyan]✓ 折叠模式已恢复[/cyan]（● 工具行 + ⎿ 统计/diff）")
+
+
 def create_default_registry() -> CommandRegistry:
     registry = CommandRegistry()
     registry.register(HelpCommand())
@@ -404,4 +493,5 @@ def create_default_registry() -> CommandRegistry:
     registry.register(FastCommand())
     registry.register(ProCommand())
     registry.register(WebCommand())
+    registry.register(VerboseCommand())
     return registry

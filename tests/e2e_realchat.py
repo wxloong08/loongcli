@@ -17,7 +17,7 @@ from loongcli.tools.edit_file import EditFileTool
 from loongcli.tools.shell import ShellTool
 from loongcli.tools.glob_tool import GlobTool
 from loongcli.tools.grep_tool import GrepTool
-from loongcli.security.checker import SecurityChecker
+from loongcli.security.permissions import PermissionChecker, PermissionMode
 from loongcli.core.events import (
     TextDelta, ToolCallStart, ToolCallResult, AgentDone,
     CompactNotice, ConfirmRequest,
@@ -43,14 +43,14 @@ async def main():
     registry.register(GlobTool())
     registry.register(GrepTool())
 
-    security = SecurityChecker()
+    security = PermissionChecker(PermissionMode.SKIP)
     system_prompt = get_system_prompt(model=cfg.model)
     compactor = Compactor(llm=llm, threshold=cfg.compact_threshold)
 
     agent = AgentLoop(
         llm=llm,
         tool_registry=registry,
-        security=security,
+        permission_checker=security,
         system_prompt=system_prompt,
         compactor=compactor,
     )

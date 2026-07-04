@@ -13,7 +13,7 @@ from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, Agent
 from loongcli.tools.base import ToolRegistry
 from loongcli.tools.read_file import ReadFileTool
 from loongcli.tools.shell import ShellTool
-from loongcli.security.checker import SecurityChecker
+from loongcli.security.permissions import PermissionChecker, PermissionMode
 
 
 async def main():
@@ -28,10 +28,10 @@ async def main():
     registry = ToolRegistry()
     registry.register(ReadFileTool())
     registry.register(ShellTool())
-    security = SecurityChecker()
+    security = PermissionChecker(PermissionMode.SKIP)
 
     agent = AgentLoop(
-        llm=llm, tool_registry=registry, security=security,
+        llm=llm, tool_registry=registry, permission_checker=security,
         system_prompt="你是一个助手。用工具完成任务。",
     )
 

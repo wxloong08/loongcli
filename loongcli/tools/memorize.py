@@ -40,8 +40,19 @@ class MemorizeTool(Tool):
         "required": ["operation", "name"],
     }
 
-    def __init__(self, memory: MarkdownMemoryStore):
+    def __init__(self, memory: MarkdownMemoryStore, session_provider=None):
         self.memory = memory
+        # 溯源：与 auto-extract 同一套 source_session 机制，模型主动写入同样要留案底
+        self._session_provider = session_provider
+
+    def _source(self) -> str:
+        sid = ""
+        if self._session_provider:
+            try:
+                sid = str(self._session_provider() or "")
+            except Exception:
+                sid = ""
+        return f"memorize:{sid}" if sid else "memorize"
 
     async def execute(
         self,
@@ -59,6 +70,7 @@ class MemorizeTool(Tool):
             saved_name = self.memory.save(
                 name=name, description=description,
                 type=type, content=content,
+                source=self._source(),
             )
             return f"已保存 [{type}] {saved_name}"
 

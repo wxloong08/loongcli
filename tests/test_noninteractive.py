@@ -20,6 +20,7 @@ def _make_args(output_format="text", no_stream=False, verbose=False, prompt=None
         output_format=output_format,
         no_stream=no_stream,
         verbose=verbose,
+        image=None,
     )
 
 
@@ -74,6 +75,7 @@ async def test_async_main_uses_module_path_import_before_memory_migration():
         no_stream=False,
         verbose=False,
         profile=None,
+        image=None,
     )
     cfg = SimpleNamespace(
         api_key="test-key",

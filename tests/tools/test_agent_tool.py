@@ -47,6 +47,27 @@ class TestAgentTool:
         result = await tool.execute(prompt="test")
         assert "最大嵌套深度" in result
 
+    @pytest.mark.asyncio
+    async def test_subagent_inherits_parent_checker_noninteractive(self):
+        """SubAgents must reuse the parent's permission checker (not a blanket
+        SKIP) and run non-interactively, so they can't bypass confirmation."""
+        tool, tm = self._make_tool()
+        captured = {}
+
+        class FakeLoop:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        async def fake_create_and_run(prompt, agent_loop, depth):
+            return Task(prompt=prompt)
+
+        with patch("loongcli.tools.agent_tool.AgentLoop", FakeLoop):
+            tm.create_and_run = fake_create_and_run
+            await tool.execute(prompt="do it", mode="background")
+
+        assert captured["interactive"] is False
+        assert captured["permission_checker"] is tool._permission_checker
+
     def test_build_sub_registry_excludes_blacklisted(self):
         tool, _ = self._make_tool()
         sub = tool._build_sub_registry(None)

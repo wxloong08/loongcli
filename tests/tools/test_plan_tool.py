@@ -115,8 +115,11 @@ class TestPlanTool:
 
     @pytest.mark.asyncio
     async def test_list(self, plan_tool):
-        tool, _ = plan_tool
+        tool, store = plan_tool
         await tool.execute(operation="create", title="Plan A", steps=["X"])
+        # A 动工后再建 B——未动工的纯草稿会被覆盖（这是特性，另有专测）
+        id_a = store.list_plans()[0].id
+        await tool.execute(operation="update_step", plan_id=id_a, step_index=0, step_status="in_progress")
         await tool.execute(operation="create", title="Plan B", steps=["Y"])
         result = await tool.execute(operation="list")
         assert "Plan A" in result
@@ -172,3 +175,58 @@ class TestProjectScoping:
         # plans sit alongside sessions: <root>/<slug>/plans
         assert store.base_dir.parent == (tmp_path / "projects" / store.base_dir.parent.name)
         assert store.base_dir.name == "plans"
+
+
+# ── 草稿覆盖：孤儿计划回归（真机：一轮连开三个 plan） ──
+
+@pytest.mark.asyncio
+async def test_create_replaces_untouched_draft(tmp_path):
+    from loongcli.plan.store import PlanStore
+    from loongcli.tools.plan_tool import PlanTool
+
+    store = PlanStore(base_dir=tmp_path)
+    tool = PlanTool(store)
+    r1 = await tool.execute(operation="create", title="A", steps=["s1"])
+    id_a = r1.split("计划已创建: ")[1].split("（")[0].split("\n")[0].strip()
+    r2 = await tool.execute(operation="create", title="B", steps=["s1"])
+    assert "已覆盖未动工草稿" in r2
+    assert store.load(id_a) is None          # 孤儿草稿被清
+    assert len(store.list_plans()) == 1
+
+
+@pytest.mark.asyncio
+async def test_create_keeps_started_plan(tmp_path):
+    """动过工（任一步骤非 pending）的计划绝不覆盖。"""
+    from loongcli.plan.store import PlanStore
+    from loongcli.tools.plan_tool import PlanTool
+
+    store = PlanStore(base_dir=tmp_path)
+    tool = PlanTool(store)
+    r1 = await tool.execute(operation="create", title="A", steps=["s1", "s2"])
+    id_a = r1.split("计划已创建: ")[1].split("（")[0].split("\n")[0].strip()
+    await tool.execute(operation="update_step", plan_id=id_a, step_index=0, step_status="in_progress")
+    r2 = await tool.execute(operation="create", title="B", steps=["s1"])
+    assert "已覆盖" not in r2
+    assert store.load(id_a) is not None
+    assert len(store.list_plans()) == 2
+
+
+@pytest.mark.asyncio
+async def test_create_keeps_active_plan(tmp_path):
+    """已批准（agent._active_plan_id）的计划绝不覆盖，即使步骤全 pending。"""
+    from unittest.mock import MagicMock
+    from loongcli.plan.store import PlanStore
+    from loongcli.tools.plan_tool import PlanTool
+
+    store = PlanStore(base_dir=tmp_path)
+    tool = PlanTool(store)
+    r1 = await tool.execute(operation="create", title="A", steps=["s1"])
+    id_a = r1.split("计划已创建: ")[1].split("（")[0].split("\n")[0].strip()
+
+    agent = MagicMock()
+    agent._active_plan_id = id_a
+    tool.bind_agent(agent)
+
+    r2 = await tool.execute(operation="create", title="B", steps=["s1"])
+    assert "已覆盖" not in r2
+    assert store.load(id_a) is not None

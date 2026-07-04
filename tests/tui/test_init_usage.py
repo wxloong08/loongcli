@@ -8,8 +8,11 @@ from loongcli.tui.commands import InitCommand, UsageCommand, FastCommand, ProCom
 
 
 def _make_ctx(tmp_path=None, token_usage=None):
+    from loongcli.core.llm import LLMClient
+
     console = Console(file=StringIO())
     agent = MagicMock()
+    agent.llm = LLMClient(api_key="k", model="deepseek-v4-pro")  # 默认 deepseek 端点
     agent.token_usage = token_usage or {
         "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
         "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 0,
@@ -79,6 +82,7 @@ async def test_usage_shows_cache_and_thinking():
 
 @pytest.mark.asyncio
 async def test_fast_command():
+    # 无 config（providers 未知）但当前端点是 deepseek → 原地换模型
     ctx = _make_ctx()
     cmd = FastCommand()
     await cmd.run([], ctx)
@@ -91,6 +95,47 @@ async def test_pro_command():
     cmd = ProCommand()
     await cmd.run([], ctx)
     assert ctx.agent.llm.model == "deepseek-v4-pro"
+
+
+@pytest.mark.asyncio
+async def test_fast_switches_endpoint_from_qwen_main():
+    """主力 qwen 时 /fast 必须整体切到 deepseek provider（端点+密钥），不能只换模型名打错端点。"""
+    from loongcli.core.config import Config
+    from loongcli.core.llm import LLMClient
+    from loongcli.core.provider import ProviderConfig
+
+    ctx = _make_ctx()
+    ctx.agent.llm = LLMClient(
+        api_key="qk", model="qwen3.7-plus",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", vision=True,
+    )
+    cfg = Config()
+    cfg.providers = {"deepseek": ProviderConfig(name="deepseek", api_key="dk", base_url="https://api.deepseek.com")}
+    ctx.config = cfg
+
+    await FastCommand().run([], ctx)
+    llm = ctx.agent.llm
+    assert llm.model == "deepseek-v4-flash"
+    assert "deepseek" in llm.base_url
+    assert llm.vision is False          # vision 不残留
+    assert llm.cache_aware is True      # provider_type 已重推断
+
+
+@pytest.mark.asyncio
+async def test_fast_refuses_without_deepseek_provider():
+    from loongcli.core.config import Config
+    from loongcli.core.llm import LLMClient
+
+    ctx = _make_ctx()
+    ctx.agent.llm = LLMClient(
+        api_key="qk", model="qwen3.7-plus",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    ctx.config = Config()  # 无 providers
+
+    await FastCommand().run([], ctx)
+    assert ctx.agent.llm.model == "qwen3.7-plus"  # 未切换
+    assert "无法切换" in ctx.console.file.getvalue()
 
 
 def test_init_and_usage_in_default_registry():

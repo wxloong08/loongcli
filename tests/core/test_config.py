@@ -30,6 +30,22 @@ def test_load_from_file(tmp_path):
     assert "demo" in cfg.mcp_servers
 
 
+def test_role_vision_parsed(tmp_path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({
+        "api_key": "sk-x",
+        "roles": {
+            "main": {"provider": "_default", "model": "qwen3.7-plus", "vision": True},
+            "utility": {"provider": "_default", "model": "deepseek-v4-flash"},
+        },
+    }), encoding="utf-8")
+
+    cfg = Config.load(path=p)
+    assert cfg.role_bindings["main"].vision is True
+    # 未配置 vision 的 role 默认 False
+    assert cfg.role_bindings["utility"].vision is False
+
+
 def test_env_overrides_file(tmp_path, monkeypatch):
     p = tmp_path / "config.json"
     p.write_text(json.dumps({

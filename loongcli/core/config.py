@@ -98,6 +98,7 @@ class Config:
                 thinking=rdata.get("thinking", False),
                 reasoning_effort=rdata.get("reasoning_effort", "max"),
                 context_window=parse_token_size(rdata.get("context_window", 0)),
+                vision=rdata.get("vision", False),
             )
 
         return cls(

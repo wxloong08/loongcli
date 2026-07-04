@@ -53,3 +53,32 @@ class TestBuildThinkingParams:
 
         client3 = LLMClient(api_key="k", base_url="http://localhost:11434/v1")
         assert client3._provider_type == "local"
+
+    # ── Qwen(dashscope 兼容)：思考走 enable_thinking，绝不发 reasoning_effort ──
+
+    def test_qwen_inferred_from_dashscope_url(self):
+        client = LLMClient(api_key="k", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
+        assert client._provider_type == "qwen"
+
+    def test_qwen_thinking_streaming_enables_thinking(self):
+        client = LLMClient(api_key="k", thinking=True, provider_type="qwen")
+        kwargs = {}
+        client._build_thinking_params(kwargs, stream=True)
+        assert kwargs["extra_body"] == {"enable_thinking": True}
+        # 关键回归：Qwen 绝不能收到 reasoning_effort（否则 400：max 非法值）
+        assert "reasoning_effort" not in kwargs
+
+    def test_qwen_thinking_nonstream_disables_thinking(self):
+        # 非流式（chat）即便 thinking=True 也关——Qwen 思考模式要求流式
+        client = LLMClient(api_key="k", thinking=True, provider_type="qwen")
+        kwargs = {}
+        client._build_thinking_params(kwargs, stream=False)
+        assert kwargs["extra_body"] == {"enable_thinking": False}
+        assert "reasoning_effort" not in kwargs
+
+    def test_qwen_thinking_off(self):
+        client = LLMClient(api_key="k", thinking=False, provider_type="qwen")
+        kwargs = {}
+        client._build_thinking_params(kwargs, stream=True)
+        assert kwargs["extra_body"] == {"enable_thinking": False}
+        assert "reasoning_effort" not in kwargs

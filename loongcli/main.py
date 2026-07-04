@@ -2,6 +2,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
+import logging.handlers
 import sys
 from pathlib import Path
 
@@ -52,6 +54,32 @@ from loongcli.lsp.tools import register_lsp_tools
 from loongcli.tui.app import TUI
 
 
+def _setup_logging() -> None:
+    """日志进文件（~/.loongcli/logs/loongcli.log），不进终端。
+
+    不配置的话 Python 的 lastResort 兜底 handler 会把 WARNING 裸打到 stderr，
+    在 TUI 里穿插破坏渲染——工具失败等信息已由事件流展示（✗ 块），终端再打一遍纯属噪音。
+    轮转上限 5MB×2，防止长期使用日志无界膨胀。已配置过（含测试注入 handler）则不重复配。
+    """
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    log_dir = Path.home() / ".loongcli" / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            log_dir / "loongcli.log", maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8",
+        )
+    except OSError:
+        # 日志目录建不了就静默降级（只关掉裸 stderr 输出），绝不因日志阻塞主流程
+        logging.raiseExceptions = False
+        root.addHandler(logging.NullHandler())
+        return
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="loongcli",
@@ -90,6 +118,10 @@ def _parse_args() -> argparse.Namespace:
         "--profile", default=None,
         help="使用指定的 model profile（config.json 中定义），主要供评测脚本切换模型",
     )
+    parser.add_argument(
+        "--image", action="append", default=None, metavar="PATH",
+        help="附带图片一起提问（可重复）。需当前 role 配置 vision: true 且模型支持图片",
+    )
     return parser.parse_args()
 
 
@@ -116,7 +148,7 @@ async def _run_noninteractive(agent: AgentLoop, prompt: str, args, mcp: MCPManag
     thinking_buffer = ""
     tool_log: list[dict] = []
 
-    async for event in agent.run_stream(prompt):
+    async for event in agent.run_stream(prompt, images=args.image):
         if isinstance(event, ThinkingDelta):
             thinking_buffer += event.text
 
@@ -266,7 +298,10 @@ async def _async_main():
     cfg = Config.load()
 
     prompt = _build_prompt(args)
-    noninteractive = prompt is not None
+    # --image 也触发非交互模式（哪怕没有文本 prompt，只发图也走一次性问答）
+    noninteractive = prompt is not None or bool(args.image)
+    if noninteractive and prompt is None:
+        prompt = ""
 
     if not cfg.api_key and not cfg.providers:
         if sys.stdin.isatty() and not noninteractive:
@@ -345,11 +380,12 @@ async def _async_main():
     registry.register(GlobTool())
     registry.register(GrepTool())
     registry.register(RecallTool(memory))
-    registry.register(MemorizeTool(memory))
+    registry.register(MemorizeTool(memory, session_provider=lambda: conversation.session_id))
     from loongcli.tools.search_history import SearchHistoryTool
     registry.register(SearchHistoryTool(conversation))
     plan_store = PlanStore(project_dir=Path.cwd())
-    registry.register(PlanTool(plan_store))
+    plan_tool = PlanTool(plan_store)
+    registry.register(plan_tool)
 
     mcp = MCPManager(servers=cfg.mcp_servers)
     mcp_status = ""
@@ -400,7 +436,9 @@ async def _async_main():
     lsp_manager = LSPServerManager(workspace_root=Path.cwd())
     register_lsp_tools(registry, lsp_manager)
 
-    system_prompt = get_system_prompt(model=cfg.model, memory=memory, mcp=mcp, plan_store=plan_store)
+    # 系统提示词的模型身份必须用实际生效的 main client（roles.main），
+    # 顶层 cfg.model 只是无 roles 配置时的回退字段——读它会把身份告诉错（如 qwen 被告知自己是 deepseek）。
+    system_prompt = get_system_prompt(model=llm.model, memory=memory, mcp=mcp, plan_store=plan_store)
     if cfg.compact_threshold:
         threshold = cfg.compact_threshold
     else:
@@ -412,7 +450,11 @@ async def _async_main():
 
     utility_llm = router.client("utility")
     recall_engine = RecallEngine(memory=memory, llm=utility_llm)
-    auto_extractor = AutoExtractor(memory=memory, llm=utility_llm)
+    auto_extractor = AutoExtractor(
+        memory=memory, llm=utility_llm,
+        # 溯源：lambda 晚绑定，resume 换 session 后写入的记忆仍指向正确会话
+        session_provider=lambda: conversation.session_id,
+    )
 
     checkpoint_mgr = CheckpointManager(cwd=Path.cwd())
     cost_tracker = CostTracker()
@@ -428,7 +470,7 @@ async def _async_main():
         hook_manager=hook_manager,
         skill_registry=skill_registry,
         system_prompt_builder=lambda: get_system_prompt(
-            model=cfg.model, memory=memory, mcp=mcp, plan_store=plan_store,
+            model=llm.model, memory=memory, mcp=mcp, plan_store=plan_store,
         ),
         recall_engine=recall_engine,
         auto_extractor=auto_extractor,
@@ -439,6 +481,7 @@ async def _async_main():
     agent.lsp_manager = lsp_manager
     enter_plan_tool.bind_agent(agent)
     exit_plan_tool.bind_agent(agent)
+    plan_tool.bind_agent(agent)  # 草稿覆盖需要知道当前活跃计划，防误删
 
     if structured_state:
         # Structured resume: rebuild context from state instead of raw messages
@@ -480,7 +523,7 @@ async def _async_main():
 
     await hook_manager.run(HookEvent.SESSION_START, {
         "session_id": conversation.session_id,
-        "model": cfg.model,
+        "model": llm.model,
         "resumed": resumed,
         "noninteractive": noninteractive,
     })
@@ -490,8 +533,10 @@ async def _async_main():
             await _run_noninteractive(agent, prompt, args, mcp)
         else:
             tui = TUI(memory=memory, config=cfg, skill_registry=skill_registry, plan_store=plan_store)
-            status_parts = [f"model: {cfg.model}"]
-            thinking_label = cfg.reasoning_effort if cfg.thinking else "off"
+            status_parts = [f"model: {llm.model}"]
+            if llm.vision:
+                status_parts[-1] += " (vision)"
+            thinking_label = llm.reasoning_effort if llm.thinking else "off"
             status_parts.append(f"thinking: {thinking_label}")
             git_ctx = collect_git_context()
             if git_ctx.is_repo:
@@ -595,6 +640,7 @@ def _run_web():
 
 
 def main():
+    _setup_logging()
     if sys.argv[1:2] == ["web"]:
         _run_web()
         return

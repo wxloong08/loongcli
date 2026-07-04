@@ -40,6 +40,24 @@ def _find_git_bash() -> str | None:
     return None
 
 
+def _venv_env() -> dict | None:
+    """cwd 存在 .venv 时，把它的可执行目录前置到子进程 PATH。
+
+    环境接地：不靠模型自觉记得用虚拟环境——真机三次事故都是模型裸调 `pytest`/
+    `python` 解析到全局解释器（缺依赖 + 版本不符），先误诊"项目有语法错误"，
+    最后一次甚至据此改了无关源码。PATH 前置后命令确定性解析到 .venv，
+    与"激活虚拟环境"的语义一致。无 .venv 时返回 None（继承父环境，行为不变）。
+    """
+    venv = Path.cwd() / ".venv"
+    bin_dir = venv / ("Scripts" if platform.system() == "Windows" else "bin")
+    if not bin_dir.is_dir():
+        return None
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    env["VIRTUAL_ENV"] = str(venv)
+    return env
+
+
 @functools.lru_cache(maxsize=1)
 def resolve_shell() -> ShellSpec:
     """Pick the shell for the current OS (stable for the process lifetime).
@@ -69,7 +87,11 @@ class ShellTool(Tool):
         "properties": {
             "command": {
                 "type": "string",
-                "description": "The shell command to execute",
+                "description": (
+                    "The shell command to execute. POSIX/bash syntax ONLY, even on "
+                    "Windows (runs in git bash): use forward slashes and plain `cd <dir>`; "
+                    "never use cmd.exe/PowerShell syntax like `cd /d`, `dir`, or backslash paths."
+                ),
             },
             "timeout": {
                 "type": "integer",
@@ -97,12 +119,14 @@ class ShellTool(Tool):
 
     async def execute(self, command: str, timeout: int = 120) -> str:
         try:
+            env = _venv_env()
             if platform.system() == "Windows":
                 full_cmd = [self._shell_cmd] + self._shell_args + [command]
                 process = await asyncio.create_subprocess_exec(
                     *full_cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
             else:
                 process = await asyncio.create_subprocess_shell(
@@ -110,6 +134,7 @@ class ShellTool(Tool):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     executable=self._shell_cmd,
+                    env=env,
                 )
 
             stdout_lines: list[str] = []

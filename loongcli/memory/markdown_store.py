@@ -125,16 +125,29 @@ class MarkdownMemoryStore:
     def _file_path(self, name: str) -> Path:
         return self.base_dir / f"{name}.md"
 
-    def save(self, name: str, description: str, type: str, content: str) -> str:
-        """Create or update a memory file. Returns the sanitized name."""
+    def save(self, name: str, description: str, type: str, content: str, source: str = "") -> str:
+        """Create or update a memory file. Returns the sanitized name.
+
+        source 非空时写入 frontmatter 的 source_session（溯源：这条记忆由哪个
+        写入者/会话产生，毒记忆事故后加——出问题五秒定位来源会话）。更新时覆写
+        为最新写入者。
+        """
         name = _sanitize_name(name)
 
         if type not in MEMORY_TYPES:
             type = "project"
 
-        # Dedup: if another memory has a very similar description, update that one
+        # Dedup: only merge into an existing memory of the SAME type whose
+        # description is very similar. The type guard is a data-safety measure —
+        # a `user` fact and a `project` fact are never the same memory no matter
+        # how similar their descriptions read. Without it, a lexical collision on
+        # short descriptions would silently redirect this write and overwrite an
+        # unrelated entry's content. Semantic dedup is handled upstream by the
+        # auto-extract prompt; this loop is just a conservative deterministic backstop.
         for existing in self.list_all():
             if existing["name"] == name:
+                continue
+            if existing["type"] != type:
                 continue
             if _similarity(description, existing["description"]) >= _DEDUP_SIMILARITY:
                 name = existing["name"]
@@ -157,6 +170,8 @@ class MarkdownMemoryStore:
             "created_at": created_at,
             "updated_at": now,
         }
+        if source:
+            meta["source_session"] = source
 
         file_content = _render_frontmatter(meta) + "\n\n" + content
         path.write_text(file_content, encoding="utf-8")
@@ -265,6 +280,28 @@ class MarkdownMemoryStore:
 
         index_path = self.base_dir / _INDEX_FILENAME
         index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def index_is_complete(self, max_bytes: int = 25_000) -> bool:
+        """True when MEMORY.md lists every memory — nothing hidden from the model.
+
+        The index drops entries three ways: stale-trim (old project/reference),
+        the _INDEX_MAX_LINES cap, and byte-truncation on load. If any applies,
+        some memories are invisible in the always-loaded index, so automatic
+        semantic recall earns its keep. If none applies, the model already sees
+        every description and automatic recall is pure redundant cost.
+        """
+        entries = self.list_all()
+        if not entries:
+            return True
+        non_stale = [e for e in entries if not self._is_stale_for_index(e)]
+        if len(non_stale) < len(entries):
+            return False  # stale-trimmed entries missing from index
+        if len(non_stale) > _INDEX_MAX_LINES - 2:
+            return False  # line-capped
+        index_path = self.base_dir / _INDEX_FILENAME
+        if not index_path.exists() or index_path.stat().st_size > max_bytes:
+            return False  # no index shown, or byte-truncated on load
+        return True
 
     def get_index(self, max_bytes: int = 25_000) -> str:
         """Read MEMORY.md content, truncate if needed. Returns '' if empty/missing.

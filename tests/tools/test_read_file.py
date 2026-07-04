@@ -198,3 +198,43 @@ async def test_large_utf8_chinese_file_no_garble(tool, tmp_path):
     result = await tool.execute(path=str(f), limit=10)
     assert "latin-1" not in result
     assert "这是一段中文" in result
+
+
+# ── 图片分支：返回 sentinel，由 agent 循环转成带图 user 消息（设计 §4） ──
+
+@pytest.mark.asyncio
+async def test_read_image_returns_sentinel(tool, tmp_path):
+    from loongcli.core.messages import parse_image_sentinel
+    p = tmp_path / "shot.png"
+    p.write_bytes(b"\x89PNG\r\n\x1a\ndata")
+    result = await tool.execute(path=str(p))
+    parsed = parse_image_sentinel(result)
+    assert parsed is not None
+    images, text = parsed
+    assert len(images) == 1 and text == ""
+    ref, mime = images[0]
+    assert ref.startswith("loongimg://") and mime == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_read_image_no_extension_by_magic(tool, tmp_path):
+    from loongcli.core.messages import parse_image_sentinel
+    p = tmp_path / "noext"
+    p.write_bytes(b"\x89PNG\r\n\x1a\ndata")
+    assert parse_image_sentinel(await tool.execute(path=str(p))) is not None
+
+
+@pytest.mark.asyncio
+async def test_read_oversized_image_clear_error(tool, tmp_path):
+    # 10MB 图片上限走图片分支的明确文案，而非"用 offset/limit 分段读"的文本建议
+    p = tmp_path / "big.png"
+    p.write_bytes(b"x" * (10 * 1024 * 1024 + 1))
+    result = await tool.execute(path=str(p))
+    assert result.startswith("错误") and "过大" in result
+    assert "__image__" not in result
+
+
+@pytest.mark.asyncio
+async def test_read_text_file_no_sentinel(tool, sample_file):
+    result = await tool.execute(path=sample_file)
+    assert "line1" in result and "__image__" not in result

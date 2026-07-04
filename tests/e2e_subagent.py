@@ -17,7 +17,7 @@ from loongcli.tools.glob_tool import GlobTool
 from loongcli.tools.agent_tool import AgentTool
 from loongcli.tools.send_message import SendMessageTool
 from loongcli.tools.task_status import TaskStatusTool
-from loongcli.security.checker import SecurityChecker
+from loongcli.security.permissions import PermissionChecker, PermissionMode
 
 
 async def main():
@@ -29,7 +29,7 @@ async def main():
     print(f"Config: model={cfg.model}, base_url={cfg.base_url}")
 
     llm = LLMClient(api_key=cfg.api_key, model=cfg.model, base_url=cfg.base_url)
-    security = SecurityChecker()
+    security = PermissionChecker(PermissionMode.SKIP)
     task_manager = TaskManager()
 
     registry = ToolRegistry()
@@ -55,7 +55,7 @@ async def main():
     agent = AgentLoop(
         llm=llm,
         tool_registry=registry,
-        security=security,
+        permission_checker=security,
         system_prompt=system_prompt,
         task_manager=task_manager,
         max_iterations=20,

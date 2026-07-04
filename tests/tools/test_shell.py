@@ -209,3 +209,27 @@ async def test_timeout_shows_terminated_notice(tool):
         cmd = "ping -n 10 127.0.0.1"
     result = await tool.execute(command=cmd, timeout=1)
     assert "终止" in result or "timeout" in result.lower()
+
+
+# ── .venv 环境接地：命令确定性解析到项目虚拟环境 ──
+
+def test_venv_env_prepends_path(tmp_path, monkeypatch):
+    import os
+    import platform
+    from loongcli.tools.shell import _venv_env
+
+    bin_name = "Scripts" if platform.system() == "Windows" else "bin"
+    (tmp_path / ".venv" / bin_name).mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+
+    env = _venv_env()
+    assert env is not None
+    assert env["PATH"].startswith(str(tmp_path / ".venv" / bin_name) + os.pathsep)
+    assert env["VIRTUAL_ENV"] == str(tmp_path / ".venv")
+
+
+def test_venv_env_none_without_venv(tmp_path, monkeypatch):
+    from loongcli.tools.shell import _venv_env
+
+    monkeypatch.chdir(tmp_path)
+    assert _venv_env() is None  # 无 .venv → 继承父环境，行为不变

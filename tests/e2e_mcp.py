@@ -8,7 +8,7 @@ from loongcli.core.agent import AgentLoop
 from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone
 from loongcli.tools.base import ToolRegistry
 from loongcli.mcp.manager import MCPManager
-from loongcli.security.checker import SecurityChecker
+from loongcli.security.permissions import PermissionChecker, PermissionMode
 
 
 async def main():
@@ -38,7 +38,7 @@ async def main():
     print("\n[2] Running agent with MCP tools...")
     registry = ToolRegistry()
     mcp.register_tools(registry)
-    security = SecurityChecker()
+    security = PermissionChecker(PermissionMode.SKIP)
 
     llm = LLMClient(api_key=cfg.api_key, model=cfg.model, base_url=cfg.base_url)
 
@@ -48,7 +48,7 @@ async def main():
     )
 
     agent = AgentLoop(
-        llm=llm, tool_registry=registry, security=security,
+        llm=llm, tool_registry=registry, permission_checker=security,
         system_prompt=system_prompt,
     )
 
