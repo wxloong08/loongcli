@@ -233,3 +233,31 @@ def test_venv_env_none_without_venv(tmp_path, monkeypatch):
 
     monkeypatch.chdir(tmp_path)
     assert _venv_env() is None  # 无 .venv → 继承父环境，行为不变
+
+
+# ── cd /d 归一：cmd 语法惯性（qwen 三次复发）确定性改写 ──
+
+@pytest.mark.asyncio
+async def test_cd_slash_d_normalized(tmp_path):
+    """`cd /d <路径>` 在 bash 里必错（cd 只吃一个参数）→ 确定性改写为 `cd <路径>`。"""
+    from loongcli.tools.shell import ShellTool
+
+    tool = ShellTool()
+    if not tool.is_posix:
+        pytest.skip("非 POSIX shell 环境")
+    posix_path = str(tmp_path).replace("\\", "/")
+    result = await tool.execute(f'cd /d {posix_path} && echo NORMALIZED_OK')
+    assert "NORMALIZED_OK" in result
+    assert "too many arguments" not in result
+
+
+@pytest.mark.asyncio
+async def test_cd_single_arg_untouched():
+    """正常的 `cd /d`（单参数，git bash 里=进 D: 根）与普通 cd 不受影响。"""
+    from loongcli.tools.shell import ShellTool
+
+    tool = ShellTool()
+    if not tool.is_posix:
+        pytest.skip("非 POSIX shell 环境")
+    result = await tool.execute("cd . && echo PLAIN_OK")
+    assert "PLAIN_OK" in result

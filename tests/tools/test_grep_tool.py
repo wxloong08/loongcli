@@ -186,3 +186,23 @@ async def test_grep_not_found_disclaims_scope(tmp_path):
     result = await GrepTool().execute(pattern="ghost_needle", path=str(tmp_path))
     assert "[搜索根: " in result
     assert "不代表其他目录/项目里不存在" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_limit_truncation(tmp_path):
+    """limit=3 时只返回 3 条匹配行，且包含截断提示。"""
+    f = tmp_path / "many.py"
+    f.write_text("\n".join(f"match line {i}" for i in range(10)) + "\n", encoding="utf-8")
+    result = await GrepTool().execute(pattern="match", path=str(tmp_path), limit=3)
+    lines = [l for l in result.splitlines() if l.startswith("many.py:")]
+    assert len(lines) == 3
+    assert "仅显示前 3 条" in result
+
+
+@pytest.mark.asyncio
+async def test_grep_limit_default_no_truncation(tmp_path):
+    """默认 limit 下，10 条匹配不触发截断提示。"""
+    f = tmp_path / "few.py"
+    f.write_text("\n".join(f"match line {i}" for i in range(10)) + "\n", encoding="utf-8")
+    result = await GrepTool().execute(pattern="match", path=str(tmp_path))
+    assert "仅显示前" not in result

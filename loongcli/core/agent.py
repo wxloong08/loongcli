@@ -58,14 +58,15 @@ PLAN_MODE_SYSTEM_INJECTION = """\
 
 工作流程：
 1. **调研** — 用只读工具探索代码库，理解任务涉及的文件、接口、依赖
-2. **规划** — 用 plan 工具创建结构化计划（标题 + 具体步骤，每步说明改哪个文件、怎么改）
+2. **规划** — 用 plan 工具创建结构化计划。每一步必须写明**改动内容 + 完成判据**
+   （改哪个文件/函数、怎么改；怎么算这步做完——跑什么命令、看到什么结果算过）
 3. **提交** — 调用 exit_plan_mode 提交计划等待用户审批
 
 原则：
 - 不要猜测，先读代码再规划
-- 计划要具体到文件和函数级别
-- 有不确定的地方直接问用户
-- 计划控制在 10 步以内\
+- 「运行脚本」「验证正确性」这类没有判据的空步骤不合格——判据是防执行期跑偏的锚
+- 步骤是给执行期的自己看的路标：宁可 5 步具体，不要 2 步空话；控制在 10 步以内
+- 有不确定的地方直接问用户\
 """
 
 ACTIVE_PLAN_INJECTION_TEMPLATE = """\
@@ -559,7 +560,11 @@ class AgentLoop:
                 self._turn_tools = self.tool_registry.get_tool_schemas(role=self.role)
                 self._turn_tool_names = {s["function"]["name"] for s in self._turn_tools}
             else:
-                result = f"用户要求修改计划：{user_response}\n请根据反馈调整计划，然后重新调用 exit_plan_mode 提交。"
+                result = (
+                    f"用户要求修改计划：{user_response}\n"
+                    "请根据反馈调整计划，然后重新调用 exit_plan_mode 提交。"
+                    "注意：计划再次获批之前你仍处于规划模式，只能使用只读工具，不要开始执行。"
+                )
 
         # 修改类工具执行中抛异常时留有备份——回滚该文件，避免半写损坏；
         # 否则丢弃备份。

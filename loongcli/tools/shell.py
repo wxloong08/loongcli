@@ -3,6 +3,7 @@ import asyncio
 import functools
 import os
 import platform
+import re
 import shutil
 from pathlib import Path
 from typing import NamedTuple
@@ -29,9 +30,11 @@ def _find_git_bash() -> str | None:
     candidates: list[str] = []
     git = shutil.which("git")
     if git:
-        # git is typically at <root>\cmd\git.exe or <root>\bin\git.exe
-        root = Path(git).parent.parent
-        candidates.append(str(root / "bin" / "bash.exe"))
+        # git.exe 可能位于 <root>\cmd\、<root>\bin\，或——当本进程本身运行在
+        # git bash 里时——<root>\mingw64\bin\。固定 parent.parent 只覆盖前两种，
+        # 第三种会推导失败静默退化到 PowerShell（真实复现）。沿祖先逐级找。
+        for anc in list(Path(git).parents)[:4]:
+            candidates.append(str(anc / "bin" / "bash.exe"))
     candidates.append(r"C:\Program Files\Git\bin\bash.exe")
     candidates.append(r"C:\Program Files (x86)\Git\bin\bash.exe")
     for c in candidates:
@@ -118,6 +121,11 @@ class ShellTool(Tool):
                 self._progress_callback(ShellOutput(line=line, stream=stream_name))
 
     async def execute(self, command: str, timeout: int = 120) -> str:
+        # cmd 语法归一：模型（qwen 三次复发）在 Windows 上惯写 `cd /d D:/x`，
+        # bash 的 cd 只吃一个参数，`/d` 会导致 "too many arguments"。bash 里
+        # `cd /d <路径>` 两参形式无合法含义，确定性改写零误伤；提示层已拦不住。
+        if self.is_posix:
+            command = re.sub(r"(?<![\w-])cd\s+/[dD]\s+(?=\S)", "cd ", command)
         try:
             env = _venv_env()
             if platform.system() == "Windows":

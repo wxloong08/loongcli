@@ -141,3 +141,16 @@ def test_step_status_update(store):
     assert reloaded.steps[0].status == "completed"
     assert reloaded.steps[0].output == "done"
     assert reloaded.steps[1].status == "pending"
+
+
+def test_format_summary_is_markdown_list():
+    """步骤必须是 markdown 列表项——单换行会被 Markdown 渲染折叠成一段（真机：审批面板糊成一行）。"""
+    plan = Plan(title="T", steps=[
+        PlanStep(index=0, description="改 a.py 的 f()，判据：pytest tests/a 全绿"),
+        PlanStep(index=1, description="改 b.py", status="completed", output="+3 行"),
+    ])
+    lines = plan.format_summary().splitlines()
+    assert lines[1] == ""                      # 标题后空行（markdown 段落分隔）
+    assert lines[2].startswith("- ○ ")         # 列表项
+    assert lines[3].startswith("- ✓ ")
+    assert any("产出：+3 行" in l for l in lines)

@@ -41,13 +41,15 @@ class Plan:
         return done, len(self.steps)
 
     def format_summary(self) -> str:
+        """输出规范 markdown：步骤用列表项而非裸换行——Markdown 渲染会把单换行
+        折叠成软换行，审批面板里所有步骤会糊成一段（真机反馈）。"""
         done, total = self.progress()
-        lines = [f"**{self.title}** ({done}/{total} 完成)"]
+        lines = [f"**{self.title}**（{done}/{total} 完成）", ""]
         for s in self.steps:
             icon = {"pending": "○", "in_progress": "◉", "completed": "✓", "skipped": "–"}.get(s.status, "?")
-            line = f"  {icon} {s.index}. {s.description}"
+            line = f"- {icon} **{s.index}.** {s.description}"
             if s.output:
-                line += f" → {s.output[:80]}"
+                line += f"\n  - 产出：{s.output[:80]}"
             lines.append(line)
         return "\n".join(lines)
 

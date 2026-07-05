@@ -37,7 +37,12 @@ class PlanTool(Tool):
             "steps": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Step descriptions (for create)",
+                "description": (
+                    "Step descriptions (for create). Each step MUST state both the change "
+                    "(which file/function, what modification) AND the completion criteria "
+                    "(what command to run / what result proves it done). Vague steps like "
+                    "'verify correctness' are not acceptable."
+                ),
             },
             "step_index": {
                 "type": "integer",

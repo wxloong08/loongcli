@@ -9,7 +9,6 @@ from loongcli.tools.base import Tool
 from loongcli.tools.errors import ToolError
 
 _MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB per file
-_MAX_RESULTS = 500
 _MAX_TOTAL_FILES = 5000
 _SKIP_DIRS = frozenset({
     ".venv", "venv", ".env", "node_modules", "__pycache__",
@@ -63,6 +62,10 @@ class GrepTool(Tool):
                 "type": "boolean",
                 "description": "Case insensitive search. Default: false",
             },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of matching lines to return. Default: 500",
+            },
         },
         "required": ["pattern"],
     }
@@ -73,6 +76,7 @@ class GrepTool(Tool):
         path: str = ".",
         glob: str = "**/*",
         case_insensitive: bool = False,
+        limit: int = 500,
     ) -> str:
         try:
             flags = re.IGNORECASE if case_insensitive else 0
@@ -138,14 +142,14 @@ class GrepTool(Tool):
                         except ValueError:
                             rel = file_path
                     results.append(f"{rel}:{line_num}: {line.strip()}")
-                    if len(results) >= _MAX_RESULTS:
+                    if len(results) >= limit:
                         break
-            if len(results) >= _MAX_RESULTS:
+            if len(results) >= limit:
                 break
 
         suffix_parts = []
-        if len(results) >= _MAX_RESULTS:
-            suffix_parts.append(f"... 结果过多，仅显示前 {_MAX_RESULTS} 条")
+        if len(results) >= limit:
+            suffix_parts.append(f"... 结果过多，仅显示前 {limit} 条")
         if files_skipped:
             skipped_list = files_skipped[:5]
             if len(files_skipped) > 5:
