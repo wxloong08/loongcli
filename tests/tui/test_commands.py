@@ -266,3 +266,60 @@ async def test_verbose_command_no_tui():
     from loongcli.tui.commands import VerboseCommand
     await VerboseCommand().run([], ctx)
     assert "无法切换" in _output(ctx)
+
+
+# ── /model --save 持久化 + /config 查看 ──
+
+def test_persist_main_role_writes_config(tmp_path):
+    from loongcli.tui.commands import _persist_main_role
+
+    path = tmp_path / "config.json"
+    path.write_text('{"api_key": "sk-old", "roles": {"sub": {"provider": "deepseek", "model": "x"}}}',
+                    encoding="utf-8")
+    _persist_main_role("deepseek-v4-pro", "deepseek", False, config_path=path)
+    data = __import__("json").loads(path.read_text(encoding="utf-8"))
+    assert data["roles"]["main"] == {"provider": "deepseek", "model": "deepseek-v4-pro", "vision": False}
+    assert data["roles"]["sub"]["model"] == "x"      # 其他角色不动
+    assert data["api_key"] == "sk-old"               # 其他字段不动
+
+
+@pytest.mark.asyncio
+async def test_model_save_calls_persist(monkeypatch, tmp_path):
+    """/model provider:model --save → 切换成功后把 roles.main 写回 config。"""
+    from loongcli.core.config import Config
+    from loongcli.core.provider import ProviderConfig
+    import loongcli.tui.commands as cmds
+
+    calls = {}
+    monkeypatch.setattr(cmds, "_persist_main_role",
+                        lambda model, provider, vision, config_path=None:
+                        calls.update(model=model, provider=provider, vision=vision) or "p")
+
+    ctx = _make_ctx()
+    cfg = Config()
+    cfg.providers = {"deepseek": ProviderConfig(name="deepseek", api_key="dk",
+                                                base_url="https://api.deepseek.com")}
+    ctx.config = cfg
+    await cmds.ModelCommand().run(["deepseek:deepseek-v4-pro", "--save"], ctx)
+    assert ctx.agent.llm.model == "deepseek-v4-pro"
+    assert calls == {"model": "deepseek-v4-pro", "provider": "deepseek", "vision": False}
+
+
+@pytest.mark.asyncio
+async def test_config_command_masks_keys():
+    from loongcli.core.config import Config
+    from loongcli.core.provider import ProviderConfig
+    from loongcli.tui.commands import ConfigCommand
+
+    ctx = _make_ctx()
+    cfg = Config()
+    cfg.providers = {"deepseek": ProviderConfig(
+        name="deepseek", api_key="sk-3271234567890abcdefa595",
+        base_url="https://api.deepseek.com",
+    )}
+    ctx.config = cfg
+    await ConfigCommand().run([], ctx)
+    out = _output(ctx)
+    assert "sk-3271234567890abcdefa595" not in out   # 完整密钥绝不出现
+    assert "sk-32" in out and "a595" in out          # 打码形态
+    assert "deepseek-v4-flash" in out                # 当前生效模型

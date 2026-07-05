@@ -156,10 +156,15 @@ class PermissionChecker:
         self,
         mode: PermissionMode = PermissionMode.DEFAULT,
         extra_safe_prefixes: list[str] | None = None,
+        trusted_mcp_servers: set[str] | None = None,
     ):
         self.mode = mode
         self.project_root = _detect_project_root()
         self._session_allowed: set[str] = set()
+        # 用户在 config.json 的 mcpServers.<name>.trusted 显式标记的可信 MCP server：
+        # 其下所有工具免确认（含子代理非交互场景）。信任是 server 级、用户手写的
+        # ——自建/审过的 server 才标；没标的仍走"首次调用确认"闸。
+        self._trusted_mcp_servers: set[str] = set(trusted_mcp_servers or ())
         # 计划审批选「批准并自动接受编辑」后置位：项目外非敏感写免确认（敏感路径底线不动）。
         # 注意 loongcli 项目内写本就 ALLOW，此标志的增量只是项目外路径。
         self.auto_accept_edits: bool = False
@@ -195,6 +200,10 @@ class PermissionChecker:
 
         if is_mcp:
             if self.mode == PermissionMode.SKIP:
+                return Decision.ALLOW, ""
+            # 可信 server（工具名形如 server__tool）免确认
+            server = tool_name.split("__", 1)[0]
+            if server in self._trusted_mcp_servers:
                 return Decision.ALLOW, ""
             key = f"mcp:{tool_name}"
             if key in self._session_allowed:

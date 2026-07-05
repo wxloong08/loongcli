@@ -45,6 +45,7 @@ IMAGE_READ_PLACEHOLDER = "[图片已读取（{n} 张），内容见下一条消�
 
 PLAN_MODE_TOOLS = frozenset({
     "read_file", "glob", "grep",
+    "recall", "search_history",  # 规划期查记忆/翻历史，通用任务的调研通道
     "plan", "exit_plan_mode",
     "lsp_goto_definition", "lsp_find_references",
     "lsp_symbol_search", "lsp_hover", "lsp_diagnostics",
@@ -54,18 +55,24 @@ PLAN_MODE_SYSTEM_INJECTION = """\
 
 ## 规划模式
 
-你已进入规划模式，只能使用只读工具（read_file, glob, grep）调研代码。
+你已进入规划模式，只能使用只读调研工具（read_file/glob/grep/recall/search_history/lsp_*）
+和已配置的 MCP 工具（每个 MCP 工具首次调用需用户确认）。
 
 工作流程：
-1. **调研** — 用只读工具探索代码库，理解任务涉及的文件、接口、依赖
+1. **调研** — 收集规划所需的事实：代码任务读代码；其他任务查记忆（recall）、
+   用 MCP 工具（如搜索）查外部资料、翻已有材料。
+   调研的唯一目的是让计划具体可判——**够用就停**，简单任务一两次调用足矣。
+   数据收集、批量统计是执行期的活（审批后一条 shell 解决），不要在规划期硬凑
+   （反例：为统计行数逐文件 read——这是把执行搬进调研）
 2. **规划** — 用 plan 工具创建结构化计划。每一步必须写明**改动内容 + 完成判据**
-   （改哪个文件/函数、怎么改；怎么算这步做完——跑什么命令、看到什么结果算过）
+   （做什么、怎么算这步做完——跑什么/看到什么算过；编码任务具体到文件/函数）
 3. **提交** — 调用 exit_plan_mode 提交计划等待用户审批
 
 原则：
-- 不要猜测，先读代码再规划
+- 不要猜测，先看事实再规划
 - 「运行脚本」「验证正确性」这类没有判据的空步骤不合格——判据是防执行期跑偏的锚
 - 步骤是给执行期的自己看的路标：宁可 5 步具体，不要 2 步空话；控制在 10 步以内
+- 领域性任务（求职、调研报告等）若已加载对应 skill，按该 skill 的章法规划
 - 有不确定的地方直接问用户\
 """
 
@@ -396,8 +403,8 @@ class AgentLoop:
                 if self._plan_mode:
                     result = (
                         f"⚠ 规划模式下工具 {tool_name} 不可用，只能用只读调研工具"
-                        "（read_file/glob/grep/lsp_*）。请完成调研后用 plan 工具制定计划，"
-                        "再调用 exit_plan_mode 提交用户审批——审批通过后所有工具自动恢复。"
+                        "（read_file/glob/grep/recall/search_history/lsp_*）。请完成调研后用"
+                        " plan 工具制定计划，再调用 exit_plan_mode 提交用户审批——审批通过后所有工具自动恢复。"
                     )
                 elif self._tools_exhausted:
                     result = "⚠ 已达单轮工具调用上限，本轮工具已收走，请直接文字总结当前进展。"
@@ -695,7 +702,15 @@ class AgentLoop:
         else:
             schemas = self.tool_registry.get_tool_schemas(role=self.role) or []
             if self._plan_mode:
-                schemas = [s for s in schemas if s["function"]["name"] in PLAN_MODE_TOOLS]
+                # 只读白名单 + MCP 工具。MCP 走"用户确认制"：每个工具首次调用必过
+                # 确认闸（批准后本会话免确认）——放行的是"人批准过的调用"而非 MCP 本身；
+                # 写型 MCP 的副作用风险由确认框（完整参数展示）兜底，规划模式不为其
+                # 背只读保证。用户拍板：自己配的 MCP 可信，别人的靠不批来拒。
+                schemas = [
+                    s for s in schemas
+                    if s["function"]["name"] in PLAN_MODE_TOOLS
+                    or getattr(self.tool_registry._tools.get(s["function"]["name"]), "is_mcp", False)
+                ]
             if allowed_tools is not None:
                 schemas = [s for s in schemas if s["function"]["name"] in allowed_tools]
             self._turn_tools = schemas or None

@@ -1,5 +1,9 @@
 from __future__ import annotations
+import json
+import os
+import sys
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
@@ -107,13 +111,34 @@ def _deepseek_provider(config):
     return None
 
 
+def _persist_main_role(
+    model: str, provider: str | None, vision: bool, config_path: Path | None = None,
+) -> str:
+    """把当前主力模型写回 config.json 的 roles.main（/model --save）。返回文件路径。"""
+    path = config_path or Path.home() / ".loongcli" / "config.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    main = data.setdefault("roles", {}).setdefault("main", {})
+    if provider:
+        main["provider"] = provider
+    main["model"] = model
+    main["vision"] = vision
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return str(path)
+
+
 class ModelCommand(SlashCommand):
     name = "model"
-    description = "查看或切换模型（provider:model 跨供应商 / profile / 直接模型名）"
-    usage = "[provider:model|profile|model_name]"
+    description = "查看或切换模型（provider:model 跨供应商；加 --save 持久化到 config）"
+    usage = "[provider:model|profile|model_name] [--save]"
 
     async def run(self, args: list[str], ctx: CommandContext) -> None:
         llm = ctx.agent.llm
+        save = "--save" in args
+        args = [a for a in args if a != "--save"]
         if not args:
             vision_label = " [magenta](vision)[/magenta]" if getattr(llm, "vision", False) else ""
             ctx.console.print(
@@ -143,6 +168,9 @@ class ModelCommand(SlashCommand):
                 f"[green]✓ 已切换到[/green] [bold cyan]{model}[/bold cyan] "
                 f"[dim]@ {prov.base_url}[/dim]"
             )
+            if save:
+                p = _persist_main_role(model, prov_name, llm.vision)
+                ctx.console.print(f"[dim]✓ 已持久化到 roles.main → {p}[/dim]")
             return
 
         if ctx.config:
@@ -166,6 +194,9 @@ class ModelCommand(SlashCommand):
             f"[green]✓ 模型已切换为[/green] [bold cyan]{name}[/bold cyan] "
             f"[dim]（端点不变: {getattr(llm, 'base_url', '')}）[/dim]"
         )
+        if save:
+            p = _persist_main_role(name, None, llm.vision)
+            ctx.console.print(f"[dim]✓ 已持久化到 roles.main → {p}[/dim]")
 
 
 class CompactCommand(SlashCommand):
@@ -461,6 +492,56 @@ class WebCommand(SlashCommand):
         webbrowser.open(url)
 
 
+def _mask_key(key: str) -> str:
+    if not key:
+        return "(空)"
+    return key[:5] + "…" + key[-4:] if len(key) > 12 else "(短密钥)"
+
+
+class ConfigCommand(SlashCommand):
+    name = "config"
+    description = "查看当前配置（密钥打码）；/config open 用系统编辑器打开 config.json"
+    usage = "[open]"
+
+    async def run(self, args: list[str], ctx: CommandContext) -> None:
+        path = Path.home() / ".loongcli" / "config.json"
+        if args and args[0] == "open":
+            try:
+                if sys.platform == "win32":
+                    os.startfile(str(path))  # noqa: S606 — 用户显式要求打开自己的配置
+                else:
+                    import subprocess
+                    opener = "open" if sys.platform == "darwin" else "xdg-open"
+                    subprocess.Popen([opener, str(path)])
+                ctx.console.print(f"[cyan]✓ 已用系统编辑器打开[/cyan] {path}")
+            except Exception as e:
+                ctx.console.print(f"[red]打开失败: {e}[/red]（路径: {path}）")
+            return
+
+        llm = ctx.agent.llm
+        lines = [
+            f"[bold]当前生效[/bold]",
+            f"  main: [cyan]{llm.model}[/cyan]"
+            + (" [magenta](vision)[/magenta]" if getattr(llm, "vision", False) else "")
+            + f"  [dim]{getattr(llm, 'base_url', '')}[/dim]",
+            f"  thinking: {getattr(llm, 'reasoning_effort', '?') if getattr(llm, 'thinking', False) else 'off'}",
+        ]
+        if ctx.config and ctx.config.providers:
+            lines.append("")
+            lines.append("[bold]providers[/bold]")
+            for name, prov in ctx.config.providers.items():
+                lines.append(f"  {name}: {prov.base_url}  [dim]key={_mask_key(prov.api_key)}[/dim]")
+        if ctx.config and ctx.config.role_bindings:
+            lines.append("")
+            lines.append("[bold]roles[/bold]")
+            for rname, bind in ctx.config.role_bindings.items():
+                vis = " (vision)" if getattr(bind, "vision", False) else ""
+                lines.append(f"  {rname}: {bind.provider}:{bind.model}{vis}")
+        lines.append("")
+        lines.append(f"[dim]文件: {path}   （/config open 打开编辑；/model x:y --save 持久化主力）[/dim]")
+        ctx.console.print(Panel("\n".join(lines), title="配置", border_style="cyan"))
+
+
 class VerboseCommand(SlashCommand):
     name = "verbose"
     description = "切换工具输出模式：折叠（默认）↔ 详细"
@@ -494,4 +575,5 @@ def create_default_registry() -> CommandRegistry:
     registry.register(ProCommand())
     registry.register(WebCommand())
     registry.register(VerboseCommand())
+    registry.register(ConfigCommand())
     return registry

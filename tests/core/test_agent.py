@@ -1123,3 +1123,47 @@ async def test_exhausted_tools_withdrawn_and_force_stop():
     tc_ids = {tc["id"] for m in agent.messages if m.get("role") == "assistant" for tc in (m.get("tool_calls") or [])}
     answered = {m.get("tool_call_id") for m in agent.messages if m.get("role") == "tool"}
     assert tc_ids <= answered
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_allows_mcp_tool_via_confirm():
+    """规划模式放行 MCP（用户确认制）：调用过确认闸后执行，而非被派发硬闸拒绝。
+    用户拍板：自己配的 MCP 批准即用，别人的靠不批来拒——人是闸门。"""
+    class FakeMcpSearch(Tool):
+        name = "searx__web_search"
+        description = "web search"
+        is_mcp = True
+        parameters = {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}
+
+        async def execute(self, q: str) -> str:
+            return f"results for {q}"
+
+    llm = LLMClient(api_key="test")
+    tool_chunks = _make_tool_call_chunks("call_1", "searx__web_search", {"q": "行业调研"})
+    text_chunks = _make_text_chunks(["调研完成，开始规划。"])
+    call_count = 0
+
+    async def mock_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        for c in (tool_chunks if call_count == 1 else text_chunks):
+            yield c
+
+    llm.chat_stream = mock_stream
+    registry = ToolRegistry()
+    registry.register(FakeMcpSearch())
+    agent = AgentLoop(llm=llm, tool_registry=registry, permission_checker=PermissionChecker())
+    agent.enter_plan_mode()
+
+    confirms = []
+    results = []
+    async for e in agent.run_stream("帮我规划行业调研"):
+        if isinstance(e, ConfirmRequest):
+            confirms.append(e.tool_name)
+            e.future.set_result(True)  # 用户批准
+        if isinstance(e, ToolCallResult):
+            results.append(e.result)
+
+    assert confirms == ["searx__web_search"]           # 走的是确认闸，不是硬闸拒绝
+    assert any("results for 行业调研" in r for r in results)  # 批准后真执行
+    assert not any("规划模式下工具" in r for r in results)     # 没被派发闸拦

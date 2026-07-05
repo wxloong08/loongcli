@@ -1,5 +1,5 @@
 {
-    "_note": "最简：只填 api_key/model/base_url 即可（单模型、无视觉）。要多 provider / 分角色 / 开视觉，用下面的 providers + roles（会覆盖上面简单形式）。开视觉：把 roles.main 换成支持图片的模型并加 vision:true，例：{provider:'qwen', model:'qwen3.7-plus', vision:true, thinking:true}（Qwen 思考模式已适配，走 dashscope 的 enable_thinking）。注意 vision 只能配在 roles 里。",
+    "_note": "最简：只填 api_key/model/base_url 即可（单模型、无视觉）。要多 provider / 分角色 / 开视觉，用下面的 providers + roles（会覆盖上面简单形式）。开视觉：把 roles.main 换成支持图片的模型并加 vision:true，例：{provider:'qwen', model:'qwen3.7-plus', vision:true, thinking:true}（Qwen 思考模式已适配，走 dashscope 的 enable_thinking）。注意 vision 只能配在 roles 里。MCP：mcpServers.<名字>.trusted:true = 该 server 全部工具免确认，只给自建/审过源码的 server 标；不标则每个工具首次调用确认一次。",
 
     "api_key": "your-api-key",
     "model": "deepseek-v4-flash",
@@ -34,6 +34,12 @@
 
     "compact_threshold": 0,
     "skill_dirs": [],
-    "mcpServers": {},
+    "mcpServers": {
+        "searxng": {
+            "command": "python",
+            "args": ["path/to/your/mcp_server.py"],
+            "trusted": true
+        }
+    },
     "hooks": {}
 }

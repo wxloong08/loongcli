@@ -315,8 +315,13 @@ class TUI:
         self._agent = agent  # Shift+Tab 切换规划模式的键绑定要用
         session = self._get_session()
 
+        need_divider = True
         while True:
-            self.console.print("─" * shutil.get_terminal_size().columns)
+            # 分隔线只在上一轮真的产出内容后打——空回车只重出提示符，
+            # 否则连按回车会堆出一摞 ─── + ❯（真机 UI bug）
+            if need_divider:
+                self.console.print("─" * shutil.get_terminal_size().columns)
+                need_divider = False
             try:
                 with patch_stdout():
                     user_input = await session.prompt_async()
@@ -333,6 +338,7 @@ class TUI:
             user_input = repair_surrogates(user_input).strip()
             if not user_input:
                 continue
+            need_divider = True  # 本轮有实际输入，处理后下一轮重新画分隔线
             if user_input == "/exit":
                 sid = agent.conversation_store.session_id
                 self.console.print(f"[dim]再见！会话 [cyan]{sid}[/cyan] 已保存，[cyan]loongcli --continue[/cyan] 可继续[/dim]")

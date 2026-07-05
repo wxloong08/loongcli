@@ -529,3 +529,32 @@ def test_auto_accept_edits_scope():
     assert decision == Decision.ALLOW
     decision, _ = pc.check_tool("write_file", {"path": "C:/x/.env"})
     assert decision == Decision.CONFIRM  # 敏感路径不受 flag 影响
+
+
+# ── 可信 MCP server：config 标记 trusted 免确认（用户拍板：自建可信，别人的仍确认） ──
+
+def test_trusted_mcp_server_allowed():
+    from loongcli.security.permissions import PermissionChecker, Decision
+
+    pc = PermissionChecker(trusted_mcp_servers={"searxng"})
+    decision, _ = pc.check_tool("searxng__web_search", {}, is_mcp=True)
+    assert decision == Decision.ALLOW
+    decision, _ = pc.check_tool("searxng__url_read", {}, is_mcp=True)
+    assert decision == Decision.ALLOW  # server 级信任覆盖其下所有工具
+
+
+def test_untrusted_mcp_server_still_confirms():
+    from loongcli.security.permissions import PermissionChecker, Decision
+
+    pc = PermissionChecker(trusted_mcp_servers={"searxng"})
+    decision, reason = pc.check_tool("unknown__do_anything", {}, is_mcp=True)
+    assert decision == Decision.CONFIRM
+    assert "MCP" in reason
+
+
+def test_no_trusted_set_behavior_unchanged():
+    from loongcli.security.permissions import PermissionChecker, Decision
+
+    pc = PermissionChecker()
+    decision, _ = pc.check_tool("searxng__web_search", {}, is_mcp=True)
+    assert decision == Decision.CONFIRM  # 未标记 → 原行为：首次确认

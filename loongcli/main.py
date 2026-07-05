@@ -103,6 +103,10 @@ def _parse_args() -> argparse.Namespace:
         help="跳过所有权限确认（灾难性操作仍会拦截）",
     )
     parser.add_argument(
+        "--setup", action="store_true",
+        help="重新运行配置向导（providers/roles/视觉模型）",
+    )
+    parser.add_argument(
         "--output-format", choices=["text", "json"], default="text",
         help="非交互模式输出格式（默认 text）",
     )
@@ -208,75 +212,97 @@ def _brief(args: dict) -> str:
 
 
 def _onboarding(console: Console, cfg: Config) -> Config:
-    """Interactive first-run setup. Returns updated Config or original if skipped."""
+    """首次运行 / --setup 的配置向导，写出 providers+roles 规范结构。
+
+    设计取向：DeepSeek-first——回车到底即用；第二供应商（如视觉模型）是可选支线
+    不是必答题。同时写遗留顶层字段（api_key/base_url/model）兼容无 roles 的回退路径。
+    """
     config_path = Path.home() / ".loongcli" / "config.json"
 
-    console.print(Panel.fit(
-        "[bold]Loong CLI[/bold] — AI Agent 终端工具",
-        border_style="cyan",
-    ))
-    console.print()
-    console.print("首次运行，需要配置 API Key 才能使用。")
-    console.print(f"获取 Key → [underline]https://platform.deepseek.com/api_keys[/underline]")
+    console.print(Panel.fit("[bold]Loong CLI[/bold] — 配置向导", border_style="cyan"))
+    console.print("[dim]回车一路默认即用 DeepSeek；以后可用 loongcli --setup 重新配置[/dim]")
     console.print()
 
-    try:
-        api_key = input("请粘贴 API Key (sk-...): ").strip()
-    except (KeyboardInterrupt, EOFError):
-        console.print("\n[dim]已取消[/dim]")
-        return cfg
-
-    if not api_key:
-        console.print("[yellow]未输入 API Key[/yellow]")
-        console.print(f"你可以稍后编辑配置文件: [cyan]{config_path}[/cyan]")
-        return cfg
-
-    providers_menu = {
-        "1": ("DeepSeek", "https://api.deepseek.com", "deepseek-v4-flash"),
-        "2": ("OpenAI", "https://api.openai.com/v1", "gpt-4o"),
-        "3": ("Claude (via OpenAI-compatible proxy)", "", ""),
-        "4": ("Ollama (local)", "http://localhost:11434/v1", ""),
+    menu = {
+        "1": ("deepseek", "DeepSeek（推荐）", "https://api.deepseek.com",
+              "deepseek-v4-pro", "https://platform.deepseek.com/api_keys"),
+        "2": ("qwen", "Qwen / 阿里云百炼", "https://dashscope.aliyuncs.com/compatible-mode/v1",
+              "qwen3.7-plus", "https://bailian.console.aliyun.com/"),
+        "3": ("", "其他 OpenAI 兼容端点", "", "", ""),
     }
-
-    console.print()
-    console.print("[bold]选择 API 提供商：[/bold]")
-    for k, (name, _, _) in providers_menu.items():
-        marker = " [dim](默认)[/dim]" if k == "1" else ""
-        console.print(f"  {k}. {name}{marker}")
+    console.print("[bold]主力供应商：[/bold]")
+    for k, (_, label, *_rest) in menu.items():
+        marker = " [dim](回车默认)[/dim]" if k == "1" else ""
+        console.print(f"  {k}. {label}{marker}")
 
     try:
-        choice = input("\n选择 [1-4，回车=1]: ").strip() or "1"
+        choice = input("选择 [1-3，回车=1]: ").strip() or "1"
+        name, _label, base_url, default_model, key_url = menu.get(choice, menu["1"])
+        if not name:
+            name = input("供应商名字（如 glm）: ").strip() or "custom"
+            base_url = input("Base URL: ").strip()
+        if key_url:
+            console.print(f"[dim]获取 Key → {key_url}[/dim]")
+        api_key = input("粘贴 API Key: ").strip()
+        if not api_key:
+            console.print("[yellow]未输入 API Key[/yellow]")
+            console.print(f"稍后可运行 [cyan]loongcli --setup[/cyan] 或编辑 [cyan]{config_path}[/cyan]")
+            return cfg
+        if default_model:
+            model = input(f"主力模型 [回车={default_model}]: ").strip() or default_model
+        else:
+            model = input("主力模型: ").strip() or "deepseek-v4-pro"
+
+        providers = {name: {"api_key": api_key, "base_url": base_url}}
+        # utility 走便宜档：DeepSeek 用 flash；其他供应商与主力同模型
+        utility_model = "deepseek-v4-flash" if name == "deepseek" else model
+        roles = {
+            "main": {"provider": name, "model": model, "thinking": True, "reasoning_effort": "max"},
+            "sub": {"provider": name, "model": model, "thinking": False},
+            "utility": {"provider": name, "model": utility_model, "thinking": False},
+        }
+
+        extra = input("配置第二供应商（如视觉模型）？[y/N]: ").strip().lower()
+        if extra in ("y", "yes"):
+            menu2 = {
+                "1": ("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.7-plus"),
+                "2": ("deepseek", "https://api.deepseek.com", "deepseek-v4-pro"),
+                "3": ("", "", ""),
+            }
+            console.print("  1. Qwen（视觉推荐）  2. DeepSeek  3. 自定义")
+            c2 = input("选择 [1-3，回车=1]: ").strip() or "1"
+            n2, b2, dm2 = menu2.get(c2, menu2["1"])
+            if not n2:
+                n2 = input("供应商名字: ").strip() or "provider2"
+                b2 = input("Base URL: ").strip()
+            k2 = input(f"{n2} 的 API Key: ").strip()
+            if dm2:
+                m2 = input(f"模型 [回车={dm2}]: ").strip() or dm2
+            else:
+                m2 = input("模型: ").strip()
+            if k2 and m2:
+                v2 = input("该模型支持视觉（看图）？[Y/n]: ").strip().lower() not in ("n", "no")
+                providers[n2] = {"api_key": k2, "base_url": b2}
+                # 独立 vision 角色：不动主力；/model n2:m2 切换时 vision 标志自动继承
+                roles["vision"] = {"provider": n2, "model": m2, "vision": v2}
+            else:
+                console.print("[yellow]第二供应商信息不全，已跳过[/yellow]")
     except (KeyboardInterrupt, EOFError):
-        console.print("\n[dim]已取消[/dim]")
+        console.print()
+        console.print("[dim]已取消[/dim]")
         return cfg
-
-    if choice in providers_menu:
-        provider_name, base_url, default_model = providers_menu[choice]
-    else:
-        provider_name, base_url, default_model = providers_menu["1"]
-
-    if not base_url:
-        try:
-            base_url = input(f"输入 {provider_name} 的 Base URL: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            console.print("\n[dim]已取消[/dim]")
-            return cfg
-
-    if not default_model:
-        try:
-            default_model = input("输入模型名称: ").strip() or "deepseek-v4-flash"
-        except (KeyboardInterrupt, EOFError):
-            console.print("\n[dim]已取消[/dim]")
-            return cfg
 
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
         data = {}
-
+    data["providers"] = {**data.get("providers", {}), **providers}
+    data["roles"] = {**data.get("roles", {}), **roles}
+    # 遗留顶层字段：无 roles 配置时 ModelRouter 用它们构建 _default 回退
     data["api_key"] = api_key
     data["base_url"] = base_url
-    data["model"] = default_model
+    data["model"] = model
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         json.dumps(data, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -284,10 +310,10 @@ def _onboarding(console: Console, cfg: Config) -> Config:
 
     console.print()
     console.print(f"[green]✓ 配置已保存[/green] → [cyan]{config_path}[/cyan]")
-    console.print(f"  提供商: {provider_name}")
-    console.print(f"  模型:   {default_model}")
-    console.print(f"  Base:   {base_url}")
-    console.print()
+    summary = f"  main: {name}:{model}"
+    if "vision" in roles:
+        summary += f"   vision: {roles['vision']['provider']}:{roles['vision']['model']}"
+    console.print(summary)
 
     return Config.load()
 
@@ -303,8 +329,16 @@ async def _async_main():
     if noninteractive and prompt is None:
         prompt = ""
 
+    # --setup 强制重跑向导；否则仅在完全未配置时首跑触发
+    setup_requested = getattr(args, "setup", False)
+    if setup_requested:
+        if not sys.stdin.isatty():
+            console.print("[red]--setup 需要交互式终端[/red]")
+            sys.exit(1)
+        cfg = _onboarding(console, cfg)
+
     if not cfg.api_key and not cfg.providers:
-        if sys.stdin.isatty() and not noninteractive:
+        if sys.stdin.isatty() and not noninteractive and not setup_requested:
             cfg = _onboarding(console, cfg)
         if not cfg.api_key and not cfg.providers:
             console.print("[red]未配置 API Key[/red]，请编辑 ~/.loongcli/config.json 或设置 DEEPSEEK_API_KEY 环境变量")
@@ -405,7 +439,13 @@ async def _async_main():
     registry.register(skill_tool)
 
     perm_mode = PermissionMode.SKIP if args.dangerously_skip_permissions else PermissionMode.DEFAULT
-    perm_checker = PermissionChecker(mode=perm_mode)
+    # config.json 的 mcpServers.<name>.trusted: true → 该 server 全部工具免确认
+    # （用户手写标记=信任声明；子代理共享同一 checker，信任集自动传播）
+    trusted_mcp = {
+        name for name, s in (cfg.mcp_servers or {}).items()
+        if isinstance(s, dict) and s.get("trusted")
+    }
+    perm_checker = PermissionChecker(mode=perm_mode, trusted_mcp_servers=trusted_mcp)
     task_manager = TaskManager()
     hook_manager = HookManager.from_config(cfg.hooks)
 
