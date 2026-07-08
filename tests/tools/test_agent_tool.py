@@ -58,7 +58,7 @@ class TestAgentTool:
             def __init__(self, **kwargs):
                 captured.update(kwargs)
 
-        async def fake_create_and_run(prompt, agent_loop, depth):
+        async def fake_create_and_run(prompt, agent_loop, depth, parent_id=None):
             return Task(prompt=prompt)
 
         with patch("loongcli.tools.agent_tool.AgentLoop", FakeLoop):

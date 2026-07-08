@@ -72,6 +72,7 @@ class BatchDelegateTool(Tool):
         self._parent_registry = parent_registry
         self._permission_checker = security
         self._depth = depth
+        self._parent_task_id: str | None = None  # 委派树父任务（与 AgentTool 同语义）
         self._progress_callback: Callable[[BatchProgress], None] | None = None
 
     async def execute(self, tasks: list[dict], timeout: float = 300) -> str:
@@ -106,6 +107,7 @@ class BatchDelegateTool(Tool):
                 prompt=t["prompt"],
                 agent_loop=sub_agent,
                 depth=self._depth + 1,
+                parent_id=self._parent_task_id,
             )
             task_objs.append((i, task_obj, t["prompt"]))
 

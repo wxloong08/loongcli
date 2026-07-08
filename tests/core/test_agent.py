@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 import json
 from unittest.mock import MagicMock
@@ -827,15 +828,14 @@ async def test_tool_call_counters_reset_per_turn():
     agent = AgentLoop(llm=llm, tool_registry=registry, permission_checker=checker)
 
     agent._tool_call_count = 99
-    agent._repeat_count = 5
-    agent._last_tool_sig = "abc"
+    agent._recent_tool_sigs.append("abc")
+    agent._recent_tool_sigs.append("abc")
 
     async for _ in agent.run_stream("reset test"):
         pass
 
     assert agent._tool_call_count == 0
-    assert agent._repeat_count == 0
-    assert agent._last_tool_sig == ""
+    assert len(agent._recent_tool_sigs) == 0
 
 
 def test_tool_signature_deterministic():
@@ -1167,3 +1167,158 @@ async def test_plan_mode_allows_mcp_tool_via_confirm():
     assert confirms == ["searx__web_search"]           # 走的是确认闸，不是硬闸拒绝
     assert any("results for 行业调研" in r for r in results)  # 批准后真执行
     assert not any("规划模式下工具" in r for r in results)     # 没被派发闸拦
+
+
+# ── 取消路径：supports_progress 工具跑在独立 exec_task 里，消费者被取消时必须收走 ──
+
+@pytest.mark.asyncio
+async def test_exec_tool_stream_reaps_exec_task_on_cancel():
+    """回归：CancelledError 打在 queue.get() 上，exec_task 不随消费者消亡——
+    不在 finally 收走的话，工具协程连同 shell 子进程一起变孤儿。"""
+
+    class HangingProgressTool(Tool):
+        name = "hangtool"
+        description = "hangs forever"
+        parameters = {"type": "object", "properties": {}}
+        supports_progress = True
+
+        def __init__(self):
+            self._progress_callback = None
+            self.got_cancelled = asyncio.Event()
+
+        async def execute(self) -> str:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                self.got_cancelled.set()
+                raise
+            return "done"
+
+    hang = HangingProgressTool()
+    registry = ToolRegistry()
+    registry.register(hang)
+    agent = AgentLoop(
+        llm=LLMClient(api_key="test"),
+        tool_registry=registry,
+        permission_checker=PermissionChecker(),
+    )
+
+    async def consume():
+        async for _ in agent._exec_tool_stream("hangtool", {}):
+            pass
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0.2)  # 进入 queue.get 轮询
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert hang.got_cancelled.is_set()  # exec_task 被收走，而非留在后台挂 60s
+
+
+# ── 循环检测:周期 1(同参连打)与周期 2/3(交替模式)── 拍板 2026-07-07
+
+def _loop_agent():
+    return AgentLoop(
+        llm=LLMClient(api_key="test"),
+        tool_registry=ToolRegistry(),
+        permission_checker=PermissionChecker(),
+    )
+
+
+def test_check_loop_period1_same_args():
+    agent = _loop_agent()
+    assert agent._check_loop("shell", {"command": "echo X"}) is None
+    assert agent._check_loop("shell", {"command": "echo X"}) is None
+    warn = agent._check_loop("shell", {"command": "echo X"})
+    assert warn and "检测到循环" in warn and "3 次" in warn
+
+
+def test_check_loop_period2_alternation():
+    # A-B-A-B-A-B:旧实现每次签名都变、计数归零,抓不到;窗口检测在第 6 次拦下
+    agent = _loop_agent()
+    for i in range(5):
+        call = ("read_file", {"path": "a.py"}) if i % 2 == 0 else ("read_file", {"path": "b.py"})
+        assert agent._check_loop(*call) is None, f"第 {i+1} 次不应触发"
+    warn = agent._check_loop("read_file", {"path": "b.py"})
+    assert warn and "周期 2" in warn
+
+
+def test_check_loop_period3_rotation():
+    # A-B-C ×3:第 9 次拦下
+    calls = [("shell", {"command": c}) for c in ("x", "y", "z")]
+    agent = _loop_agent()
+    for i in range(8):
+        assert agent._check_loop(*calls[i % 3]) is None, f"第 {i+1} 次不应触发"
+    warn = agent._check_loop(*calls[2])
+    assert warn and "周期 3" in warn
+
+
+def test_check_loop_varying_args_not_flagged():
+    # 合法交替:编辑参数每轮都变,签名不同,整周期永不重复
+    agent = _loop_agent()
+    for i in range(12):
+        if i % 2 == 0:
+            r = agent._check_loop("edit_file", {"path": "a.py", "new": f"v{i}"})
+        else:
+            r = agent._check_loop("shell", {"command": "pytest"})
+        assert r is None, f"第 {i+1} 次误报: {r}"
+
+
+def test_check_loop_persists_after_warning():
+    # 警告后模型仍硬打同一模式 → 持续拦截
+    agent = _loop_agent()
+    for _ in range(3):
+        agent._check_loop("glob", {"pattern": "*"})
+    assert agent._check_loop("glob", {"pattern": "*"}) is not None
+
+
+# ── 回合中断:abort_turn 消息一致性修复(Ctrl+C 中断回合)── 拍板 2026-07-07
+
+def test_abort_turn_repairs_dangling_tool_calls():
+    # 中断可能停在「assistant 带 tool_calls、部分结果未回」的中间态,
+    # 不补占位下一次请求会被 API 以孤儿 tool_call 拒绝
+    agent = _loop_agent()
+    agent.messages.append({"role": "user", "content": "做点事"})
+    agent.messages.append({
+        "role": "assistant", "content": "",
+        "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "shell", "arguments": "{}"}},
+            {"id": "c2", "type": "function", "function": {"name": "glob", "arguments": "{}"}},
+        ],
+    })
+    agent.messages.append({"role": "tool", "tool_call_id": "c1", "content": "ok"})
+
+    agent.abort_turn()
+
+    tool_msgs = [m for m in agent.messages if m.get("role") == "tool"]
+    assert {m["tool_call_id"] for m in tool_msgs} == {"c1", "c2"}
+    c2 = next(m for m in tool_msgs if m["tool_call_id"] == "c2")
+    assert "中断" in c2["content"]
+    assert agent.messages[-1]["role"] == "user"
+    assert "中断" in agent.messages[-1]["content"]
+
+
+def test_abort_turn_already_complete_tool_results():
+    # 结果齐全时不补占位,只追加中断标记
+    agent = _loop_agent()
+    agent.messages.append({"role": "user", "content": "hi"})
+    agent.messages.append({
+        "role": "assistant", "content": "",
+        "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "shell", "arguments": "{}"}}],
+    })
+    agent.messages.append({"role": "tool", "tool_call_id": "c1", "content": "ok"})
+    n = len(agent.messages)
+    agent.abort_turn()
+    assert len(agent.messages) == n + 1
+    assert agent.messages[-1]["role"] == "user"
+
+
+def test_abort_turn_without_tool_calls_only_marks():
+    agent = _loop_agent()
+    agent.messages.append({"role": "user", "content": "hi"})
+    agent.messages.append({"role": "assistant", "content": "写到一半..."})
+    n = len(agent.messages)
+    agent.abort_turn()
+    assert len(agent.messages) == n + 1
+    assert agent.messages[-1]["role"] == "user"

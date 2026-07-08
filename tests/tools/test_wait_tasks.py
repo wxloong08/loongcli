@@ -10,6 +10,21 @@ from loongcli.tools.wait_tasks import WaitTasksTool
 from loongcli.tools.stop_task import StopTaskTool
 
 
+def _hanging_agent(started: asyncio.Event | None = None) -> MagicMock:
+    """run_stream 挂起不返回的假 agent：走 create_and_run 真实装配，
+    取消落定由 _run_agent_with_limit 完成（stop 不再就地落定）。"""
+    agent = MagicMock()
+
+    async def hang_stream(prompt):
+        if started:
+            started.set()
+        await asyncio.sleep(100)
+        yield  # 永远到不了，仅为构成异步生成器
+
+    agent.run_stream = hang_stream
+    return agent
+
+
 # ── WaitTasksTool ───────────────────────────────────────────────────
 
 
@@ -119,17 +134,14 @@ class TestStopTaskTool:
     @pytest.mark.asyncio
     async def test_stop_running(self):
         tool, tm = self._make()
-        task = Task(prompt="long")
-        tm.register(task)
-
-        async def long_work():
-            await asyncio.sleep(100)
-
-        task._async_task = asyncio.create_task(long_work())
-        task.status = TaskStatus.RUNNING
+        started = asyncio.Event()
+        task = await tm.create_and_run(prompt="long", agent_loop=_hanging_agent(started))
+        await started.wait()
 
         result = await tool.execute(task_id=task.id, reason="跑偏了")
         assert "已停止" in result
+        await asyncio.sleep(0.05)  # 落定发生在执行协程的取消分支，等它跑完
+
         assert task.status == TaskStatus.FAILED
         assert "跑偏了" in task.result
 
@@ -157,18 +169,13 @@ class TestStopTaskTool:
     @pytest.mark.asyncio
     async def test_default_reason(self):
         tool, tm = self._make()
-        task = Task(prompt="x")
-        task.status = TaskStatus.RUNNING
-        tm.register(task)
-        task._async_task = asyncio.create_task(asyncio.sleep(100))
+        started = asyncio.Event()
+        task = await tm.create_and_run(prompt="x", agent_loop=_hanging_agent(started))
+        await started.wait()
 
-        result = await tool.execute(task_id=task.id)
+        await tool.execute(task_id=task.id)
+        await asyncio.sleep(0.05)
         assert "手动停止" in task.result
-        task._async_task.cancel()
-        try:
-            await task._async_task
-        except asyncio.CancelledError:
-            pass
 
 
 # ── TaskManager.wait / stop / semaphore ─────────────────────────────
@@ -214,18 +221,14 @@ class TestTaskManagerExtensions:
     @pytest.mark.asyncio
     async def test_stop_pushes_notification(self):
         tm = TaskManager()
-        task = Task(prompt="x")
-        task.status = TaskStatus.RUNNING
-        task._async_task = asyncio.create_task(asyncio.sleep(100))
-        tm.register(task)
+        started = asyncio.Event()
+        task = await tm.create_and_run(prompt="x", agent_loop=_hanging_agent(started))
+        await started.wait()
 
         tm.stop(task.id, "test reason")
+        await asyncio.sleep(0.05)
 
         notifs = tm.drain_notifications()
         assert len(notifs) == 1
         assert notifs[0]["status"] == "failed"
-        task._async_task.cancel()
-        try:
-            await task._async_task
-        except asyncio.CancelledError:
-            pass
+        assert "test reason" in notifs[0]["result"]

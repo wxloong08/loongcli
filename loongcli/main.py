@@ -40,7 +40,7 @@ from loongcli.memory.markdown_store import MarkdownMemoryStore
 from loongcli.memory.migrate import migrate_kv_to_markdown
 from loongcli.memory.recall_engine import RecallEngine
 from loongcli.memory.auto_extract import AutoExtractor
-from loongcli.memory.conversation import ConversationStore
+from loongcli.memory.conversation import ConversationStore, project_tasks_dir
 from loongcli.core.checkpoint import CheckpointManager
 from loongcli.core.provider import ModelRouter
 from loongcli.security.permissions import PermissionChecker, PermissionMode
@@ -105,6 +105,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--setup", action="store_true",
         help="重新运行配置向导（providers/roles/视觉模型）",
+    )
+    parser.add_argument(
+        "--migrate-cc", action="store_true",
+        help="从 Claude Code 迁移当前项目的会话与记忆",
     )
     parser.add_argument(
         "--output-format", choices=["text", "json"], default="text",
@@ -321,6 +325,12 @@ def _onboarding(console: Console, cfg: Config) -> Config:
 async def _async_main():
     args = _parse_args()
     console = Console()
+
+    # 迁移不需要 API/配置，先于 onboarding 处理并直接退出
+    if getattr(args, "migrate_cc", False):
+        from loongcli.migrate_cc import run_migration
+        sys.exit(run_migration(console))
+
     cfg = Config.load()
 
     prompt = _build_prompt(args)
@@ -446,7 +456,8 @@ async def _async_main():
         if isinstance(s, dict) and s.get("trusted")
     }
     perm_checker = PermissionChecker(mode=perm_mode, trusted_mcp_servers=trusted_mcp)
-    task_manager = TaskManager()
+    # 子任务 trace 树：<project>/tasks/<task_id>.json，meta 带 parent_task_id 成链
+    task_manager = TaskManager(trace_dir=project_tasks_dir())
     hook_manager = HookManager.from_config(cfg.hooks)
 
     registry.register(AgentTool(

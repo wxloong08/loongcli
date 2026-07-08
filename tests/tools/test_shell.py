@@ -1,3 +1,4 @@
+import asyncio
 import pytest
 import platform
 import loongcli.tools.shell as shell_mod
@@ -261,3 +262,89 @@ async def test_cd_single_arg_untouched():
         pytest.skip("非 POSIX shell 环境")
     result = await tool.execute("cd . && echo PLAIN_OK")
     assert "PLAIN_OK" in result
+
+
+# ── 取消路径：stop_task 取消协程后子进程必须随之死掉，不留孤儿 ──
+
+@pytest.mark.asyncio
+async def test_cancel_kills_subprocess(tool, monkeypatch):
+    """回归：取消只在 await 点生效，此前没有 terminate→kill，子进程会孤儿续跑。"""
+    captured = {}
+    orig_exec = asyncio.create_subprocess_exec
+    orig_shell = asyncio.create_subprocess_shell
+
+    async def capture_exec(*args, **kwargs):
+        p = await orig_exec(*args, **kwargs)
+        captured["p"] = p
+        return p
+
+    async def capture_shell(*args, **kwargs):
+        p = await orig_shell(*args, **kwargs)
+        captured["p"] = p
+        return p
+
+    monkeypatch.setattr(shell_mod.asyncio, "create_subprocess_exec", capture_exec)
+    monkeypatch.setattr(shell_mod.asyncio, "create_subprocess_shell", capture_shell)
+
+    cmd = "sleep 30" if tool.is_posix else "Start-Sleep -Seconds 30"
+    exec_task = asyncio.create_task(tool.execute(command=cmd, timeout=60))
+
+    for _ in range(100):  # 等子进程真正起来
+        if "p" in captured:
+            break
+        await asyncio.sleep(0.05)
+    assert "p" in captured, "子进程未启动"
+
+    exec_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await exec_task
+
+    # CancelledError 重新抛出前必须走完 terminate→kill（returncode 已落定）
+    assert captured["p"].returncode is not None
+
+
+@pytest.mark.asyncio
+async def test_cancel_kills_process_tree():
+    """回归（真机 3.1 抓到）：MSYS2 bash 无法真 exec，只杀直接子进程 bash
+    会让孙进程（sleep）孤儿续跑——取消后必须全树死透（taskkill /T）。"""
+    tool = ShellTool()
+    if platform.system() != "Windows" or not tool.is_posix:
+        # POSIX 上 bash -c 单命令 exec 替换自身，直接子进程即全树；
+        # 复合命令的树杀未做（诚实边界）。此测试只覆盖 Windows+git bash。
+        pytest.skip("仅 Windows + git bash 环境")
+
+    collected = []
+    tool._progress_callback = lambda evt: collected.append(evt)
+
+    # 后台起 sleep 并回报其 Windows PID（MSYS2 /proc/<pid>/winpid）
+    cmd = "sleep 30 & echo CHILD_WINPID:$(cat /proc/$!/winpid); wait $!"
+    exec_task = asyncio.create_task(tool.execute(command=cmd, timeout=60))
+
+    winpid = None
+    for _ in range(200):
+        for evt in collected:
+            if "CHILD_WINPID:" in evt.line:
+                winpid = int(evt.line.split("CHILD_WINPID:")[1].strip())
+                break
+        if winpid:
+            break
+        await asyncio.sleep(0.05)
+    assert winpid, "未拿到孙进程 Windows PID"
+
+    exec_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await exec_task
+
+    # 孙进程必须随树死掉；给 taskkill 一个短收尾窗
+    import subprocess
+    alive = True
+    for _ in range(20):
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {winpid}"],
+            capture_output=True, text=True,
+        ).stdout
+        alive = f" {winpid} " in out
+        if not alive:
+            break
+        await asyncio.sleep(0.2)
+    assert not alive, f"孙进程 {winpid} 仍存活——树杀失效"

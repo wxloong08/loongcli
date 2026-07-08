@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+from collections import deque
 from typing import AsyncIterator, Callable
 
 from loongcli.core.llm import LLMClient
@@ -27,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_CALLS_PER_TURN = 200
 LOOP_DETECT_THRESHOLD = 3
+# 循环检测的最大周期：1=同参连打（AAA），2/3=交替模式（ABAB…/ABCABC…）。
+# 仍是精确签名匹配——整周期原样重复满 THRESHOLD 遍才触发，合法的
+# 编辑→测试交替每轮参数都在变，签名不同，不会误伤。
+LOOP_DETECT_MAX_PERIOD = 3
 _MIN_RECALL_LENGTH = 4
 
 NO_VISION_MSG = (
@@ -155,8 +160,9 @@ class AgentLoop:
             "reasoning_tokens": 0,
         }
         self._tool_call_count = 0
-        self._last_tool_sig: str = ""
-        self._repeat_count: int = 0
+        self._recent_tool_sigs: deque[str] = deque(
+            maxlen=LOOP_DETECT_THRESHOLD * LOOP_DETECT_MAX_PERIOD
+        )
         # read_file 读到的图片先攒着，本轮全部 tool 结果落库后再以 user 消息注入
         self._pending_images: list[dict] = []
         # 自动记忆写入通知（写入可见化：落库即曝光，人眼是第五道闸）
@@ -192,6 +198,33 @@ class AgentLoop:
     def _persist(self):
         if self.conversation_store:
             self.conversation_store.save(self.messages)
+
+    def abort_turn(self):
+        """用户中断回合（Ctrl+C）后的消息一致性修复。
+
+        取消打在任意 await 点，可能停在「assistant 带 tool_calls 已入列、
+        部分工具结果未回」的中间态——不补占位的话，下一次请求会被 API
+        以孤儿 tool_call 拒绝（400），会话就废了。修复后落盘。"""
+        last_assistant = None
+        for i in range(len(self.messages) - 1, -1, -1):
+            if self.messages[i].get("role") == "assistant":
+                last_assistant = i
+                break
+        if last_assistant is not None:
+            answered = {
+                m.get("tool_call_id")
+                for m in self.messages[last_assistant + 1:]
+                if m.get("role") == "tool"
+            }
+            for tc in self.messages[last_assistant].get("tool_calls") or []:
+                if tc.get("id") not in answered:
+                    self.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id"),
+                        "content": "[用户中断，该调用未执行完成]",
+                    })
+        self.messages.append({"role": "user", "content": "[用户中断了本回合]"})
+        self._persist()
 
     def enter_plan_mode(self):
         self._plan_mode = True
@@ -277,15 +310,36 @@ class AgentLoop:
             self._last_checkpoint = None
 
     def _check_loop(self, name: str, args: dict) -> str | None:
+        """精确签名循环检测，周期 1~LOOP_DETECT_MAX_PERIOD。
+
+        旧实现只比较相邻调用（周期 1），A-B-A-B 交替每次都与上一次不同、
+        计数永远归零，抓不到。改为签名窗口：末尾 period×THRESHOLD 个签名
+        恰为同一 period 元组原样平铺时触发。升序扫周期，纯 AAA 由周期 1
+        先报，不会重复归因到更大周期。"""
         sig = self._tool_signature(name, args)
-        if sig == self._last_tool_sig:
-            self._repeat_count += 1
-        else:
-            self._last_tool_sig = sig
-            self._repeat_count = 1
-        if self._repeat_count >= LOOP_DETECT_THRESHOLD:
+        self._recent_tool_sigs.append(sig)
+        sigs = list(self._recent_tool_sigs)
+        for period in range(1, LOOP_DETECT_MAX_PERIOD + 1):
+            need = period * LOOP_DETECT_THRESHOLD
+            if len(sigs) < need:
+                break  # need 随 period 递增，更大的周期更不够
+            window = sigs[-need:]
+            cycle = window[:period]
+            if any(window[i] != cycle[i % period] for i in range(need)):
+                continue
+            if period == 1:
+                run = 0
+                for s in reversed(sigs):
+                    if s != sig:
+                        break
+                    run += 1
+                return (
+                    f"⚠ 检测到循环：{name} 已用相同参数连续调用 {run} 次。"
+                    "请换一种思路或向用户说明无法完成。"
+                )
             return (
-                f"⚠ 检测到循环：{name} 已用相同参数连续调用 {self._repeat_count} 次。"
+                f"⚠ 检测到循环：最近 {need} 次工具调用构成周期 {period} 的交替重复"
+                f"（同一组调用原样重复 {LOOP_DETECT_THRESHOLD} 遍，没有新信息进入）。"
                 "请换一种思路或向用户说明无法完成。"
             )
         return None
@@ -301,11 +355,10 @@ class AgentLoop:
         queue = asyncio.Queue()
         tool._progress_callback = lambda evt: queue.put_nowait(evt)
 
+        exec_task = asyncio.create_task(
+            self._exec_with_retry_single(tool_name, args)
+        )
         try:
-            exec_task = asyncio.create_task(
-                self._exec_with_retry_single(tool_name, args)
-            )
-
             while not exec_task.done():
                 try:
                     evt = await asyncio.wait_for(queue.get(), timeout=0.3)
@@ -323,6 +376,16 @@ class AgentLoop:
             logger.warning("Tool %s failed: %s", tool_name, e)
             yield ("__error__", f"⚠ 工具执行失败: {e}")
         finally:
+            # 本协程被取消（stop_task）时 CancelledError 打在上面的 queue.get()，
+            # 而 exec_task 是独立 asyncio 任务，不随消费者消亡——不收走的话，
+            # 工具协程连同 shell 子进程一起变孤儿。取消后等它跑完自己的清理
+            # （shell 的取消路径要 terminate→kill 子进程）再继续传播。
+            if not exec_task.done():
+                exec_task.cancel()
+                try:
+                    await exec_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             tool._progress_callback = None
 
     async def _exec_with_retry_single(self, tool_name: str, args: dict):
@@ -639,8 +702,7 @@ class AgentLoop:
         if recycled:
             logger.info("已回收 %d 张旧图片（超出保留窗口），原图仍在本地图片库", recycled)
         self._tool_call_count = 0
-        self._last_tool_sig = ""
-        self._repeat_count = 0
+        self._recent_tool_sigs.clear()
         self._tools_exhausted = False
         self._exhausted_strikes = 0
         self._pending_images = []  # 防上一轮异常中断的残留

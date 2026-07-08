@@ -115,6 +115,9 @@ class AgentTool(Tool):
         self._parent_registry = parent_registry
         self._permission_checker = security
         self._depth = depth
+        # 委派树父任务：主 agent 的 delegate 为 None（派出的是根任务）；
+        # 协调者的克隆在协调者任务创建后被回填为该任务 id（见 execute）
+        self._parent_task_id: str | None = None
 
     async def execute(
         self,
@@ -159,7 +162,15 @@ class AgentTool(Tool):
             prompt=prompt,
             agent_loop=sub_agent,
             depth=self._depth + 1,
+            parent_id=self._parent_task_id,
         )
+
+        if coordinator:
+            # 回填克隆的父任务 id，协调者派发的 worker 由此挂到它名下成链。
+            # create_and_run 无内部 await，同一 tick 完成——协调者此刻尚未开跑
+            clone = sub_registry._tools.get(self.name)
+            if isinstance(clone, AgentTool):
+                clone._parent_task_id = task.id
 
         if mode == "background":
             return f"任务已创建并在后台运行。task_id: {task.id}"
@@ -203,5 +214,17 @@ class AgentTool(Tool):
         visible = filter_tools(self._parent_registry._tools, AgentRole.COORDINATOR)
         sub_registry = ToolRegistry()
         for name, tool in visible.items():
+            if name == self.name:
+                # depth 属于调用上下文而非共享实例：直接复用父级 delegate 的话，
+                # _depth 永远停在主装配时的 0，MAX_DEPTH 闸在协调者链上不可达
+                # （协调者套协调者可无限嵌套）。为协调者克隆一个携带自身层级的 delegate。
+                tool = AgentTool(
+                    task_manager=self._task_manager,
+                    llm=self._llm,
+                    parent_registry=self._parent_registry,
+                    security=self._permission_checker,
+                    depth=self._depth + 1,
+                    sub_llm=self._sub_llm,
+                )
             sub_registry.register(tool)
         return sub_registry

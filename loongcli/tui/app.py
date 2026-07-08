@@ -1,6 +1,8 @@
 from __future__ import annotations
 import asyncio
 import shutil
+import signal
+import sys
 from rich.console import Console
 from loongcli.tui.mdstream import LeftMarkdown as Markdown
 from loongcli.tui.tool_display import arg_summary, result_lines
@@ -164,7 +166,12 @@ class TUI:
         if self._session is None:
             kb = KeyBindings()
 
-            @kb.add("escape", "enter")
+            # 换行走 Ctrl+J（控制码 0x0A）：不经输入法（中文 IME 会把 `\` 键转成
+            # 顿号，字符键方案全废）、也不被 Windows 终端抢去做全屏（Alt+Enter 的命）。
+            # prompt_toolkit 在 Windows 上拿不到 Shift+Enter（读不到修饰键标志位，
+            # Claude Code/Codex 用 crossterm/Ink 直读控制台事件才行）——Ctrl+J 是本栈
+            # 下最接近 Shift+Enter 手感、且 IME/终端双躲的现成键。裸 Enter 保持默认。
+            @kb.add("c-j")
             def _(event):
                 event.current_buffer.insert_text("\n")
 
@@ -296,7 +303,7 @@ class TUI:
             lines.append(f"[dim]{status_line}[/dim]")
         lines.append(
             "[bold]/help[/bold] 查看命令  [bold]/exit[/bold] 退出  "
-            "[dim]Esc+Enter 换行  Shift+Tab 规划模式[/dim]"
+            "[dim]Ctrl+J 换行  Esc 中断  Shift+Tab 规划模式[/dim]"
         )
         self.console.print(Panel("\n".join(lines), border_style="cyan"))
 
@@ -330,6 +337,7 @@ class TUI:
                 self.console.print(f"\n[dim]再见！会话 [cyan]{sid}[/cyan] 已保存，[cyan]loongcli --continue[/cyan] 可继续[/dim]")
                 break
 
+            raw_input = user_input  # 擦除空提交要用它的行数（Esc+Enter 换行会多行）
             # 还原折叠的大块粘贴：输入区显示的是占位符，发给 agent 的是完整原文。
             user_input = self._expand_pastes(user_input)
             # 源头修复：Windows 控制台粘贴 emoji 会以 UTF-16 代理对传入，原样下传会污染
@@ -337,6 +345,10 @@ class TUI:
             # （孤立代理丢弃），下游全拿到干净且忠实的输入。
             user_input = repair_surrogates(user_input).strip()
             if not user_input:
+                # 空/纯空白提交（连按回车、或 Esc+Enter 换行后空提交）：prompt_toolkit
+                # 已把 ❯ 提交进滚动区，不擦就会堆一摞空 ❯。上移提示符块行数 + 清到屏末，
+                # 下一轮 prompt_async 原位重画，视觉零堆叠。need_divider 未置 True → 不重画分隔线。
+                self._erase_lines(raw_input.count("\n") + 1)
                 continue
             need_divider = True  # 本轮有实际输入，处理后下一轮重新画分隔线
             if user_input == "/exit":
@@ -366,7 +378,80 @@ class TUI:
 
             await self._handle_agent_response(agent, user_input)
 
+    def _erase_lines(self, n: int) -> None:
+        """擦掉终端上最近 n 行（上移 n 行 + 清到屏末），光标回列首原位。
+
+        用于空提交后回收堆叠的空提示符。走裸 stdout 而非 rich.console——
+        rich 会转义 ANSI 控制序列。非 tty（管道）下静默跳过。"""
+        if n < 1 or not sys.stdout.isatty():
+            return
+        sys.stdout.write(f"\033[{n}A\033[J")
+        sys.stdout.flush()
+
     async def _handle_agent_response(
+        self,
+        agent: AgentLoop,
+        user_input: str,
+        allowed_tools: set[str] | None = None,
+    ):
+        """回合外壳：把回合跑成可取消任务，Ctrl+C 中断回合而非崩出应用。
+
+        此前 KeyboardInterrupt 只在输入框和确认符两处被捕获，回合流式期间
+        按 Ctrl+C 直接崩出整个应用（真机 3.1 附带确认的控制面缺口）。
+        取消传播复用 stop_task 同一条链：CancelledError 打进 run_stream →
+        _exec_tool_stream finally 收编 exec_task → shell 子进程随 Job 全灭。
+        """
+        turn = asyncio.create_task(
+            self._run_turn_impl(agent, user_input, allowed_tools)
+        )
+        loop = asyncio.get_running_loop()
+        interrupted = False
+
+        def _request_interrupt():
+            nonlocal interrupted
+            interrupted = True
+            loop.call_soon_threadsafe(turn.cancel)
+
+        # Esc 为主触发键（无双义）；Ctrl+C 兜底（原行为=崩出应用，保留即降级保护）。
+        # 只在回合期间接管，输入框阶段仍由 prompt_toolkit 处理（退出语义不变）。
+        esc_task = asyncio.create_task(self._esc_listener(_request_interrupt))
+        prev_handler = signal.signal(signal.SIGINT, lambda *_: _request_interrupt())
+        try:
+            await turn
+        except asyncio.CancelledError:
+            if not interrupted:
+                raise  # 非用户中断的外部取消（如应用收尾），照常传播
+            agent.abort_turn()
+            self.console.print(Padding(Text.from_markup(
+                "[yellow]✗ 回合已中断——消息现场已修复，可继续输入[/yellow]"
+            ), self.PADDING))
+            self._at_gap = False
+        finally:
+            esc_task.cancel()
+            signal.signal(signal.SIGINT, prev_handler)
+
+    async def _esc_listener(self, cancel_cb):
+        """回合期间监听 Esc（Windows msvcrt 轮询；非 Windows 暂无，Ctrl+C 兜底）。
+
+        确认框/计划审批弹出时必须暂停读键（_prompt_active），否则会抢
+        prompt_toolkit 的按键。其余按键直接丢弃——回合中没有输入排队语义。"""
+        try:
+            import msvcrt
+        except ImportError:
+            return
+        while True:
+            if not getattr(self, "_prompt_active", False) and msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch in ("\x00", "\xe0"):
+                    # 功能键两字节序列：吞掉第二字节，避免残留半个键
+                    if msvcrt.kbhit():
+                        msvcrt.getwch()
+                elif ch == "\x1b":
+                    cancel_cb()
+                    return
+            await asyncio.sleep(0.05)
+
+    async def _run_turn_impl(
         self,
         agent: AgentLoop,
         user_input: str,
@@ -391,7 +476,7 @@ class TUI:
         cost_before = agent.cost_tracker.total_cost if agent.cost_tracker else 0
         thinking_buffer = ""
         view = StreamView(self.console, left_pad=self.PADDING[1])
-        view.status(Padding(Spinner("dots", text="[dim]思考中...[/dim]"), self.PADDING))
+        view.status(Padding(Spinner("dots", text="[dim]思考中... (Esc 中断)[/dim]"), self.PADDING))
 
         # 拖图/贴路径自动附图：[Image #N] 占位符（拖入）+ 裸路径（打字）一起解析。
         vision = bool(getattr(getattr(agent, "llm", None), "vision", False))
@@ -516,6 +601,7 @@ class TUI:
                     self.console.print(Padding(
                         self._confirm_args_display(event.arguments), self.PADDING,
                     ))
+                    self._prompt_active = True  # 暂停 Esc 监听，避免抢确认框按键
                     try:
                         confirm_session = PromptSession()
                         with patch_stdout():
@@ -525,6 +611,8 @@ class TUI:
                         approved = answer.strip().lower() in ("y", "yes")
                     except (EOFError, KeyboardInterrupt):
                         approved = False
+                    finally:
+                        self._prompt_active = False
                     event.future.set_result(approved)
                     self._at_gap = False
                     if approved:
@@ -559,6 +647,7 @@ class TUI:
                         "[bold]1[/bold] 批准执行   [bold]2[/bold] 批准并自动接受编辑   "
                         "[bold]3[/bold] 提修改建议   [bold]4[/bold] 取消"
                     ), self.PADDING))
+                    self._prompt_active = True  # 暂停 Esc 监听，避免抢审批框按键
                     try:
                         plan_session = PromptSession()
                         with patch_stdout():
@@ -588,6 +677,8 @@ class TUI:
                     except (EOFError, KeyboardInterrupt):
                         event.future.set_result("cancel")
                         self.console.print("  [yellow]✗ 计划已取消[/yellow]")
+                    finally:
+                        self._prompt_active = False
 
                 elif isinstance(event, AgentDone):
                     pass

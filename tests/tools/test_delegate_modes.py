@@ -70,7 +70,7 @@ class TestAutoMode:
     async def test_auto_returns_result_if_fast(self):
         tool, tm = _make_tool()
 
-        async def fast_run(prompt, agent_loop, depth):
+        async def fast_run(prompt, agent_loop, depth, parent_id=None):
             task = Task(prompt=prompt)
             tm.register(task)
 
@@ -95,7 +95,7 @@ class TestAutoMode:
     async def test_auto_backgrounds_on_timeout(self):
         tool, tm = _make_tool()
 
-        async def slow_run(prompt, agent_loop, depth):
+        async def slow_run(prompt, agent_loop, depth, parent_id=None):
             task = Task(prompt=prompt)
             tm.register(task)
             task._async_task = asyncio.create_task(asyncio.sleep(100))
@@ -124,7 +124,7 @@ class TestSyncMode:
     async def test_sync_returns_result(self):
         tool, tm = _make_tool()
 
-        async def fast_run(prompt, agent_loop, depth):
+        async def fast_run(prompt, agent_loop, depth, parent_id=None):
             task = Task(prompt=prompt)
             tm.register(task)
 
@@ -147,7 +147,7 @@ class TestSyncMode:
     async def test_sync_timeout_returns_timeout_status(self):
         tool, tm = _make_tool()
 
-        async def slow_run(prompt, agent_loop, depth):
+        async def slow_run(prompt, agent_loop, depth, parent_id=None):
             task = Task(prompt=prompt)
             tm.register(task)
             task._async_task = asyncio.create_task(asyncio.sleep(100))
@@ -250,4 +250,25 @@ class TestDepthLimit:
     async def test_depth_at_max_rejected(self):
         tool, tm = _make_tool(depth=TaskManager.MAX_DEPTH - 1)
         result = await tool.execute(prompt="test")
+        assert "最大嵌套深度" in result
+
+    def test_coordinator_registry_delegate_carries_depth(self):
+        """协调者注册表里的 delegate 必须携带自身层级，而非复用父级共享实例。
+
+        回归：AgentTool 全仓只在主装配时构造一次（depth=0），若协调者注册表
+        直接复用该实例，_depth 恒为 0，深度闸在真实装配路径上永远不可达。
+        """
+        tool, _ = _make_tool()
+        d1 = tool._build_coordinator_registry()._tools["delegate"]
+        assert d1 is not tool
+        assert d1._depth == tool._depth + 1
+
+    @pytest.mark.asyncio
+    async def test_coordinator_chain_hits_depth_gate(self):
+        """真实装配链路：主(0) → 协调者(1) → 协调者(2) 的 delegate 必须被深度闸拦下。"""
+        tool, _ = _make_tool()
+        d1 = tool._build_coordinator_registry()._tools["delegate"]
+        d2 = d1._build_coordinator_registry()._tools["delegate"]
+        assert d2._depth == 2
+        result = await d2.execute(prompt="test")
         assert "最大嵌套深度" in result

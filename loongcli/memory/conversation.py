@@ -27,6 +27,15 @@ def _project_sessions_dir(project_dir: Path | None = None) -> Path:
     return _projects_root() / slug / "sessions"
 
 
+def project_tasks_dir(project_dir: Path | None = None) -> Path:
+    """子任务 trace 的落盘目录——与 sessions 平级隔离，
+    避免污染会话列表（web UI / --continue 只扫 sessions）。"""
+    if project_dir is None:
+        project_dir = Path.cwd()
+    slug = _path_to_slug(project_dir)
+    return _projects_root() / slug / "tasks"
+
+
 def current_project_slug(project_dir: Path | None = None) -> str:
     return _path_to_slug(project_dir or Path.cwd())
 
@@ -93,15 +102,24 @@ def load_session(slug: str, session_id: str, projects_root: Path | None = None) 
 class ConversationStore:
     """Persists full conversation history per session, isolated by project."""
 
-    def __init__(self, base_dir: Path | None = None, project_dir: Path | None = None):
+    def __init__(
+        self,
+        base_dir: Path | None = None,
+        project_dir: Path | None = None,
+        session_id: str | None = None,
+        extra_meta: dict[str, Any] | None = None,
+    ):
         self.base_dir = base_dir or _project_sessions_dir(project_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.session_id = uuid.uuid4().hex[:12]
+        # session_id 可注入：子任务 trace 以 task_id 为文件名，与 TaskManager 对齐
+        self.session_id = session_id or uuid.uuid4().hex[:12]
         self._meta: dict[str, Any] = {
             "session_id": self.session_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "title": "",
         }
+        if extra_meta:
+            self._meta.update(extra_meta)
 
     @property
     def session_path(self) -> Path:

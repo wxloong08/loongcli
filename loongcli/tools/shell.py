@@ -13,6 +13,90 @@ from loongcli.core.events import ShellOutput
 _GRACEFUL_WAIT = 3  # seconds to wait between terminate and kill
 
 
+class _WindowsJob:
+    """Windows Job Object：把 shell 子进程及其全部后代圈进一个终止单元。
+
+    MSYS2 bash 的 fork/exec 仿真会打断 Windows 父子链（真机实证：bash -c
+    "sleep 120" 里 sleep 的父进程是一个已消亡的中间 stub，不在 bash 链上），
+    taskkill /T、psutil 这类按父子链枚举的树杀全部结构性漏杀。Job 成员资格
+    由内核在进程创建时继承，与父子链无关，是 Windows 上唯一可靠的整树终止。
+    KILL_ON_JOB_CLOSE 兜底：句柄关闭（含 loongcli 崩溃）时内核自动收尸——
+    命令正常结束后关句柄也会带走它遗留的后台进程，harness 不留隐形残留。
+    """
+
+    def __init__(self, handle):
+        self._handle = handle
+
+    @classmethod
+    def create_and_assign(cls, pid: int) -> "_WindowsJob | None":
+        """创建 job 并圈入 pid；任一步失败返回 None（调用方退化为直接终止）。"""
+        import ctypes
+        from ctypes import wintypes
+
+        class _BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_uint64) for n in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+            )]
+
+        class _ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimits),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        k32 = ctypes.windll.kernel32
+        handle = k32.CreateJobObjectW(None, None)
+        if not handle:
+            return None
+        info = _ExtendedLimits()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        ok = k32.SetInformationJobObject(
+            handle, 9,  # JobObjectExtendedLimitInformation
+            ctypes.byref(info), ctypes.sizeof(info),
+        )
+        if not ok:
+            k32.CloseHandle(handle)
+            return None
+        PROCESS_SET_QUOTA, PROCESS_TERMINATE = 0x0100, 0x0001
+        proc = k32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
+        if not proc:
+            k32.CloseHandle(handle)
+            return None
+        assigned = k32.AssignProcessToJobObject(handle, proc)
+        k32.CloseHandle(proc)
+        if not assigned:
+            k32.CloseHandle(handle)
+            return None
+        return cls(handle)
+
+    def terminate(self):
+        import ctypes
+        ctypes.windll.kernel32.TerminateJobObject(self._handle, 1)
+
+    def close(self):
+        import ctypes
+        ctypes.windll.kernel32.CloseHandle(self._handle)
+        self._handle = None
+
+
 class ShellSpec(NamedTuple):
     cmd: str            # executable to invoke
     args: list[str]     # args preceding the command string
@@ -126,6 +210,8 @@ class ShellTool(Tool):
         # `cd /d <路径>` 两参形式无合法含义，确定性改写零误伤；提示层已拦不住。
         if self.is_posix:
             command = re.sub(r"(?<![\w-])cd\s+/[dD]\s+(?=\S)", "cd ", command)
+        process = None
+        job = None
         try:
             env = _venv_env()
             if platform.system() == "Windows":
@@ -136,6 +222,8 @@ class ShellTool(Tool):
                     stderr=asyncio.subprocess.PIPE,
                     env=env,
                 )
+                # 立刻圈进 Job（后代自动继承成员资格）；失败退化为直接终止
+                job = _WindowsJob.create_and_assign(process.pid)
             else:
                 process = await asyncio.create_subprocess_shell(
                     command,
@@ -159,26 +247,49 @@ class ShellTool(Tool):
                 await process.wait()
             except asyncio.TimeoutError:
                 return await self._handle_timeout(
-                    process, timeout, stdout_lines, stderr_lines,
+                    process, job, timeout, stdout_lines, stderr_lines,
                 )
 
             output = _build_result(stdout_lines, stderr_lines, process.returncode)
             return output
 
+        except asyncio.CancelledError:
+            # stop_task 的取消只在 await 点生效，协程死了子进程不会跟着死——
+            # 超时路径有 terminate→kill，取消路径此前没有，孤儿进程会一直跑
+            if process is not None:
+                await self._shutdown_process(process, job)
+            raise
         except Exception as e:
             return f"错误：{e}"
+        finally:
+            # KILL_ON_JOB_CLOSE：正常结束时顺带收掉命令遗留的后台进程；
+            # 超时/取消路径此时树已终止，关句柄只是释放内核对象
+            if job is not None:
+                job.close()
 
-    async def _handle_timeout(
-        self, process, timeout: int,
-        stdout_lines: list[str], stderr_lines: list[str],
-    ) -> str:
-        """Graceful shutdown: terminate → wait → kill."""
-        process.terminate()
+    async def _shutdown_process(self, process, job: "_WindowsJob | None" = None) -> None:
+        """按整树收尾（超时与取消两条路共用）。
+
+        Windows 走 Job Object 内核级全灭（MSYS2 会打断父子链，见 _WindowsJob）；
+        POSIX 上 bash -c 单命令会 exec 替换自身，terminate 直接子进程即杀全树。
+        """
+        if process.returncode is not None:
+            return
+        if job is not None:
+            job.terminate()
+        else:
+            process.terminate()
         try:
             await asyncio.wait_for(process.wait(), timeout=_GRACEFUL_WAIT)
         except asyncio.TimeoutError:
             process.kill()
             await process.wait()
+
+    async def _handle_timeout(
+        self, process, job, timeout: int,
+        stdout_lines: list[str], stderr_lines: list[str],
+    ) -> str:
+        await self._shutdown_process(process, job)
 
         output_lines = stdout_lines + stderr_lines
         if output_lines:
