@@ -221,7 +221,7 @@ class TestAgentIntegration:
     @pytest.mark.asyncio
     async def test_skill_injected_into_messages(self, tmp_path):
         from unittest.mock import AsyncMock, MagicMock
-        from loongcli.core.agent import AgentLoop
+        from loongcli.core.agent import AgentLoop, AgentServices
         from loongcli.core.events import AgentDone
         from loongcli.security.permissions import PermissionChecker
 
@@ -261,7 +261,7 @@ class TestAgentIntegration:
             llm=llm,
             tool_registry=MagicMock(get_tool_schemas=MagicMock(return_value=None)),
             permission_checker=PermissionChecker(),
-            skill_registry=reg,
+            services=AgentServices(skill_registry=reg),
         )
 
         agent_mod.StreamCollector = FakeCollector
@@ -280,7 +280,7 @@ class TestAgentIntegration:
     @pytest.mark.asyncio
     async def test_no_skill_registry_passthrough(self, tmp_path):
         from unittest.mock import MagicMock
-        from loongcli.core.agent import AgentLoop
+        from loongcli.core.agent import AgentLoop, AgentServices
         from loongcli.core.stream_collector import CollectedResponse
         from loongcli.core.events import TextDelta
         from loongcli.security.permissions import PermissionChecker

@@ -10,6 +10,9 @@ from loongcli.core.events import TextDelta, ThinkingDelta
 class CollectedResponse:
     content: str = ""
     reasoning_content: str = ""
+    # API 报告的结束原因（stop/length/tool_calls/content_filter…）。
+    # 截断与正常结束的唯一判别依据，空响应排障必需。
+    finish_reason: str = ""
     tool_calls: list[dict] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -34,6 +37,7 @@ class StreamCollector:
         reasoning_parts: list[str] = []
         tool_calls_by_index: dict[int, dict] = {}
         usage = None
+        finish_reason = ""
 
         async for chunk in stream:
             if hasattr(chunk, "usage") and chunk.usage:
@@ -42,6 +46,11 @@ class StreamCollector:
             choice = chunk.choices[0] if chunk.choices else None
             if not choice:
                 continue
+
+            # isinstance 守卫与 reasoning_content 同理：测试的 MagicMock chunk
+            # 未显式设置该属性时会返回 truthy 的 Mock，不能直接当字符串收
+            if isinstance(choice.finish_reason, str) and choice.finish_reason:
+                finish_reason = choice.finish_reason
 
             delta = choice.delta
 
@@ -85,6 +94,7 @@ class StreamCollector:
         self.response = CollectedResponse(
             content="".join(content_parts),
             reasoning_content="".join(reasoning_parts),
+            finish_reason=finish_reason,
             tool_calls=sorted_tool_calls,
         )
         if usage:

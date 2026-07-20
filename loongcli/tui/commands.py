@@ -124,7 +124,10 @@ def _persist_main_role(
     if provider:
         main["provider"] = provider
     main["model"] = model
-    main["vision"] = vision
+    # 只在确知有视觉能力时写 vision=True；不写 False——裸模型名切换时 vision 解析不到
+    # 会退成 False，无条件写会把用户手工设的 roles.main.vision:true 清掉。显式关闭请编辑 config。
+    if vision:
+        main["vision"] = True
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return str(path)
@@ -475,12 +478,15 @@ class WebCommand(SlashCommand):
         import threading
         import webbrowser
 
+        from loongcli.web.api import WebAPI
         from loongcli.web.server import create_server, server_url
 
         cls = WebCommand
         if cls._server is None:
             try:
-                cls._server = create_server()
+                # 复用 TUI 的 memory（MemoryRouter），web 与会话看到同一套两层记忆；
+                # ctx.memory 为 None 时 WebAPI 自建全局 store 兜底
+                cls._server = create_server(api=WebAPI(memory_store=ctx.memory))
             except OSError as exc:
                 ctx.console.print(f"[red]Web 服务启动失败: {exc}[/red]")
                 return
@@ -557,6 +563,52 @@ class VerboseCommand(SlashCommand):
             ctx.console.print("[cyan]✓ 折叠模式已恢复[/cyan]（● 工具行 + ⎿ 统计/diff）")
 
 
+class RollbackCommand(SlashCommand):
+    name = "rollback"
+    description = "列出/恢复文件修改快照（write/edit 前自动备份，会话内有效）"
+    usage = "[序号]"
+
+    async def run(self, args: list[str], ctx: CommandContext) -> None:
+        mgr = getattr(ctx.agent, "checkpoint_manager", None)
+        if not mgr:
+            ctx.console.print("[yellow]checkpoint 未启用[/yellow]")
+            return
+        snaps = mgr.list_checkpoints()
+        if not snaps:
+            ctx.console.print("[dim]（本会话暂无快照——write_file/edit_file 修改文件前自动生成）[/dim]")
+            return
+
+        if not args:
+            lines = []
+            for i, s in enumerate(snaps, 1):
+                ts = s["created_at"].strftime("%H:%M:%S")
+                files = "、".join(s["files"])
+                label = f"  [dim]({s['label']})[/dim]" if s["label"] else ""
+                lines.append(f"  [bold cyan]{i:>2}[/bold cyan]  {ts}  {files}{label}")
+            lines.append("\n  [dim]/rollback <序号> 恢复到该次修改前的内容[/dim]")
+            ctx.console.print(Panel("\n".join(lines), title="文件快照（新→旧）", border_style="cyan"))
+            return
+
+        try:
+            idx = int(args[0])
+            if not 1 <= idx <= len(snaps):
+                raise ValueError
+        except ValueError:
+            ctx.console.print(f"[red]无效序号：{args[0]}（可选 1–{len(snaps)}）[/red]")
+            return
+
+        snap = snaps[idx - 1]
+        # 回滚本身也可反悔：先对目标文件的当前状态存一个快照，再恢复
+        mgr.save(snap["files"], label="rollback 前状态")
+        if mgr.restore(snap["id"], keep=True):
+            ctx.console.print(
+                f"[green]✓ 已恢复到快照 {idx}[/green]：{'、'.join(snap['files'])}"
+            )
+            ctx.console.print("[dim]反悔可再 /rollback 选「rollback 前状态」快照[/dim]")
+        else:
+            ctx.console.print("[red]恢复失败（快照可能已被淘汰）[/red]")
+
+
 def create_default_registry() -> CommandRegistry:
     registry = CommandRegistry()
     registry.register(HelpCommand())
@@ -576,4 +628,5 @@ def create_default_registry() -> CommandRegistry:
     registry.register(WebCommand())
     registry.register(VerboseCommand())
     registry.register(ConfigCommand())
+    registry.register(RollbackCommand())
     return registry

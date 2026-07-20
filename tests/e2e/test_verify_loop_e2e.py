@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 from pathlib import Path
 
-from loongcli.core.agent import AgentLoop
+from loongcli.core.agent import AgentLoop, AgentServices
 from loongcli.core.llm import LLMClient
 from loongcli.tools.base import ToolRegistry
 from loongcli.security.permissions import PermissionChecker
@@ -82,7 +82,7 @@ async def test_agent_has_checkpoint_and_verify():
         tool_registry=ToolRegistry(),
         permission_checker=PermissionChecker(),
         system_prompt="test",
-        checkpoint_manager=ckpt,
+        services=AgentServices(checkpoint_manager=ckpt),
     )
 
     assert agent.checkpoint_manager is ckpt

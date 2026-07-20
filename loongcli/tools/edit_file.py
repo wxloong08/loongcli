@@ -5,6 +5,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from loongcli.tools.base import Tool
+from loongcli.tools.read_file import _decode_with_fallback
+from loongcli.tools.syntax_check import check_syntax
 
 FUZZY_AUTO_THRESHOLD = 0.85
 FUZZY_CANDIDATE_MIN = 0.6
@@ -43,30 +45,35 @@ class EditFileTool(Tool):
             if not p.is_file():
                 return f"错误：'{path}' 不是文件"
 
-            content = p.read_text(encoding="utf-8")
+            # 与 read_file 一致的编码探测：GBK/BOM 文件也能改，且按原编码写回（保留 BOM）。
+            # 此前硬编码 utf-8 会让 GBK 文件"读得了改不了"、把 UTF-8-BOM 静默剥成无 BOM。
+            # 仅探测编码，内容仍走文本模式读取——保留原有的换行归一化（CRLF→LF）行为，
+            # 否则匹配会被 \r\n 破坏、写回还会把 \n 再翻成 \r\n 造成 \r\r\n 损坏。
+            _, enc = _decode_with_fallback(p.read_bytes())
+            content = p.read_text(encoding=enc)
 
-            result = self._try_exact(content, p, path, old_string, new_string)
+            result = self._try_exact(content, p, path, old_string, new_string, enc)
             if result:
                 return result
 
             old_stripped = old_string.strip()
             if old_stripped != old_string:
-                result = self._try_exact(content, p, path, old_stripped, new_string)
+                result = self._try_exact(content, p, path, old_stripped, new_string, enc)
                 if result:
                     return result
 
             old_normalized = _normalize_whitespace(old_string)
             if old_normalized not in (old_string, old_stripped):
-                result = self._try_exact(content, p, path, old_normalized, new_string)
+                result = self._try_exact(content, p, path, old_normalized, new_string, enc)
                 if result:
                     return result
 
-            return self._fuzzy_replace(content, p, path, old_string, new_string)
+            return self._fuzzy_replace(content, p, path, old_string, new_string, enc)
 
         except Exception as e:
             return f"错误：{e}"
 
-    def _try_exact(self, content: str, p: Path, path: str, old: str, new: str) -> str | None:
+    def _try_exact(self, content: str, p: Path, path: str, old: str, new: str, enc: str = "utf-8") -> str | None:
         """Try exact replacement. Returns result on success/error, None if not found."""
         count = content.count(old)
         if count == 0:
@@ -77,13 +84,15 @@ class EditFileTool(Tool):
                 f"需要唯一匹配。请提供更多上下文使其唯一。"
             )
         new_content = content.replace(old, new, 1)
-        p.write_text(new_content, encoding="utf-8")
+        verr = _write_validated(p, new_content, enc, content)
+        if verr:
+            return verr
         stats = _diff_stats(old, new)
         if stats:
             return f"成功编辑 {path}（{stats}）"
         return f"成功编辑 {path}"
 
-    def _fuzzy_replace(self, content: str, p: Path, path: str, old_string: str, new_string: str) -> str:
+    def _fuzzy_replace(self, content: str, p: Path, path: str, old_string: str, new_string: str, enc: str = "utf-8") -> str:
         """Fuzzy match fallback after exact/strip/normalize all failed."""
         if len(old_string) > MAX_OLD_STRING_LEN:
             return self._closest_lines_error(content, old_string)
@@ -108,7 +117,9 @@ class EditFileTool(Tool):
             if matched_text.endswith("\n") and not old_string.endswith("\n"):
                 end -= len(matched_text) - len(matched_text.rstrip("\n"))
             new_content = content[:start] + new_string + content[end:]
-            p.write_text(new_content, encoding="utf-8")
+            verr = _write_validated(p, new_content, enc, content)
+            if verr:
+                return verr
             stats = _diff_stats(old_string, new_string)
             extra = f"，{stats}" if stats else ""
             return f"成功编辑 {path}（fuzzy {best_ratio:.0%}{extra}）"
@@ -156,6 +167,16 @@ class EditFileTool(Tool):
             f"{lines_msg}\n"
             f"请检查 old_string 是否与文件内容一致（注意空格、缩进、引号）。"
         )
+
+
+def _write_validated(p: Path, new_content: str, enc: str, original: str) -> str | None:
+    """写盘前语法校验：新内容非法且原内容本身合法 → 拒绝（防把好文件改坏）；
+    原内容本就非法 → 放行（允许修复性编辑，避免锁死）。通过则写盘，返回 None。"""
+    err = check_syntax(str(p), new_content)
+    if err and check_syntax(str(p), original) is None:
+        return f"错误：本次编辑会破坏文件语法，已拒绝写入（文件未修改）。{err}"
+    p.write_text(new_content, encoding=enc)
+    return None
 
 
 def _diff_stats(old_string: str, new_string: str) -> str:

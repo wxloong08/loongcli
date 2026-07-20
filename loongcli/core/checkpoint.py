@@ -17,6 +17,8 @@ MAX_CHECKPOINTS = 50
 class _Snapshot:
     ckpt_id: str
     backed_files: dict[str, Path] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=datetime.now)
+    label: str = ""
 
 
 class CheckpointManager:
@@ -37,7 +39,7 @@ class CheckpointManager:
         p = Path(f)
         return p if p.is_absolute() else self.cwd / p
 
-    def save(self, files: list[str] | None = None) -> str | None:
+    def save(self, files: list[str] | None = None, label: str = "") -> str | None:
         """Copy files to backup. Returns ckpt_id or None if nothing to save."""
         if not files:
             return None
@@ -47,7 +49,7 @@ class CheckpointManager:
             return None
 
         ckpt_id = f"loongcli-ckpt-{uuid.uuid4().hex[:12]}"
-        snap = _Snapshot(ckpt_id=ckpt_id)
+        snap = _Snapshot(ckpt_id=ckpt_id, label=label)
 
         backup_root = self._backup_dir / ckpt_id
         backup_root.mkdir(parents=True, exist_ok=True)
@@ -72,8 +74,11 @@ class CheckpointManager:
         self._cleanup_old()
         return ckpt_id
 
-    def restore(self, ckpt_id: str) -> bool:
-        """Restore files from a checkpoint. Returns True on success."""
+    def restore(self, ckpt_id: str, keep: bool = False) -> bool:
+        """Restore files from a checkpoint. Returns True on success.
+
+        keep=True 时保留快照（/rollback 用，可重复回滚）；默认恢复后清理
+        （异常回滚路径的原有语义）。"""
         snap = self._snapshots.get(ckpt_id)
         if not snap:
             return False
@@ -84,7 +89,8 @@ class CheckpointManager:
             if backup_path.exists():
                 shutil.copy2(backup_path, dst)
 
-        self._cleanup_snapshot(ckpt_id, snap)
+        if not keep:
+            self._cleanup_snapshot(ckpt_id, snap)
         return True
 
     def discard(self, ckpt_id: str) -> bool:
@@ -95,8 +101,20 @@ class CheckpointManager:
         self._cleanup_snapshot(ckpt_id, snap)
         return True
 
-    def list_checkpoints(self) -> list[str]:
-        return list(self._snapshots.keys())
+    def list_checkpoints(self) -> list[dict]:
+        """快照元数据，新→旧排序。供 /rollback 展示与选择。"""
+        snaps = sorted(
+            self._snapshots.values(), key=lambda s: s.created_at, reverse=True,
+        )
+        return [
+            {
+                "id": s.ckpt_id,
+                "created_at": s.created_at,
+                "files": list(s.backed_files.keys()),
+                "label": s.label,
+            }
+            for s in snaps
+        ]
 
     def _cleanup_snapshot(self, ckpt_id: str, snap: _Snapshot) -> None:
         backup_root = self._backup_dir / ckpt_id

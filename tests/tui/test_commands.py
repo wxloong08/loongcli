@@ -278,9 +278,28 @@ def test_persist_main_role_writes_config(tmp_path):
                     encoding="utf-8")
     _persist_main_role("deepseek-v4-pro", "deepseek", False, config_path=path)
     data = __import__("json").loads(path.read_text(encoding="utf-8"))
-    assert data["roles"]["main"] == {"provider": "deepseek", "model": "deepseek-v4-pro", "vision": False}
+    # vision=False 不写入（loader 缺省即 False，等价）——避免覆盖用户手工设的 vision:true
+    assert data["roles"]["main"] == {"provider": "deepseek", "model": "deepseek-v4-pro"}
     assert data["roles"]["sub"]["model"] == "x"      # 其他角色不动
     assert data["api_key"] == "sk-old"               # 其他字段不动
+
+
+def test_persist_main_role_writes_vision_true_and_keeps_prior(tmp_path):
+    """vision=True 显式写入；且已有的 vision:true 不被裸模型切换（vision=False）清掉。"""
+    from loongcli.tui.commands import _persist_main_role
+
+    path = tmp_path / "config.json"
+    # 用户手工设了 main.vision:true
+    path.write_text('{"roles": {"main": {"provider": "qwen", "model": "v", "vision": true}}}',
+                    encoding="utf-8")
+    # 裸模型名切换（vision 解析不到 → False）不应清掉已有 vision
+    _persist_main_role("v2", None, False, config_path=path)
+    data = __import__("json").loads(path.read_text(encoding="utf-8"))
+    assert data["roles"]["main"]["vision"] is True
+    # 显式 vision=True 正常写入
+    _persist_main_role("v3", None, True, config_path=path)
+    data = __import__("json").loads(path.read_text(encoding="utf-8"))
+    assert data["roles"]["main"]["vision"] is True
 
 
 @pytest.mark.asyncio

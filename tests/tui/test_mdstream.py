@@ -24,7 +24,12 @@ def _make_md(render_sequences, live_window=3):
     md = MarkdownStream(MagicMock(), left_pad=2, live_window=live_window)
     md.min_delay = 0
     md._live = MagicMock()
-    md._ensure_live = lambda: None
+    # 模拟生产的 _ensure_live：Live 被拆掉后能重建（update() 现在提交稳定行前
+    # 先 _teardown 再 print，随后 _ensure_live 重建 Live 刷新尾部）。
+    def _ensure():
+        if md._live is None:
+            md._live = MagicMock()
+    md._ensure_live = _ensure
     emitted: list[list[str]] = []
     md._emit_stable = lambda lines: emitted.append(list(lines))
     tail_updates: list[list[str]] = []

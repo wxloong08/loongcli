@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -121,6 +122,9 @@ class MarkdownMemoryStore:
     def __init__(self, base_dir: Path | None = None):
         self.base_dir = base_dir or (Path.home() / ".loongcli" / "memory")
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        # web UI 跑在独立线程、agent 的 auto_extract 在事件循环线程——两者可能同时写
+        # 同一批记忆文件 + 重建索引，无锁会交错致丢写/索引损坏。写操作串行化。
+        self._write_lock = threading.Lock()
 
     def _file_path(self, name: str) -> Path:
         return self.base_dir / f"{name}.md"
@@ -132,6 +136,10 @@ class MarkdownMemoryStore:
         写入者/会话产生，毒记忆事故后加——出问题五秒定位来源会话）。更新时覆写
         为最新写入者。
         """
+        with self._write_lock:
+            return self._save_locked(name, description, type, content, source)
+
+    def _save_locked(self, name: str, description: str, type: str, content: str, source: str) -> str:
         name = _sanitize_name(name)
 
         if type not in MEMORY_TYPES:
@@ -199,13 +207,14 @@ class MarkdownMemoryStore:
 
     def delete(self, name: str) -> bool:
         """Delete a memory file. Returns True if deleted, False if not found."""
-        path = self._file_path(name)
-        if not path.exists():
-            return False
+        with self._write_lock:
+            path = self._file_path(name)
+            if not path.exists():
+                return False
 
-        path.unlink()
-        self._rebuild_index()
-        return True
+            path.unlink()
+            self._rebuild_index()
+            return True
 
     def list_all(self, type_filter: str | None = None) -> list[dict]:
         """List all memories, optionally filtered by type.

@@ -10,9 +10,8 @@ from loongcli.core.messages import (
     IMAGE_REF_PREFIX, IMAGE_DROPPED_PLACEHOLDER, IMAGE_LOST_PLACEHOLDER,
 )
 from loongcli.core.compact import (
-    Compactor, _fix_role_alternation, snip, micro_compact,
+    Compactor, _fix_role_alternation, snip,
 )
-from loongcli.core.context_collapse import collapse
 from loongcli.memory.conversation import ConversationStore
 
 
@@ -109,17 +108,7 @@ class TestListContentSurvivesPipeline:
         snipped, _ = snip(msgs)  # 不抛异常
         assert isinstance(snipped, list)
 
-    def test_micro_compact_leaves_image_msg(self):
-        msgs = [_img_msg("图"), {"role": "user", "content": "x"}]
-        assert micro_compact(msgs) == msgs  # 非工具消息，原样
-
-    def test_collapse_with_image_no_crash(self):
-        msgs = [{"role": "system", "content": "sys"}]
-        for i in range(10):
-            msgs.append(_img_msg(f"q{i}") if i == 1 else {"role": "user", "content": f"q{i}"})
-            msgs.append({"role": "assistant", "content": "a" * 600})
-        out = collapse(msgs, level=2)  # 不抛异常
-        assert any(_has_image(m.get("content")) for m in out)  # 图片消息未被截断破坏
+    # micro_compact/collapse 的含图测试已随金字塔删除（2026-07-19，见 compact.py 注释）
 
     def test_conversation_save_title_from_image_msg(self, tmp_path):
         store = ConversationStore(base_dir=tmp_path)
@@ -485,7 +474,6 @@ class TestIsImageFile:
 
 def _mock_llm(summary_text: str = "<summary>本轮对话完成了压缩测试所需的全部准备工作，包括消息构造、角色交替修复、附件重建与边界标记，所有细节均已核对无误。</summary>") -> MagicMock:
     llm = MagicMock()
-    llm.cache_aware = True
     llm.model = "deepseek-v4-flash"
     chunk = MagicMock()
     chunk.choices = [MagicMock()]

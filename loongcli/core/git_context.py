@@ -36,6 +36,9 @@ class GitContext:
             lines.append("- 最近提交:")
             for c in self.recent_commits[:8]:
                 lines.append(f"  {c}")
+        # 快照标签：git 状态只在系统提示构建时采集，不随本会话操作实时更新——
+        # 长会话后 dirty 清单几乎必然过时，不标注模型会把旧快照当现实。
+        lines.append("- 以上 git 状态是采集时的快照，不随本会话操作实时更新；需要当前状态时用 git status 查询")
         return "\n".join(lines)
 
 

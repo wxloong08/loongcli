@@ -14,7 +14,7 @@ def test_prompt_contains_all_sections():
     assert "# 谨慎操作" in prompt
     assert "# 使用工具" in prompt
     assert "# 计划（Plan）使用" in prompt
-    assert "# 技能执行规则" in prompt
+    assert "浓缩指令集" in prompt  # skill 段不混为普通规则
     assert "# 外部工具（MCP）" in prompt
     assert "# 交流风格" in prompt
     assert "# 环境" in prompt
@@ -48,6 +48,35 @@ def test_prompt_includes_mcp():
     assert "searxng" in prompt
 
 
+def test_prompt_includes_skills_listing():
+    skills = MagicMock(spec=["build_listing"])
+    skills.build_listing.return_value = "debug, tdd"
+    prompt = get_system_prompt(model="deepseek-v4-flash", skills=skills)
+    assert "# 可用技能" in prompt
+    assert "debug, tdd" in prompt
+    # 对模型隐藏 disable-model-invocation 的技能——清单从工具 description 挪来时语义不变
+    skills.build_listing.assert_called_once_with(include_model_disabled=False)
+
+
+def test_prompt_no_skills_section_when_empty():
+    skills = MagicMock(spec=["build_listing"])
+    skills.build_listing.return_value = ""
+    prompt = get_system_prompt(model="deepseek-v4-flash", skills=skills)
+    assert "# 可用技能" not in prompt
+
+
+def test_prompt_skills_section_position():
+    # 按易变性排序：MCP（手写极少变）→ 技能清单（手动增删才变）→ 记忆索引（自动抽取会变）
+    memory = MagicMock(spec=["get_index"])
+    memory.get_index.return_value = "- [user-role](user-role.md) — Python developer"
+    mcp = MagicMock()
+    mcp.get_tool_descriptions.return_value = "MCP: searxng tools available"
+    skills = MagicMock(spec=["build_listing"])
+    skills.build_listing.return_value = "debug, tdd"
+    prompt = get_system_prompt(model="deepseek-v4-flash", memory=memory, mcp=mcp, skills=skills)
+    assert prompt.index("searxng") < prompt.index("# 可用技能") < prompt.index("记忆索引")
+
+
 def test_prompt_no_memory_when_empty():
     memory = MagicMock(spec=["get_index"])
     memory.get_index.return_value = ""
@@ -63,9 +92,9 @@ def test_prompt_environment_has_cwd():
 
 def test_prompt_skill_discipline():
     prompt = get_system_prompt(model="deepseek-v4-flash")
-    assert "技能执行规则" in prompt
-    assert "严格遵循" in prompt
-    assert "references/" in prompt
+    assert "浓缩指令集" in prompt  # 不再用 CC 标签而是自然段
+    assert "第一件事" in prompt  # 读取 skill 是硬顺序——调其他工具之前
+    assert "SKILL.md" in prompt
 
 
 def test_prompt_mcp_usage():

@@ -16,9 +16,11 @@ from loongcli.tools.base import Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-_RETRYABLE = (OSError, ConnectionError, TimeoutError, asyncio.TimeoutError, EOFError)
+_RETRYABLE = (OSError, ConnectionError, TimeoutError, EOFError)
 _MAX_RETRIES = 2
 _BACKOFF_BASE = 1.0
+# 单次工具调用超时：挂死的 MCP server 工具不会无限阻塞整轮 agent。
+_CALL_TIMEOUT = 120
 
 
 class MCPTool(Tool):
@@ -37,7 +39,10 @@ class MCPTool(Tool):
         last_err: Exception | None = None
         for attempt in range(_MAX_RETRIES + 1):
             try:
-                result = await self._session.call_tool(self._remote_name, arguments=kwargs)
+                result = await asyncio.wait_for(
+                    self._session.call_tool(self._remote_name, arguments=kwargs),
+                    timeout=_CALL_TIMEOUT,
+                )
                 parts: list[str] = []
                 images: list[tuple[str, str]] = []
                 for block in result.content:
@@ -62,6 +67,9 @@ class MCPTool(Tool):
                 if images:
                     return make_image_sentinel(images, text="\n".join(parts))
                 return "\n".join(parts) if parts else "(empty result)"
+            except asyncio.TimeoutError:
+                # 超时不重试（重试只会再等一个完整超时），直接明确报错
+                return f"MCP tool timeout ({self.name}): 超过 {_CALL_TIMEOUT}s 未返回"
             except McpError:
                 raise
             except _RETRYABLE as e:

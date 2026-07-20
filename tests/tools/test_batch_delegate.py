@@ -177,17 +177,138 @@ class TestBatchDelegateTool:
         assert data["results"][0]["status"] == "completed"
         assert data["results"][1]["status"] == "failed"
         assert data["results"][2]["status"] == "completed"
+        # 合成纪律标记：失败=结论不可依赖，确定性文本挂在失败发生点
+        assert "结论不可依赖" in data["warning"]
+        assert "禁止用假设" in data["warning"]
 
     @pytest.mark.asyncio
     @patch("loongcli.tools.batch_delegate.Compactor")
     @patch("loongcli.tools.batch_delegate.AgentLoop", SlowAgent)
-    async def test_timeout(self, _mock_compactor):
+    async def test_stalled_subagent_counted_failed(self, _mock_compactor):
+        # 探测窗口内零进展 = 真卡住 → 失败（只有这种超时算失败）
         tool, _ = self._make_tool()
-        result = await tool.execute(tasks=[{"prompt": "slow"}], timeout=0.1)
+        tool.PROBE_INITIAL = 0.05
+        result = await tool.execute(tasks=[{"prompt": "slow"}], timeout=0.05)
         data = json.loads(result)
         assert data["failed"] == 1
+        assert data["timed_out"] == 0
         assert data["results"][0]["status"] == "failed"
-        assert "超时" in data["results"][0]["result"]
+        assert "零进展" in data["results"][0]["result"]
+        assert "失败或卡死" in data["warning"]
+
+    @pytest.mark.asyncio
+    @patch("loongcli.tools.batch_delegate.Compactor")
+    async def test_progressing_subagent_extended_then_timeout(self, _mock_compactor):
+        # 仍在推进（消息数增长）的任务不被当卡死杀掉，续命到硬顶后标 timeout 非失败
+        class BusyAgent:
+            def __init__(self, **kwargs):
+                self.task = None
+                self.messages = []
+                self.conversation_store = MagicMock(
+                    base_dir="/tmp/tasks", session_id="busy00000001")
+
+            async def run_stream(self, prompt):
+                while True:
+                    await asyncio.sleep(0.01)
+                    self.messages.append(
+                        {"role": "assistant", "content": f"step {len(self.messages)}"})
+                yield AgentDone(content="unreachable")  # pragma: no cover
+
+        with patch("loongcli.tools.batch_delegate.AgentLoop", BusyAgent):
+            tool, _ = self._make_tool()
+            tool.PROBE_INITIAL = 0.03
+            result = await tool.execute(tasks=[{"prompt": "busy"}], timeout=0.05)
+
+        data = json.loads(result)
+        assert data["timed_out"] == 1
+        assert data["failed"] == 0
+        assert data["results"][0]["status"] == "timeout"
+        assert "硬顶" in data["results"][0]["result"]
+        assert "超时不是失败" in data["warning"]
+
+    @pytest.mark.asyncio
+    @patch("loongcli.tools.batch_delegate.Compactor")
+    async def test_timeout_salvages_partial_work(self, _mock_compactor):
+        # 打捞：取消前的工具调用清单（含 URL）+ 最后输出 + trace 路径必须回传，
+        # 不再颗粒无收（gomami 事故：8 篇已读测评帖被"超时取消"四字吞掉）
+        class SlowAgentWithWork:
+            def __init__(self, **kwargs):
+                self.task = None
+                self.messages = [
+                    {"role": "user", "content": "调研"},
+                    {"role": "assistant", "content": "", "tool_calls": [{
+                        "id": "t1", "type": "function",
+                        "function": {"name": "url_read",
+                                     "arguments": '{"url": "https://nodeseek.com/post-1"}'},
+                    }]},
+                    {"role": "tool", "tool_call_id": "t1", "content": "帖子正文"},
+                    {"role": "assistant", "content": "已读完第一篇，正在继续"},
+                ]
+                self.conversation_store = MagicMock(
+                    base_dir="/tmp/tasks", session_id="abc123def456")
+
+            async def run_stream(self, prompt):
+                await asyncio.sleep(10)
+                yield AgentDone(content="unreachable")
+
+        with patch("loongcli.tools.batch_delegate.AgentLoop", SlowAgentWithWork):
+            tool, _ = self._make_tool()
+            tool.PROBE_INITIAL = 0.05
+            result = await tool.execute(tasks=[{"prompt": "slow"}], timeout=0.05)
+
+        data = json.loads(result)
+        salvaged = data["results"][0]["result"]  # 静态消息无增长 → 卡死路径，成果仍打捞
+        assert data["results"][0]["status"] == "failed"
+        assert "url_read" in salvaged
+        assert "https://nodeseek.com/post-1" in salvaged
+        assert "已读完第一篇" in salvaged
+        assert "abc123def456.json" in salvaged  # trace 路径指引
+
+    @pytest.mark.asyncio
+    @patch("loongcli.tools.batch_delegate.Compactor")
+    @patch("loongcli.tools.batch_delegate.AgentLoop", FakeAgent)
+    async def test_no_warning_when_all_completed(self, _mock_compactor):
+        tool, _ = self._make_tool()
+        result = await tool.execute(tasks=[{"prompt": "a"}, {"prompt": "b"}])
+        data = json.loads(result)
+        assert "warning" not in data
+        assert data["timed_out"] == 0
+
+    def test_subagent_prompt_has_data_discipline(self):
+        from loongcli.tools.agent_tool import SUBAGENT_SYSTEM_PROMPT
+        assert "工具结果为准" in SUBAGENT_SYSTEM_PROMPT
+        assert "未知" in SUBAGENT_SYSTEM_PROMPT
+
+    def test_coordinator_prompt_has_synthesis_discipline(self):
+        from loongcli.tools.agent_tool import COORDINATOR_SYSTEM_PROMPT
+        assert "合成纪律" in COORDINATOR_SYSTEM_PROMPT
+        assert "不要用你的印象或典型值补齐" in COORDINATOR_SYSTEM_PROMPT
+
+    @pytest.mark.asyncio
+    @patch("loongcli.tools.batch_delegate.Compactor")
+    async def test_hook_manager_forwarded_to_subagent(self, _mock_compactor):
+        # hook 当安全闸用时子代理不能是旁路——注入的 hook_manager 必须进 AgentServices
+        captured = {}
+
+        class CapturingAgent(FakeAgent):
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+                super().__init__(**kwargs)
+
+        sentinel = object()
+        with patch("loongcli.tools.batch_delegate.AgentLoop", CapturingAgent):
+            tm = TaskManager()
+            registry = ToolRegistry()
+            tool = BatchDelegateTool(
+                task_manager=tm,
+                llm=MagicMock(),
+                parent_registry=registry,
+                security=MagicMock(),
+                hook_manager=sentinel,
+            )
+            await tool.execute(tasks=[{"prompt": "x"}])
+
+        assert captured["services"].hook_manager is sentinel
 
     @pytest.mark.asyncio
     @patch("loongcli.tools.batch_delegate.Compactor")

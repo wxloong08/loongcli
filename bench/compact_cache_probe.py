@@ -1,18 +1,20 @@
-"""验证 snip/micro_compact 对「摘要调用」缓存的影响。
+"""【存档探针，不可再运行】验证 snip/micro_compact 对「摘要调用」缓存的影响。
 
-论点：compact 的摘要调用如果直接喂完整历史，能命中主对话上一轮积累的前缀缓存；
-而 snip+micro_compact 删改了历史，破坏前缀连续性，反而命中不了——在 DeepSeek
-命中/未命中差两个数量级时，这个"减 token"很可能是净亏。
+结论（2026-07 真机）：B（完整历史吃缓存）比 A（snip+micro"省 token"）便宜 ~22 倍、
+命中率 98% vs 12%——这个结论直接导致 2026-07-19 压缩金字塔（collapse/micro_compact）
+被整体删除。本探针的被测对象已不存在，脚本保留作证据链，见 interview-qa Q43。
 
-实验：
+原实验设计：
 1. 预热——发一次完整历史（模拟 compact 触发前、主对话上一轮已发过并被缓存）
-2. A（现状）：snip + micro_compact 处理后的历史 + COMPACT_INSTRUCTION，发出，读真实命中
-3. B（不删）：完整历史 + COMPACT_INSTRUCTION，发出，读真实命中
-对比 A vs B 的命中率与成本（这才是同一次 compact 两种做法的真实代价）。
-
-用法：python bench/compact_cache_probe.py
+2. A（旧现状）：snip + micro_compact 处理后的历史 + COMPACT_INSTRUCTION，读真实命中
+3. B（不删）：完整历史 + COMPACT_INSTRUCTION，读真实命中
 """
 from __future__ import annotations
+
+raise SystemExit(
+    "已存档：micro_compact 已于 2026-07-19 随压缩金字塔删除（本探针的结论即删除依据），"
+    "不可再运行。结论与叙事见 tasks/interview-qa.md Q43。"
+)
 
 import asyncio
 import json

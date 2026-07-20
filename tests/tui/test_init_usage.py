@@ -118,7 +118,7 @@ async def test_fast_switches_endpoint_from_qwen_main():
     assert llm.model == "deepseek-v4-flash"
     assert "deepseek" in llm.base_url
     assert llm.vision is False          # vision 不残留
-    assert llm.cache_aware is True      # provider_type 已重推断
+    assert llm._provider_type == "deepseek"  # provider_type 已重推断（cache_aware 属性已删）
 
 
 @pytest.mark.asyncio

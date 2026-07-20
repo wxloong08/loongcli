@@ -15,8 +15,11 @@ from loongcli.memory.conversation import (
     load_session,
 )
 from loongcli.memory.markdown_store import MEMORY_TYPES, MarkdownMemoryStore
+from loongcli.memory.memory_router import MemoryRouter
 
-_SESSION_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+# loongcli 原生 session ID 是 12 位 hex；从 Claude Code 迁移的是完整 UUID（32 位 hex
+# 去连字符）。放宽到 12-36 位覆盖两种来源——安全校验不靠长度，slug 校验已防路径遍历。
+_SESSION_ID_RE = re.compile(r"^[0-9a-f]{12,36}$")
 _SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _MEMORY_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -31,10 +34,12 @@ def _err(status: int, message: str) -> tuple[int, dict]:
 class WebAPI:
     def __init__(
         self,
-        memory_store: MarkdownMemoryStore | None = None,
+        memory_store: MarkdownMemoryStore | MemoryRouter | None = None,
         projects_root: Path | None = None,
         current_dir: Path | None = None,
     ):
+        # router 注入时 list_all/load 会带 scope 字段（global/project）供前端区分来源；
+        # 兜底裸 store 时无 scope，前端按缺省处理
         self.memory = memory_store or MarkdownMemoryStore()
         self.projects_root = projects_root
         self.current_dir = current_dir

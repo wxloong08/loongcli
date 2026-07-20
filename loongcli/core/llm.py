@@ -4,6 +4,7 @@ import logging
 import random
 from typing import AsyncIterator
 
+import httpx
 from openai import AsyncOpenAI
 
 from loongcli.core.messages import inline_image_refs
@@ -13,6 +14,12 @@ logger = logging.getLogger(__name__)
 # 单次请求的图片配额。图片 token 成本高且不可部分截断，设上限防失控累积/巨图。
 MAX_IMAGES_PER_REQUEST = 20
 MAX_IMAGE_DATA_URL_CHARS = 15 * 1024 * 1024  # ~15MB base64 data URL（约 11MB 原图）
+
+# openai SDK 默认 timeout 600s：流挂死（服务端停发但 TCP 未断）要等 10 分钟
+# 才报错，TUI 体感就是"卡住"。read 超时是相邻 chunk 的间隔上限——thinking
+# 阶段 reasoning delta 也在持续流动，180s 收不到任何字节必属挂死；connect
+# 收紧到 10s 早失败早重试。
+_TIMEOUT = httpx.Timeout(180.0, connect=10.0)
 
 
 def count_and_validate_images(messages: list[dict]) -> int:
@@ -54,7 +61,7 @@ class LLMClient:
         provider_type: str = "",
         vision: bool = False,
     ):
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=_TIMEOUT)
         self.model = model
         self.base_url = base_url
         self._api_key = api_key
@@ -82,7 +89,7 @@ class LLMClient:
         new_key = api_key or self._api_key
         new_url = base_url or self.base_url
         if new_url != self.base_url or new_key != self._api_key:
-            self.client = AsyncOpenAI(api_key=new_key, base_url=new_url)
+            self.client = AsyncOpenAI(api_key=new_key, base_url=new_url, timeout=_TIMEOUT)
             self.base_url = new_url
             self._api_key = new_key
         self.model = model
@@ -90,28 +97,9 @@ class LLMClient:
         if vision is not None:
             self.vision = vision
 
-    @property
-    def cache_aware(self) -> bool:
-        """该 provider 是否有强自动前缀缓存，值得「保前缀稳定 > 减 token」。
-
-        开启后压缩走缓存友好路径（跳过 collapse、摘要优先喂完整历史）；其他 provider
-        默认 False，走完整压缩金字塔（减 token）。已开：
-        - DeepSeek：自动硬盘缓存，命中远便宜于未命中（早期实测 ~22x 省）。
-        - Qwen(dashscope)：隐式缓存自动开启，2026-07-03 真机实测（tests/e2e_cache.py）：
-          稳态命中 72%、命中按输入价 20% 计（稳态输入成本 ≈ 原价 42%）、位置敏感——
-          collapse/snip 改写历史即全部击穿，故同样适用保前缀策略。
-        Kimi/GLM 也有隐式缓存但未接入未实测，接入后跑 e2e_cache 再开。
-
-        判断同时看 base_url 推断的 provider_type 和 model 名——后者是为了兜住「走代理 base_url
-        访问」的场景：那时 base_url 推断的 provider_type 会误判，但 model 名通常仍带家族前缀，
-        靠它避免静默退化回完整金字塔。"""
-        pt = self._provider_type
-        model = self.model.lower()
-        return (
-            pt in ("deepseek", "qwen")
-            or model.startswith("deepseek")
-            or model.startswith("qwen")
-        )
+    # cache_aware 属性已删（2026-07-19）：曾用于「压缩金字塔 vs 保前缀」的 provider 分流，
+    # 金字塔删除后请求路径统一为保前缀发完整历史，分流失去消费者。provider 缓存实测
+    # 结论（DS 1:120、qwen 稳态命中 72%）存档于 tests/e2e_cache.py 与 interview-qa Q43。
 
     def _build_thinking_params(self, kwargs: dict, stream: bool = False) -> None:
         """Inject provider-specific thinking/reasoning parameters."""
@@ -180,12 +168,20 @@ class LLMClient:
 
         last_error: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
+            yielded = False
             try:
                 stream = await self.client.chat.completions.create(**kwargs)
                 async for chunk in stream:
+                    yielded = True
                     yield chunk
                 return
             except Exception as e:
+                if yielded:
+                    # 流已开始产出：部分 chunk 已被消费方处理（渲染上屏、灌进
+                    # collector），从头重试会把新流重复叠进同一消费方——正文重复、
+                    # 工具参数拼接损坏。只能上抛，由 agent 层显式报错给用户。
+                    logger.warning("LLM 流中断（已产出部分 chunk，不可重试）: %s", e)
+                    raise
                 last_error = e
                 logger.warning("LLM request failed (attempt %d/%d): %s", attempt, self.max_retries, e)
                 if attempt < self.max_retries:

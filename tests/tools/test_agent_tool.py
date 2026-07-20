@@ -68,6 +68,34 @@ class TestAgentTool:
         assert captured["interactive"] is False
         assert captured["permission_checker"] is tool._permission_checker
 
+    @pytest.mark.asyncio
+    async def test_hook_manager_forwarded_to_subagent(self):
+        """hook 当安全闸用时子代理不能是旁路——注入的 hook_manager 进 AgentServices。"""
+        tm = TaskManager()
+        registry = ToolRegistry()
+        sentinel = object()
+        tool = AgentTool(
+            task_manager=tm,
+            llm=MagicMock(),
+            parent_registry=registry,
+            security=MagicMock(),
+            hook_manager=sentinel,
+        )
+        captured = {}
+
+        class FakeLoop:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        async def fake_create_and_run(prompt, agent_loop, depth, parent_id=None):
+            return Task(prompt=prompt)
+
+        with patch("loongcli.tools.agent_tool.AgentLoop", FakeLoop):
+            tm.create_and_run = fake_create_and_run
+            await tool.execute(prompt="do it", mode="background")
+
+        assert captured["services"].hook_manager is sentinel
+
     def test_build_sub_registry_excludes_blacklisted(self):
         tool, _ = self._make_tool()
         sub = tool._build_sub_registry(None)

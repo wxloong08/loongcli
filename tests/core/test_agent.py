@@ -2,7 +2,7 @@ import asyncio
 import pytest
 import json
 from unittest.mock import MagicMock
-from loongcli.core.agent import AgentLoop, MAX_TOOL_CALLS_PER_TURN, LOOP_DETECT_THRESHOLD
+from loongcli.core.agent import AgentLoop, AgentServices, MAX_TOOL_CALLS_PER_TURN, LOOP_DETECT_THRESHOLD
 from loongcli.core.llm import LLMClient
 from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone, ConfirmRequest, BatchProgress
 from loongcli.tools.base import Tool, ToolRegistry
@@ -594,7 +594,8 @@ async def test_checkpoint_restored_when_modify_tool_raises():
     ckpt.save.return_value = "ckpt-1"
     agent = AgentLoop(
         llm=llm, tool_registry=registry,
-        permission_checker=PermissionChecker(), checkpoint_manager=ckpt,
+        permission_checker=PermissionChecker(),
+        services=AgentServices(checkpoint_manager=ckpt),
     )
 
     async for _ in agent.run_stream("write it"):
@@ -863,7 +864,7 @@ class TestRebuildSystemPrompt:
         agent = AgentLoop(
             llm=llm, tool_registry=registry, permission_checker=checker,
             system_prompt="old prompt",
-            system_prompt_builder=lambda: "new prompt",
+            services=AgentServices(system_prompt_builder=lambda: "new prompt"),
         )
         assert agent.messages[0]["content"] == "old prompt"
         agent._rebuild_system_prompt()
@@ -886,7 +887,7 @@ class TestRebuildSystemPrompt:
         llm = LLMClient(api_key="test")
         agent = AgentLoop(
             llm=llm, tool_registry=registry, permission_checker=checker,
-            system_prompt_builder=lambda: "rebuilt",
+            services=AgentServices(system_prompt_builder=lambda: "rebuilt"),
         )
         agent._rebuild_system_prompt()
         assert len(agent.messages) == 0
@@ -1322,3 +1323,92 @@ def test_abort_turn_without_tool_calls_only_marks():
     agent.abort_turn()
     assert len(agent.messages) == n + 1
     assert agent.messages[-1]["role"] == "user"
+
+
+# --- B2 回归：provider 不回报 usage 时，压缩/collapse 触发依据不塌成 0 ---
+
+def test_effective_prompt_tokens_uses_api_value_when_reported():
+    agent = _loop_agent()
+    agent._last_prompt_tokens = 12345
+    # API 报了真实值就直接用，不去估算
+    assert agent._effective_prompt_tokens() == 12345
+
+
+def test_effective_prompt_tokens_estimates_when_usage_missing():
+    from loongcli.core.compact import _estimate_tokens
+
+    agent = _loop_agent()
+    agent._last_prompt_tokens = 0  # provider 未回报 usage（Ollama / 部分代理端点）
+    agent.messages.append({"role": "user", "content": "x" * 4000})
+    # 回退到字符估算而非塌成 0——否则自动压缩与 collapse 永不触发
+    est = agent._effective_prompt_tokens()
+    assert est > 0
+    assert est == _estimate_tokens(agent.messages)
+
+
+# --- 空响应回归（2026-07-17 事故：只吐 thinking、正文零字节，TUI 静默收场） ---
+
+
+def _make_empty_thinking_chunk():
+    """DeepSeek reasoner 偶发异常帧：有 reasoning_content、无 content、无工具调用。"""
+    chunk = MagicMock()
+    chunk.choices = [MagicMock()]
+    chunk.choices[0].delta.content = None
+    chunk.choices[0].delta.tool_calls = None
+    chunk.choices[0].delta.reasoning_content = "在想"
+    chunk.choices[0].finish_reason = "stop"
+    chunk.usage = None
+    return chunk
+
+
+@pytest.mark.asyncio
+async def test_agent_empty_response_retries_then_warns():
+    """空响应：原地重试一次，仍空则显式告警（displayed=False），空消息不入历史。"""
+    llm = LLMClient(api_key="test")
+    calls = {"n": 0}
+
+    async def mock_stream(**kwargs):
+        calls["n"] += 1
+        yield _make_empty_thinking_chunk()
+
+    llm.chat_stream = mock_stream
+    agent = AgentLoop(llm=llm, tool_registry=ToolRegistry(), permission_checker=PermissionChecker())
+
+    events = [e async for e in agent.run_stream("hi")]
+
+    assert calls["n"] == 2  # 原始一次 + 重试一次，不多不少
+    done = [e for e in events if isinstance(e, AgentDone)][-1]
+    assert done.displayed is False  # 从未流式上屏，TUI 必须补显
+    assert "未产生正文" in done.content
+    assert "finish_reason=stop" in done.content
+    # 空 assistant 消息不得写入历史（污染上下文）
+    assert not [
+        m for m in agent.messages
+        if m.get("role") == "assistant" and not (m.get("content") or "").strip()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_empty_response_then_success():
+    """第一次空、重试成功：正常收场（displayed=True），无告警。"""
+    llm = LLMClient(api_key="test")
+    calls = {"n": 0}
+    text_chunks = _make_text_chunks(["好的"])
+
+    async def mock_stream(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield _make_empty_thinking_chunk()
+        else:
+            for c in text_chunks:
+                yield c
+
+    llm.chat_stream = mock_stream
+    agent = AgentLoop(llm=llm, tool_registry=ToolRegistry(), permission_checker=PermissionChecker())
+
+    events = [e async for e in agent.run_stream("hi")]
+
+    assert calls["n"] == 2
+    done = [e for e in events if isinstance(e, AgentDone)][-1]
+    assert done.displayed is True  # 正文已流式上屏，TUI 不重复打印
+    assert done.content == "好的"

@@ -156,7 +156,7 @@ def test_modify_tools_constant():
 
 # --- AgentLoop integration ---
 
-from loongcli.core.agent import AgentLoop
+from loongcli.core.agent import AgentLoop, AgentServices
 from loongcli.core.llm import LLMClient
 from loongcli.tools.base import ToolRegistry
 from loongcli.security.permissions import PermissionChecker
@@ -187,7 +187,7 @@ async def test_agent_no_checkpoint_without_tool_calls():
         tool_registry=ToolRegistry(),
         permission_checker=PermissionChecker(),
         system_prompt="test",
-        checkpoint_manager=ckpt,
+        services=AgentServices(checkpoint_manager=ckpt),
     )
 
     async def mock_stream(**kwargs):

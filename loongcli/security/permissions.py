@@ -20,9 +20,17 @@ class Decision(Enum):
 
 CATASTROPHIC_PATTERNS = [
     (re.compile(r"\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|.*-rf\s+)[/\\](\s|$)"), "递归删除根目录"),
+    # rm -rf /*、rm -rf /. —— 通配/点号使根目录内容被清空，旧规则要求 / 后是空白/结尾故漏
+    (re.compile(r"\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|.*-rf\s+)[/\\][.*]"), "递归删除根目录内容"),
     (re.compile(r"\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|.*-rf\s+)/[a-zA-Z]+\s*$"), "递归删除顶级目录"),
     (re.compile(r"\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|.*-rf\s+)~(\s|$)"), "递归删除家目录"),
+    # rm -rf ~/ 及 ~/子路径 —— 旧规则只认裸 ~，~/ 后跟斜杠时漏
+    (re.compile(r"\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|.*-rf\s+)~[/\\]"), "递归删除家目录"),
+    # --no-preserve-root：显式解除 GNU rm 对根目录的保护，几乎只为删根
+    (re.compile(r"\brm\b.*--no-preserve-root"), "解除根目录保护的递归删除"),
     (re.compile(r"\brm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+|.*-rf\s+)[A-Z]:\\(\s|$)", re.IGNORECASE), "递归删除磁盘根目录"),
+    # find <根/家> ... -delete：绕过 rm 的另一条整树删除路径
+    (re.compile(r"\bfind\s+[/~]\S*.*\s-delete\b"), "find 递归删除"),
     (re.compile(r"\bformat\s+[A-Z]:", re.IGNORECASE), "格式化磁盘"),
     (re.compile(r"\bdd\s+.*of\s*=\s*/dev/[a-z]", re.IGNORECASE), "覆写磁盘设备"),
     (re.compile(r"\bmkfs\b", re.IGNORECASE), "格式化文件系统"),
@@ -68,9 +76,10 @@ ALWAYS_CONFIRM_GIT_SUBS = frozenset({
 })
 
 # 能在首 token 之后追加或重定向出「第二条命令」的操作符——它们可绕过对首 token
-# 的前缀/白名单匹配。命令替换（$(...)、`...`、<(...)）与重定向（>、<）一律不放行：
-# 像 `echo ` 这种「安全前缀」照样能写文件（echo x > f）或执行代码（echo $(rm -rf x)）。
-_SUBSTITUTION_RE = re.compile(r"\$\(|`|<\(|>|<")
+# 的前缀/白名单匹配。命令替换（$(...)、`...`、<(...)）与文件重定向（>、<）一律不放行。
+# 例外：>&N / N>&M 是 fd 重定向（如 2>&1 合并 stderr），不写文件、不藏第二条命令——否则
+# 带 2>&1 的日常命令每次必弹确认且会话学习无法生效（短路在前，见 _check_shell）。
+_SUBSTITUTION_RE = re.compile(r"\$\(|`|<\(|>(?![&])|<")
 # 用于把一条命令按链式操作符拆成可逐段独立校验的子命令。
 _CHAIN_SPLIT_RE = re.compile(r"&&|\|\||;|\|")
 
@@ -168,8 +177,11 @@ class PermissionChecker:
         # 计划审批选「批准并自动接受编辑」后置位：项目外非敏感写免确认（敏感路径底线不动）。
         # 注意 loongcli 项目内写本就 ALLOW，此标志的增量只是项目外路径。
         self.auto_accept_edits: bool = False
+        # 实例私有的安全前缀表——不改模块全局 SAFE_SHELL_PREFIXES，避免多实例/测试间
+        # 追加泄漏与重复累积（子代理共享同一 checker 时也只在此实例内生效）。
+        self._safe_prefixes: list[str] = list(SAFE_SHELL_PREFIXES)
         if extra_safe_prefixes:
-            SAFE_SHELL_PREFIXES.extend(extra_safe_prefixes)
+            self._safe_prefixes.extend(extra_safe_prefixes)
 
     def record_approval(self, tool_name: str, args: dict, is_mcp: bool = False) -> None:
         """记录一次用户批准，使同类调用本会话内不再重复询问。
@@ -236,7 +248,20 @@ class PermissionChecker:
     def _shell_fragment_safe(self, command: str) -> bool:
         """单条（未链式）命令命中安全前缀或会话白名单则返回 True。"""
         cmd_stripped = command.strip()
-        for prefix in SAFE_SHELL_PREFIXES:
+        # 敏感路径旁路封堵：cat/head/tail 等安全前缀不能成为读 .ssh/.env/credentials
+        # 的免确认通道（read_file 工具会拦，shell 也必须拦，否则子代理可借 `cat ~/.ssh/id_rsa`
+        # 绕过确认外泄密钥）。按 token 逐个校验——SENSITIVE_PATHS 锚定在 ^/分隔符，整串
+        # search 会漏掉裸文件名（如 `tail .env`，.env 前是空格），拆成 token 后 `.env`
+        # 本身即命中 `^\.env$`。任一 token 命中敏感即不走快路径，交回确认层。
+        try:
+            arg_tokens = shlex.split(cmd_stripped, posix=False)
+        except ValueError:
+            arg_tokens = cmd_stripped.split()
+        for tok in arg_tokens:
+            for pattern in SENSITIVE_PATHS:
+                if pattern.search(tok):
+                    return False
+        for prefix in self._safe_prefixes:
             if cmd_stripped == prefix.strip() or cmd_stripped.startswith(prefix):
                 return True
         key, always_confirm = _shell_pattern(command)

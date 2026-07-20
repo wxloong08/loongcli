@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pathlib import Path
 from loongcli.core.config import Config
 from loongcli.core.llm import LLMClient
-from loongcli.core.agent import AgentLoop
+from loongcli.core.agent import AgentLoop, AgentServices
 from loongcli.tools.base import ToolRegistry
 from loongcli.tools.read_file import ReadFileTool
 from loongcli.tools.shell import ShellTool
@@ -47,7 +47,7 @@ async def _run_skill_test(prompt: str, expect_skill: str | None):
         tool_registry=registry,
         permission_checker=perm,
         system_prompt="你是一个通用 AI Agent。简洁回答，不超过 200 字。",
-        skill_registry=skill_reg,
+        services=AgentServices(skill_registry=skill_reg),
     )
 
     matched = skill_reg.match(prompt)

@@ -13,42 +13,8 @@ def test_llm_client_custom_model():
     assert client.model == "deepseek-v4-pro"
 
 
-def test_cache_aware_deepseek_base_url():
-    c = LLMClient(api_key="k", model="deepseek-v4-pro", base_url="https://api.deepseek.com")
-    assert c.cache_aware is True
-
-
-def test_cache_aware_deepseek_model_via_proxy():
-    # 走代理：base_url 不含 deepseek（provider_type 误判成 openai），但 model 名兜住，避免静默退化
-    c = LLMClient(api_key="k", model="deepseek-v4-pro", base_url="https://my-proxy.example.com/v1")
-    assert c.cache_aware is True
-
-
-def test_cache_aware_false_for_non_deepseek():
-    c = LLMClient(api_key="k", model="gpt-4o", base_url="https://api.openai.com/v1")
-    assert c.cache_aware is False
-
-
-def test_cache_aware_qwen_base_url():
-    # 2026-07-03 真机实测（tests/e2e_cache.py）：隐式缓存稳态命中 72%、命中 2 折、位置敏感
-    c = LLMClient(
-        api_key="k", model="qwen3.7-plus",
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-    )
-    assert c.cache_aware is True
-
-
-def test_cache_aware_qwen_model_via_proxy():
-    c = LLMClient(api_key="k", model="qwen3.7-plus", base_url="https://my-proxy.example.com/v1")
-    assert c.cache_aware is True
-
-
-def test_cache_aware_false_for_untested_providers():
-    # Kimi/GLM 有隐式缓存但未接入未实测——接入后跑 e2e_cache 再开
-    c = LLMClient(api_key="k", model="kimi-k2.6", base_url="https://api.moonshot.cn/v1")
-    assert c.cache_aware is False
-    c = LLMClient(api_key="k", model="glm-5.2", base_url="https://open.bigmodel.cn/api/paas/v4")
-    assert c.cache_aware is False
+# cache_aware 属性测试已删（2026-07-19）：属性随压缩金字塔一起移除（请求路径统一
+# 保前缀发完整历史，分流无消费者）。provider 缓存实测结论存档于 tests/e2e_cache.py。
 
 
 @pytest.mark.asyncio
@@ -103,6 +69,44 @@ async def test_chat_stream_passes_tools():
     call_kwargs = client.client.chat.completions.create.call_args[1]
     assert call_kwargs["tools"] == tools
     assert call_kwargs["stream"] is True
+
+
+def test_client_timeout_configured():
+    """SDK 默认 timeout 600s——流挂死要等 10 分钟才报错，体感"卡住"。
+    必须显式收紧：read 180s（相邻 chunk 间隔上限）、connect 10s。"""
+    c = LLMClient(api_key="test-key")
+    assert c.client.timeout.read == 180.0
+    assert c.client.timeout.connect == 10.0
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_midstream_break_reraises_without_retry():
+    """流已产出部分 chunk 后断开：必须上抛而非从头重试——部分 chunk 已被
+    消费方渲染/收集，从头重试会把新流重复叠进同一消费方（正文重复、
+    工具参数拼接损坏，"响应一部分然后没了"的元凶之一）。"""
+    client = LLMClient(api_key="test-key", max_retries=3, retry_delay=0.01)
+
+    async def broken_stream():
+        yield MagicMock(choices=[MagicMock(delta=MagicMock(content="部分", tool_calls=None))])
+        raise ConnectionError("connection lost")
+
+    call_count = 0
+
+    async def create(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return broken_stream()
+
+    client.client = AsyncMock()
+    client.client.chat.completions.create = create
+
+    received = []
+    with pytest.raises(ConnectionError):
+        async for chunk in client.chat_stream(messages=[{"role": "user", "content": "hi"}]):
+            received.append(chunk)
+
+    assert len(received) == 1  # 断前的 chunk 已交付给消费方
+    assert call_count == 1  # 没有从头重试
 
 
 @pytest.mark.asyncio

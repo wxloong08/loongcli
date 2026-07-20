@@ -30,6 +30,14 @@ class TestCatastrophicBlock:
         "dd if=/dev/zero of=/dev/sda",
         "mkfs.ext4 /dev/sda1",
         ":(){ :|:& };:",
+        # 新补的常见绕过变体（旧规则漏）
+        "rm -rf /*",
+        "rm -rf /.",
+        "rm -rf ~/",
+        "rm -rf ~/Documents",
+        "rm --no-preserve-root -rf /",
+        "find / -delete",
+        "find ~/ -type f -delete",
     ])
     def test_catastrophic_denied_in_default(self, cmd):
         decision, _ = self.default.check_tool("shell", {"command": cmd})
@@ -37,12 +45,63 @@ class TestCatastrophicBlock:
 
     @pytest.mark.parametrize("cmd", [
         "rm -rf /",
+        "rm -rf /*",
+        "rm -rf ~/",
+        "find / -delete",
         "format C:",
         "dd if=/dev/zero of=/dev/sda",
     ])
     def test_catastrophic_denied_even_in_skip(self, cmd):
         decision, _ = self.skip.check_tool("shell", {"command": cmd})
         assert decision == Decision.DENY
+
+
+class TestSensitiveShellReadBypass:
+    """安全前缀（cat/head/tail）不得成为读敏感文件的免确认旁路。"""
+
+    def setup_method(self):
+        self.checker = PermissionChecker(PermissionMode.DEFAULT)
+
+    @pytest.mark.parametrize("cmd", [
+        "cat ~/.ssh/id_rsa",
+        "head ~/.aws/credentials",
+        "tail .env",
+        "cat project/.env",
+    ])
+    def test_sensitive_read_via_shell_confirms(self, cmd):
+        decision, _ = self.checker.check_tool("shell", {"command": cmd})
+        assert decision == Decision.CONFIRM
+
+    def test_nonsensitive_read_still_allowed(self):
+        decision, _ = self.checker.check_tool("shell", {"command": "cat README.md"})
+        assert decision == Decision.ALLOW
+
+
+def test_extra_safe_prefixes_do_not_leak_across_instances():
+    """extra_safe_prefixes 存实例属性，不污染模块全局或其他实例。"""
+    c1 = PermissionChecker(PermissionMode.DEFAULT, extra_safe_prefixes=["mytool "])
+    c2 = PermissionChecker(PermissionMode.DEFAULT)
+    assert c1.check_tool("shell", {"command": "mytool run"})[0] == Decision.ALLOW
+    assert c2.check_tool("shell", {"command": "mytool run"})[0] == Decision.CONFIRM
+
+
+# ── 重定向假阳性：2>&1 是 fd 合并，不是文件重定向 ────────────────────
+
+def test_stderr_redirect_2_gt_1_not_blocked():
+    """2>&1 只是合并 stderr 到 stdout，不应触发重定向拦截。"""
+    checker = PermissionChecker(PermissionMode.DEFAULT)
+    cmd = "python boss_api.py chatlist 2>&1"
+    decision, reason = checker.check_tool("shell", {"command": cmd})
+    # 不应因重定向被拦（python 首 token 走确认层或会话学习，不走 DENY）
+    assert "重定向" not in reason  # 不是假阳性的重定向拦截
+
+
+def test_file_redirect_gt_file_still_caught():
+    """> file 文件重定向仍然会被拦截。"""
+    checker = PermissionChecker(PermissionMode.DEFAULT)
+    cmd = "echo hello > output.txt"
+    decision, reason = checker.check_tool("shell", {"command": cmd})
+    assert "重定向" in reason
 
 
 # ── Shell whitelist ─────────────────────────────────────────────────

@@ -59,71 +59,16 @@ TOOL_RESULT_PLACEHOLDER = "[工具已执行，结果见摘要]"
 SNIP_AGE_THRESHOLD = 20
 SNIP_MARKER = "[snip] 已删除 {count} 条远古消息，保留最近 {kept} 轮对话"
 
-# --- micro_compact: pre-LLM cleanup of old reclaimable tool results ---
-
-RECLAIMABLE_TOOLS = frozenset({"read_file", "shell", "grep", "glob", "write_file", "edit_file"})
-MICRO_COMPACT_KEEP_RECENT = 5
-CLEARED_PLACEHOLDER = "[工具结果已清理，如需内容请重新调用]"
-
-
-def _build_tool_call_index(messages: list[dict]) -> dict[str, str]:
-    """Build mapping from tool_call_id -> tool_name by scanning assistant messages."""
-    index: dict[str, str] = {}
-    for msg in messages:
-        if msg.get("role") == "assistant":
-            for tc in msg.get("tool_calls") or []:
-                tc_id = tc.get("id", "")
-                tc_name = tc.get("function", {}).get("name", "")
-                if tc_id and tc_name:
-                    index[tc_id] = tc_name
-    return index
-
-
-def micro_compact(messages: list[dict]) -> list[dict]:
-    """Clear old reclaimable tool results, keeping the most recent MICRO_COMPACT_KEEP_RECENT.
-
-    Reclaimable tools are those whose results can be re-obtained by calling the tool again
-    (read_file, shell, grep, glob, write_file, edit_file).
-
-    Non-reclaimable tools (delegate, recall, memorize, plan, task_status, send_message, skill, batch_delegate)
-    are NEVER cleared.
-    """
-    if not messages:
-        return messages
-
-    tc_index = _build_tool_call_index(messages)
-
-    # Find positions of all reclaimable tool results
-    reclaimable_positions: list[int] = []
-    for i, msg in enumerate(messages):
-        if msg.get("role") != "tool":
-            continue
-        tc_id = msg.get("tool_call_id", "")
-        tool_name = tc_index.get(tc_id, "")
-        if tool_name in RECLAIMABLE_TOOLS:
-            reclaimable_positions.append(i)
-
-    # If we have fewer than KEEP_RECENT, nothing to clear
-    if len(reclaimable_positions) <= MICRO_COMPACT_KEEP_RECENT:
-        return messages
-
-    # Clear all but the last KEEP_RECENT
-    to_clear = set(reclaimable_positions[:-MICRO_COMPACT_KEEP_RECENT])
-
-    result = []
-    for i, msg in enumerate(messages):
-        if i in to_clear:
-            result.append({**msg, "content": CLEARED_PLACEHOLDER})
-        else:
-            result.append(msg)
-    return result
-
-
 def snip(messages: list[dict], threshold: int = SNIP_AGE_THRESHOLD) -> tuple[list[dict], int]:
     """Delete ancient messages beyond `threshold` turns, keeping system msg and recent turns.
 
     Returns (new_messages, count_of_removed_messages).
     Zero API cost — just drops old messages and inserts a marker.
+
+    唯一余生用途：Compactor 摘要请求超窗时扔最老的消息保住请求不 400。
+    曾经它是"五层压缩金字塔"的一层（连同 collapse/micro_compact），2026-07-19 金字塔
+    已删——bench 实测保前缀吃缓存比删改历史便宜 ~22x（命中 98% vs 12%），只为省钱
+    改写中段历史在缓存时代是负资产；且五层机制连作者都讲不清（认知负债）。
     """
     if not messages:
         return messages, 0
@@ -274,25 +219,19 @@ class Compactor:
         if mode == "auto":
             instruction += "\n\n不要在摘要中提出新问题或建议用户回答任何内容。摘要应纯粹记录事实，不包含后续提问。"
 
-        # 压缩策略按 provider 缓存特性分流：
-        # - cache-aware（如 DeepSeek，自动前缀缓存命中便宜 ~120x）：优先喂完整历史命中缓存
-        #   （实测比 snip+micro 便宜 ~22x、命中率 98% vs 12%），且摘要不丢早期"主要意图"；
-        #   仅当完整历史会超窗口时才降级 snip+micro_compact 兜底（牺牲缓存换不溢出）。
-        # - 非 cache-aware（无强缓存，减 token 有价值）：走完整金字塔预处理。
-        if self.llm.cache_aware:
-            window = model_context_window(self.llm.model)
-            budget = window - SUMMARY_TOKEN_RESERVE
-            est_tokens = pre_tokens if pre_tokens > 0 else _estimate_tokens(messages)
-            if est_tokens < budget:
-                compact_messages = list(messages) + [{"role": "user", "content": instruction}]
-            else:
-                snipped, _ = snip(list(messages))
-                cleaned = micro_compact(snipped)
-                compact_messages = cleaned + [{"role": "user", "content": instruction}]
+        # 摘要请求的输入：预算内喂完整历史，超预算才 snip 扔最老的保住请求不超窗。
+        # 不再按 provider 分流（2026-07-19 金字塔删除）：主流云厂商全有自动前缀缓存
+        # （DS 1:120、qwen 实测稳态命中 72%），完整历史吃缓存比先删改历史便宜 ~22x
+        # （命中 98% vs 12%）且摘要不丢早期"主要意图"；无缓存 provider（本地模型等）
+        # 的摘要是罕见的保险丝事件，一次全价可接受，不为它维护第二条路径。
+        window = model_context_window(self.llm.model)
+        budget = window - SUMMARY_TOKEN_RESERVE
+        est_tokens = pre_tokens if pre_tokens > 0 else _estimate_tokens(messages)
+        if est_tokens < budget:
+            compact_messages = list(messages) + [{"role": "user", "content": instruction}]
         else:
             snipped, _ = snip(list(messages))
-            cleaned = micro_compact(snipped)
-            compact_messages = cleaned + [{"role": "user", "content": instruction}]
+            compact_messages = snipped + [{"role": "user", "content": instruction}]
 
         collector = StreamCollector()
         async for _ in collector.collect(

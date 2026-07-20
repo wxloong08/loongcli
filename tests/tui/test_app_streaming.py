@@ -28,6 +28,16 @@ class _FakeAgent:
             "completion_tokens": 0, "reasoning_tokens": 0,
         }
         self.cost_tracker = _FakeCost()
+        # 执行中插话队列接口（与 AgentLoop 对齐——轮末收尾会 take）
+        self._queued_user_inputs: list[str] = []
+
+    def queue_user_input(self, text: str) -> None:
+        self._queued_user_inputs.append(text)
+
+    def take_queued_inputs(self) -> list[str]:
+        taken = self._queued_user_inputs
+        self._queued_user_inputs = []
+        return taken
 
     async def run_stream(self, user_input, allowed_tools=None, images=None):
         for e in self._events:

@@ -88,3 +88,27 @@ def test_save_image_session_json_has_no_base64(tmp_path):
     # 往返一致：引用原样恢复
     loaded = store.load(store.session_id)
     assert loaded["messages"][0]["content"][1]["image_url"]["url"] == ref
+
+
+def test_load_corrupt_file_returns_none(tmp_path):
+    """损坏的会话 JSON 不应让 load/resume 抛异常，优雅降级为 None。"""
+    store = ConversationStore(base_dir=tmp_path / "sessions")
+    store.save([{"role": "user", "content": "hi"}])
+    # 模拟非原子写崩溃残留：文件被截断成半个 JSON
+    store.session_path.write_text('{"meta": {"session_id": "x"', encoding="utf-8")
+    assert store.load(store.session_id) is None
+    assert store.resume(store.session_id) is None
+    assert store.resume_structured(store.session_id) is None
+
+
+def test_save_is_atomic_no_tmp_left(tmp_path):
+    """save 走 os.replace 原子落盘，成功后目录里不残留 .tmp。"""
+    sessions = tmp_path / "sessions"
+    store = ConversationStore(base_dir=sessions)
+    store.save([{"role": "user", "content": "hi"}])
+    store.save([{"role": "user", "content": "hi again"}])
+    assert store.session_path.exists()
+    leftover = [p.name for p in sessions.iterdir() if p.name.endswith(".tmp")]
+    assert leftover == []
+    # 内容仍可正常读回
+    assert store.load(store.session_id)["messages"][-1]["content"] == "hi again"

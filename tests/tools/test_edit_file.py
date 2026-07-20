@@ -225,3 +225,30 @@ class TestDiffStats:
 
     def test_both_empty(self):
         assert _diff_stats("", "") == ""
+
+
+# ── 编码一致性（GBK / UTF-8-BOM 往返）──────────────────────────────
+
+@pytest.mark.asyncio
+async def test_edit_gbk_file_preserves_gbk(tool, tmp_path):
+    """GBK 文件能改，且写回仍是 GBK（此前硬编码 utf-8 会 UnicodeDecodeError）。"""
+    f = tmp_path / "gbk.py"
+    f.write_bytes("# 你好\nx = 1\n".encode("gbk"))
+    result = await tool.execute(path=str(f), old_string="x = 1", new_string="x = 2")
+    assert "成功" in result
+    # 仍是合法 GBK 且中文完好、修改生效
+    text = f.read_bytes().decode("gbk")
+    assert "你好" in text
+    assert "x = 2" in text
+
+
+@pytest.mark.asyncio
+async def test_edit_utf8_bom_preserves_bom(tool, tmp_path):
+    """UTF-8-BOM 文件编辑后 BOM 不被剥离。"""
+    f = tmp_path / "bom.py"
+    f.write_bytes(b"\xef\xbb\xbf" + "s = 'a'\n".encode("utf-8"))
+    result = await tool.execute(path=str(f), old_string="s = 'a'", new_string="s = 'b'")
+    assert "成功" in result
+    raw = f.read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf")  # BOM 保留
+    assert "s = 'b'" in raw.decode("utf-8-sig")

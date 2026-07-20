@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from loongcli.core.config import Config
-from loongcli.core.agent import AgentLoop
+from loongcli.core.agent import AgentLoop, AgentServices
 from loongcli.core.compact import Compactor, model_context_window, SUMMARY_TOKEN_RESERVE
 from loongcli.core.prompts import get_system_prompt
 from loongcli.core.git_context import collect_git_context
@@ -36,11 +36,11 @@ from loongcli.tools.stop_task import StopTaskTool
 from loongcli.tools.enter_plan_mode import EnterPlanModeTool
 from loongcli.tools.exit_plan_mode import ExitPlanModeTool
 from loongcli.core.task import TaskManager
-from loongcli.memory.markdown_store import MarkdownMemoryStore
+from loongcli.memory.memory_router import MemoryRouter
 from loongcli.memory.migrate import migrate_kv_to_markdown
 from loongcli.memory.recall_engine import RecallEngine
 from loongcli.memory.auto_extract import AutoExtractor
-from loongcli.memory.conversation import ConversationStore, project_tasks_dir
+from loongcli.memory.conversation import ConversationStore, project_memory_dir, project_tasks_dir
 from loongcli.core.checkpoint import CheckpointManager
 from loongcli.core.provider import ModelRouter
 from loongcli.security.permissions import PermissionChecker, PermissionMode
@@ -356,9 +356,11 @@ async def _async_main():
 
     router = ModelRouter.from_config(cfg)
     llm = router.client("main")
+    # 子代理用 sub 角色的 client（默认 thinking=False，更快更省）。不因"模型名与 main
+    # 相同"就置 None——LLMClient 还携带 thinking/reasoning_effort/vision 等按角色不同的
+    # 状态，只比 model 名会把 sub 的 thinking=False 丢掉，让子代理误用 main 的 max 级
+    # 深度推理（默认配置 main/sub 同模型时必然触发）。多一个 client 对象成本可忽略。
     sub_llm = router.client("sub")
-    if sub_llm.model == llm.model:
-        sub_llm = None
 
     if args.profile:
         profile = cfg.get_profile(args.profile)
@@ -373,7 +375,10 @@ async def _async_main():
         )
     memory_dir = Path.home() / ".loongcli" / "memory"
     migrate_kv_to_markdown(memory_dir)
-    memory = MarkdownMemoryStore(base_dir=memory_dir)
+    # 两层记忆：全局库只留跨项目 user 记忆，project/feedback/reference 落当前项目库。
+    # 鸭子类型兼容原 MarkdownMemoryStore 接口，下游（memorize/recall/auto_extract/
+    # prompts/web/forget）全部不感知。
+    memory = MemoryRouter(global_dir=memory_dir, project_dir=project_memory_dir())
     conversation = ConversationStore()
 
     resumed = False
@@ -460,12 +465,18 @@ async def _async_main():
     task_manager = TaskManager(trace_dir=project_tasks_dir())
     hook_manager = HookManager.from_config(cfg.hooks)
 
+    # 结构化事件流：会话旁 {session_id}.events.jsonl；子代理共享同一实例（role 字段区分）
+    from loongcli.core.telemetry import EventLogger
+    telemetry = EventLogger.for_session(conversation)
+
     registry.register(AgentTool(
         task_manager=task_manager,
         llm=llm,
         parent_registry=registry,
         security=perm_checker,
         sub_llm=sub_llm,
+        telemetry=telemetry,
+        hook_manager=hook_manager,
     ))
     registry.register(BatchDelegateTool(
         task_manager=task_manager,
@@ -473,6 +484,8 @@ async def _async_main():
         parent_registry=registry,
         security=perm_checker,
         sub_llm=sub_llm,
+        telemetry=telemetry,
+        hook_manager=hook_manager,
     ))
     registry.register(SendMessageTool(task_manager))
     registry.register(TaskStatusTool(task_manager))
@@ -489,7 +502,8 @@ async def _async_main():
 
     # 系统提示词的模型身份必须用实际生效的 main client（roles.main），
     # 顶层 cfg.model 只是无 roles 配置时的回退字段——读它会把身份告诉错（如 qwen 被告知自己是 deepseek）。
-    system_prompt = get_system_prompt(model=llm.model, memory=memory, mcp=mcp, plan_store=plan_store)
+    system_prompt = get_system_prompt(model=llm.model, memory=memory, mcp=mcp, plan_store=plan_store,
+                                      skills=skill_registry)
     if cfg.compact_threshold:
         threshold = cfg.compact_threshold
     else:
@@ -515,17 +529,21 @@ async def _async_main():
         tool_registry=registry,
         permission_checker=perm_checker,
         system_prompt=system_prompt,
-        conversation_store=conversation,
-        compactor=compactor,
-        task_manager=task_manager,
-        hook_manager=hook_manager,
-        skill_registry=skill_registry,
-        system_prompt_builder=lambda: get_system_prompt(
-            model=llm.model, memory=memory, mcp=mcp, plan_store=plan_store,
+        services=AgentServices(
+            conversation_store=conversation,
+            compactor=compactor,
+            task_manager=task_manager,
+            hook_manager=hook_manager,
+            skill_registry=skill_registry,
+            system_prompt_builder=lambda: get_system_prompt(
+                model=llm.model, memory=memory, mcp=mcp, plan_store=plan_store,
+                skills=skill_registry,
+            ),
+            recall_engine=recall_engine,
+            auto_extractor=auto_extractor,
+            checkpoint_manager=checkpoint_mgr,
+            telemetry=telemetry,
         ),
-        recall_engine=recall_engine,
-        auto_extractor=auto_extractor,
-        checkpoint_manager=checkpoint_mgr,
     )
     agent.cost_tracker = cost_tracker
     agent.plan_store = plan_store
@@ -605,7 +623,7 @@ async def _async_main():
                 status_parts.append(mcp_status)
             if perm_mode == PermissionMode.SKIP:
                 status_parts.append("⚠ permissions: skip")
-            await tui.start(agent, resumed=resumed, status_line=" | ".join(status_parts))
+            await tui.start(agent, resumed=resumed, status_items=status_parts)
     finally:
         from loongcli.core.compact import _segment_turns, KEEP_RECENT_TURNS
         start = 1 if agent.messages and agent.messages[0].get("role") == "system" else 0
@@ -655,7 +673,20 @@ async def _async_main():
                     })
                 console.print("[dim]会话摘要已保存[/dim]")
             except Exception:
-                pass
+                # 退出压缩失败不阻断退出（原始 append-only 历史仍在，--continue 不受影响），
+                # 但记进日志——静默 pass 会让结构化 resume 丢失时排障无迹可循。
+                logging.getLogger(__name__).exception("退出压缩失败，跳过结构化 resume 保存")
+
+            # 自动记忆提取仅在会话退出时触发一次（不再每回合触发）：此时已有完整历史，
+            # 能自然区分"跨会话耐久的事实"和"过程性的 skill 产出/中间判断"。提取异步
+            # 进行、失败静默跳过——丢失不丢源，原始对话已全量落盘。
+            if auto_extractor:
+                try:
+                    await auto_extractor.extract(list(agent.messages))
+                except Exception:
+                    logger = logging.getLogger(__name__)
+                    logger.debug("退出时自动记忆提取失败", exc_info=True)
+
         await hook_manager.run(HookEvent.SESSION_END, {
             "session_id": conversation.session_id,
         })
@@ -674,9 +705,15 @@ def _run_web():
     args = parser.parse_args(sys.argv[2:])
 
     import webbrowser
+    from loongcli.web.api import WebAPI
     from loongcli.web.server import DEFAULT_PORT, create_server, server_url
 
-    server = create_server(port=args.port or DEFAULT_PORT)
+    # 与主程序同构：web 独立进程也走两层路由，记忆列表/CRUD 覆盖当前项目库 + 全局库
+    memory = MemoryRouter(
+        global_dir=Path.home() / ".loongcli" / "memory",
+        project_dir=project_memory_dir(),
+    )
+    server = create_server(api=WebAPI(memory_store=memory), port=args.port or DEFAULT_PORT)
     url = server_url(server)
     console = Console()
     console.print(f"[bold cyan]loongcli web[/bold cyan] 运行在 [link={url}]{url}[/link]（Ctrl+C 退出）")

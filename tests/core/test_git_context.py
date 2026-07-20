@@ -16,6 +16,12 @@ class TestGitContextToPrompt:
         assert "Git 仓库: 是" in prompt
         assert "当前分支: main" in prompt
 
+    def test_snapshot_label_in_repo(self):
+        # 快照标签防模型把过时的 git 状态当现实；非仓库无 git 块、无需标签
+        ctx = GitContext(is_repo=True, branch="main")
+        assert "快照" in ctx.to_prompt()
+        assert "快照" not in GitContext(is_repo=False).to_prompt()
+
     def test_shows_main_branch_when_different(self):
         ctx = GitContext(is_repo=True, branch="feature", main_branch="main")
         prompt = ctx.to_prompt()

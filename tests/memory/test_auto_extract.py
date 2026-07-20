@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 from pathlib import Path
 from loongcli.memory.auto_extract import AutoExtractor
 from loongcli.memory.markdown_store import MarkdownMemoryStore
-from loongcli.core.agent import AgentLoop
+from loongcli.core.agent import AgentLoop, AgentServices
 from loongcli.core.llm import LLMClient
 from loongcli.core.events import AgentDone
 from loongcli.tools.base import ToolRegistry
@@ -146,7 +146,12 @@ async def test_extract_handles_llm_failure(store, mock_llm):
 # --- AgentLoop integration test ---
 
 @pytest.mark.asyncio
-async def test_agent_fires_auto_extract():
+async def test_agent_does_not_fire_auto_extract_per_turn():
+    """回合内不再触发自动提取——提取已移到了会话退出时（main.py 的 finally 块）。
+
+    会话级别的完整历史交给提取器，能自然区分"跨会话耐久的"和"过程性的 skill 产出"，
+    不再把 jobhunter 类的扫描结论误记为记忆。
+    """
     llm = LLMClient(api_key="test")
 
     async def mock_stream(**kwargs):
@@ -163,7 +168,7 @@ async def test_agent_fires_auto_extract():
         tool_registry=ToolRegistry(),
         permission_checker=PermissionChecker(),
         system_prompt="You are helpful.",
-        auto_extractor=auto_extractor,
+        services=AgentServices(auto_extractor=auto_extractor),
     )
 
     events = []
@@ -171,7 +176,7 @@ async def test_agent_fires_auto_extract():
         events.append(event)
 
     assert any(isinstance(e, AgentDone) for e in events)
-    auto_extractor.extract.assert_called_once()
+    auto_extractor.extract.assert_not_called()  # 已移出 run_stream
 
 
 # ── 闸 4：否定存在断言拦截（毒记忆回归：grep 故障产出 "cache_aware 不存在"） ──

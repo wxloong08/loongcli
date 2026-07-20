@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from loongcli.tools.base import Tool, ToolRegistry
 from loongcli.tools.routing import AgentRole, filter_tools, COORDINATOR_ALLOWED
 from loongcli.core.task import TaskManager, TaskStatus as TS
-from loongcli.core.agent import AgentLoop
+from loongcli.core.agent import AgentLoop, AgentServices
 from loongcli.core.compact import Compactor
 from loongcli.security.permissions import PermissionChecker
 
@@ -16,7 +16,9 @@ if TYPE_CHECKING:
 
 SUBAGENT_SYSTEM_PROMPT = """\
 你是一个 SubAgent，负责执行主 Agent 分配给你的具体任务。
-专注于完成任务，输出简洁的结果摘要。不要问用户问题。\
+专注于完成任务，输出简洁的结果摘要。不要问用户问题。
+结果里的事实与数字以工具结果为准——查不到就写「未知/未查到」，不要用典型值或印象填补；
+不确定的内容明确标注不确定，数据缺口如实报告而不是凑成完整结论。\
 """
 
 COORDINATOR_SYSTEM_PROMPT = """\
@@ -47,6 +49,12 @@ COORDINATOR_SYSTEM_PROMPT = """\
 ### 阶段 4：验证（新 Worker）
 - 派一个新的 worker 做验证，不让实现者自验
 - 验证 worker 跑测试、检查改动是否正确
+
+## 合成纪律
+
+- 结论里的事实与数字必须能指认到某个 worker 的结果；worker 没查到的就是缺口，
+  如实写「未知」，不要用你的印象或典型值补齐，更不要用先验推翻 worker 拿回的一手数据。
+- 失败/超时的 worker = 对应信息面不完整——宁可缩小结论范围并说明缺口，也不要凑成完整结论。
 
 ## Continue vs Spawn 决策
 
@@ -108,6 +116,8 @@ class AgentTool(Tool):
         security: PermissionChecker,
         depth: int = 0,
         sub_llm: LLMClient | None = None,
+        telemetry=None,
+        hook_manager=None,
     ):
         self._task_manager = task_manager
         self._llm = llm
@@ -115,6 +125,10 @@ class AgentTool(Tool):
         self._parent_registry = parent_registry
         self._permission_checker = security
         self._depth = depth
+        # 主会话的事件流实例（可 None）：子代理共享同一文件，事件靠 role 字段区分主/子
+        self._telemetry = telemetry
+        # 用户 hook 同样约束子代理的工具调用——hook 当安全闸用时子代理不能是旁路
+        self._hook_manager = hook_manager
         # 委派树父任务：主 agent 的 delegate 为 None（派出的是根任务）；
         # 协调者的克隆在协调者任务创建后被回填为该任务 id（见 execute）
         self._parent_task_id: str | None = None
@@ -152,10 +166,14 @@ class AgentTool(Tool):
             permission_checker=self._permission_checker,
             system_prompt=system_prompt,
             max_iterations=max_iter,
-            compactor=compactor,
-            task_manager=self._task_manager if coordinator else None,
             role=role,
             interactive=False,
+            services=AgentServices(
+                compactor=compactor,
+                task_manager=self._task_manager if coordinator else None,
+                telemetry=self._telemetry,
+                hook_manager=self._hook_manager,
+            ),
         )
 
         task = await self._task_manager.create_and_run(
@@ -225,6 +243,8 @@ class AgentTool(Tool):
                     security=self._permission_checker,
                     depth=self._depth + 1,
                     sub_llm=self._sub_llm,
+                    telemetry=self._telemetry,
+                    hook_manager=self._hook_manager,
                 )
             sub_registry.register(tool)
         return sub_registry

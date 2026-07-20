@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
-from loongcli.core.agent import AgentLoop
+from loongcli.core.agent import AgentLoop, AgentServices
 from loongcli.core.llm import LLMClient
 from loongcli.core.events import TextDelta, AgentDone
 from loongcli.tools.base import ToolRegistry
@@ -41,7 +41,7 @@ async def test_recall_injects_memories():
         tool_registry=ToolRegistry(),
         permission_checker=PermissionChecker(),
         system_prompt="You are helpful.",
-        recall_engine=recall_engine,
+        services=AgentServices(recall_engine=recall_engine),
     )
 
     events = []
@@ -71,7 +71,7 @@ async def test_recall_failure_does_not_block():
         tool_registry=ToolRegistry(),
         permission_checker=PermissionChecker(),
         system_prompt="You are helpful.",
-        recall_engine=recall_engine,
+        services=AgentServices(recall_engine=recall_engine),
     )
 
     events = []
@@ -130,7 +130,7 @@ async def test_recall_deduplicates_across_turns():
         tool_registry=ToolRegistry(),
         permission_checker=PermissionChecker(),
         system_prompt="You are helpful.",
-        recall_engine=recall_engine,
+        services=AgentServices(recall_engine=recall_engine),
     )
 
     for _ in range(5):

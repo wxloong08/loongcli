@@ -152,6 +152,26 @@ class TestJsonRpcClient:
         assert received[0][1]["uri"] == "file:///test.py"
 
     @pytest.mark.asyncio
+    async def test_server_request_gets_method_not_found_reply(self):
+        # 服务器发起的请求（带 method 且带 id）——client 必须回响应，否则服务器阻塞
+        server_req = {
+            "jsonrpc": "2.0",
+            "id": "server-1",
+            "method": "workspace/configuration",
+            "params": {"items": []},
+        }
+        data = _encode_message(server_req)
+        process = _make_process(data)
+        client = JsonRpcClient(process)
+        await client.start()
+        await asyncio.sleep(0.1)
+
+        sent = bytes(process.stdin.data).decode("utf-8")
+        assert '"id": "server-1"' in sent
+        assert "-32601" in sent
+        assert '"error"' in sent
+
+    @pytest.mark.asyncio
     async def test_request_timeout(self):
         # Use a reader that blocks forever (never returns empty)
         class BlockingReader:

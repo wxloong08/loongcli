@@ -11,6 +11,7 @@ from loongcli.tools.shell import resolve_shell
 if TYPE_CHECKING:
     from loongcli.memory.markdown_store import MarkdownMemoryStore
     from loongcli.mcp.manager import MCPManager
+    from loongcli.skills.registry import SkillRegistry
 
 
 def get_system_prompt(
@@ -18,6 +19,7 @@ def get_system_prompt(
     memory: MarkdownMemoryStore | None = None,
     mcp: MCPManager | None = None,
     plan_store=None,
+    skills: SkillRegistry | None = None,
 ) -> str:
     parts = [
         _identity_section(),
@@ -33,9 +35,11 @@ def get_system_prompt(
     ]
 
     # 段落按「跨会话易变性」从低到高排，让静态块尽量留在可缓存的前缀里：
-    # 静态核心（含工具 schema）→ LOONG.md / MCP（手写，极少变）→ 记忆索引（自动抽取会变）
-    # → 活跃计划 → 环境（含 git 状态/cwd，几乎每次会话都变）。易变内容靠后 = 前缀缓存
-    # 断点尽量后移，跨会话命中率更高。环境段放最末（运行时 plan_injection 还会再接其后）。
+    # 静态核心（含工具 schema）→ LOONG.md / MCP（手写，极少变）→ 技能清单（手动增删才变）
+    # → 记忆索引（自动抽取会变）→ 活跃计划 → 环境（含 git 状态/cwd，几乎每次会话都变）。
+    # 易变内容靠后 = 前缀缓存断点尽量后移，跨会话命中率更高。环境段放最末（运行时
+    # plan_injection 还会再接其后）。技能清单因此不进 skill 工具的 description——
+    # 那属于静态核心里的工具 schema，增删技能会把整段前缀缓存打断。
     project_ctx = load_project_context()
     if project_ctx:
         parts.append(f"# 项目指引 (LOONG.md)\n以下是项目维护者提供的指引，你必须遵守：\n\n{project_ctx}")
@@ -44,6 +48,11 @@ def get_system_prompt(
         mcp_desc = mcp.get_tool_descriptions()
         if mcp_desc:
             parts.append(mcp_desc)
+
+    if skills:
+        listing = skills.build_listing(include_model_disabled=False)
+        if listing:
+            parts.append(f"# 可用技能\n用 skill(name) 加载技能内容。可用技能：{listing}")
 
     if memory:
         parts.append(_memory_section(memory))
@@ -90,6 +99,7 @@ def _doing_tasks_section() -> str:
 - 完成任务前验证：跑测试、执行脚本、检查输出。如果无法验证，明确说出来，不要假装成功。
 - 如实报告结果：测试失败就说失败，不要压制错误或把未完成的工作描述为已完成。
 - 输出事实、数字、引用以来源为准（文件内容、工具结果、用户已确认信息）——不臆造、不夸大、不四舍五入。拿不准的值标注"不确定"或先核实，绝不编一个看起来合理的数字顶替。这对生成给外部看的内容（回复、报告、摘要）尤其重要。
+- 数值必须绑定对象：记忆/历史数据带着它的测量对象与场景，A 商家/机器/版本的实测值不得套到 B 上——对象不匹配等于没有数据，直接说"无数据、需实测"。被问某个数字的来源时，只能指认上下文中真实存在的出处；找不到出处就承认是推测，不要编造来源故事。
 - 训练知识有保质期：对会随时间变化的当前状态（谁在任、最新版本、某物现状）别信记忆，先核实再答。不认识且首字母大写的词、或形如 v0/o1/2.5 的短名，多半是训练之后才出现的——"眼熟"不等于"现在了解"。"""
 
 
@@ -191,12 +201,29 @@ plan 工具是目标模式（/goal）自主执行的核心。系统通过 plan �
 
 def _skill_discipline_section() -> str:
     return """\
-# 技能执行规则
-当技能（skill）被加载时（通过 /技能名 命令或自动触发）：
-1. 严格遵循技能定义的工作流步骤，不跳过标记为强制的步骤
-2. 如果技能引用了参考文件（references/），先读取再行动
-3. 如果技能要求写 output 文件或调用 tracker，照做
-4. 按技能要求的输出格式报告结果"""
+skill 是积累了大量试错经验的浓缩指令集——一份 SKILL.md 定义了一套完整的工作流、
+输出规范、以及踩过坑之后总结出的最佳做法。skill 的内容投入了大量精力编写，值得你
+认真读透、严格照做。有时需要组合多个 skill 才能得到最佳结果，不要只读一个就算完。
+
+我们发现：在读 skill 全文之前就动手写代码、跑命令、调用其他工具，结果往往偏差很大。
+所以**在任务一开始、调任何文件/命令工具之前**，你的第一件事就是判断当前任务与哪些
+skill 相关——然后立即调用 skill 工具加载、认真通读。skill 里定义了工作流的，严格
+按步骤推进；定义了重试纪律的，照规定执行；定义了输出格式的，原样遵守。
+
+举例：
+
+用户: 帮我监控一下求职消息
+你: [立即调用 skill("jobhunter")，通读后按 monitor 模式走——先衰减检查、再拉取增量、
+   遇到 tool 故障按 skill 定义的重试策略执行，不要自己跑去诊断基础设施]
+
+用户: 把这个 PDF 的内容总结一下
+你: [立即调用 skill("pdf")]
+
+用户反馈说"你没有按我的规则来"时，第一个要查的就是：对应的 skill 有没有被完整加载、
+skill 里的规则有没有被后面加载的其他内容意外覆盖。skill 的优先级高于通用行为规则，
+两者冲突时以 skill 为准。
+
+请多花点时间在动手前把相关的 SKILL.md 读透——值得的。"""
 
 
 def _mcp_usage_section() -> str:
@@ -261,10 +288,20 @@ def _environment_section(model: str) -> str:
     git_ctx = collect_git_context(Path(cwd))
     git_info = git_ctx.to_prompt()
 
+    # 时间感知：模型训练截止后对"现在"一无所知，不注入就会用旧年份推理
+    # （jobhunter 的 --since 计算、"最近 N 天"过滤全依赖今天的日期）。
+    # 只给日期+星期不给时分秒：系统提示每会话构建一次，时分秒必然过时；
+    # 且本段在提示最末（易变段），日期每天一变不额外伤前缀缓存。
+    from datetime import datetime
+    now = datetime.now()
+    weekday = "一二三四五六日"[now.weekday()]
+    date_line = f"- 今天日期: {now.strftime('%Y-%m-%d')}（星期{weekday}）——需要精确时刻时用 shell 执行 date 命令查询"
+
     return f"""\
 # 环境
 - 工作目录: {cwd}
 {git_info}
 - 平台: {system} {release}
 - Shell: {shell}
-- 模型: {model}"""
+- 模型: {model}
+{date_line}"""

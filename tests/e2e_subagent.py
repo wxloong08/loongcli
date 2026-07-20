@@ -4,7 +4,7 @@ import sys
 
 from loongcli.core.config import Config
 from loongcli.core.llm import LLMClient
-from loongcli.core.agent import AgentLoop
+from loongcli.core.agent import AgentLoop, AgentServices
 from loongcli.core.compact import Compactor
 from loongcli.core.task import TaskManager
 from loongcli.core.events import (
@@ -57,8 +57,8 @@ async def main():
         tool_registry=registry,
         permission_checker=security,
         system_prompt=system_prompt,
-        task_manager=task_manager,
         max_iterations=20,
+        services=AgentServices(task_manager=task_manager),
     )
 
     prompt = (

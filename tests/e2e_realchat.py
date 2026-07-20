@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from loongcli.core.config import Config
 from loongcli.core.llm import LLMClient
-from loongcli.core.agent import AgentLoop
+from loongcli.core.agent import AgentLoop, AgentServices
 from loongcli.core.compact import Compactor
 from loongcli.core.prompts import get_system_prompt
 from loongcli.tools.base import ToolRegistry
@@ -52,7 +52,7 @@ async def main():
         tool_registry=registry,
         permission_checker=security,
         system_prompt=system_prompt,
-        compactor=compactor,
+        services=AgentServices(compactor=compactor),
     )
 
     test_cases = [

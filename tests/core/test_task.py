@@ -38,6 +38,16 @@ def test_send_message_nonexistent():
     assert "错误" in result
 
 
+def test_send_message_to_failed_task_reports_failure():
+    """发给 FAILED 任务不塞死信箱假成功，明确报无法接收。"""
+    tm = TaskManager()
+    task = Task(prompt="test", status=TaskStatus.FAILED)
+    tm.register(task)
+    result = tm.send_message(task.id, "hello")
+    assert "无法接收" in result
+    assert task.mailbox == []  # 不塞死信箱
+
+
 def test_get_status():
     tm = TaskManager()
     task = Task(prompt="do stuff")

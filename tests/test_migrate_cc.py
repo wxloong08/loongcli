@@ -12,6 +12,7 @@ from loongcli.migrate_cc import (
     _repair_pairing,
 )
 from loongcli.memory.markdown_store import MarkdownMemoryStore
+from loongcli.memory.memory_router import MemoryRouter
 
 
 def test_cc_slug_keeps_double_dashes(tmp_path):
@@ -67,6 +68,38 @@ def test_import_memories_idempotent(tmp_path):
 
     stats2 = import_memories(cc_dir, store)
     assert stats2 == {"imported": 0, "skipped": 1, "failed": 0}  # 重复导入幂等
+
+
+CC_USER_MEMORY = """---
+name: who-i-am
+description: 用户身份背景
+metadata:
+  type: user
+---
+
+用户是 Python 开发者。
+"""
+
+
+def test_import_memories_routes_by_type(tmp_path):
+    # router 注入时按 type 分库：user → 全局，其余 → 项目库
+    cc_dir = tmp_path / "cc"
+    (cc_dir / "memory").mkdir(parents=True)
+    (cc_dir / "memory" / "test-fact.md").write_text(CC_MEMORY, encoding="utf-8")
+    (cc_dir / "memory" / "who-i-am.md").write_text(CC_USER_MEMORY, encoding="utf-8")
+
+    router = MemoryRouter(
+        global_dir=tmp_path / "loong_mem",
+        project_dir=tmp_path / "projects" / "D-proj" / "memory",
+    )
+    stats = import_memories(cc_dir, router)
+    assert stats == {"imported": 2, "skipped": 0, "failed": 0}
+    assert (router.global_store.base_dir / "who-i-am.md").exists()
+    assert (router.project_store.base_dir / "test-fact.md").exists()
+    assert not (router.global_store.base_dir / "test-fact.md").exists()
+
+    stats2 = import_memories(cc_dir, router)
+    assert stats2 == {"imported": 0, "skipped": 2, "failed": 0}  # 两库幂等
 
 
 # ── 会话 ─────────────────────────────────────────────────────────

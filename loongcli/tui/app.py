@@ -3,7 +3,9 @@ import asyncio
 import shutil
 import signal
 import sys
+import unicodedata
 from rich.console import Console
+from rich.cells import cell_len
 from loongcli.tui.mdstream import LeftMarkdown as Markdown
 from loongcli.tui.tool_display import arg_summary, result_lines
 from rich.panel import Panel
@@ -13,13 +15,13 @@ from rich.spinner import Spinner
 from rich.padding import Padding
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from loongcli.core.agent import AgentLoop
-from loongcli.core.events import TextDelta, ThinkingDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress, ShellOutput, PlanApproval
+from loongcli.core.events import TextDelta, ThinkingDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress, ShellOutput, PlanApproval, QueuedInputInjected
 from loongcli.core.intent import StopIntent, detect_stop_intent
 from loongcli.core.messages import message_text, extract_image_paths, is_image_file
 from loongcli.memory.markdown_store import MarkdownMemoryStore
@@ -32,6 +34,119 @@ from loongcli.core.sanitize import repair_surrogates
 _BUILTIN_COMMANDS = [
     ("exit", "退出"),
 ]
+
+
+def _sanitize_cells(s: str) -> str:
+    """剥离会让 cell_len 与终端实际渲染宽度不一致的字符。
+
+    _fit_cells 的"单行"承诺依赖 Rich 宽度表 == 终端渲染宽度，以下字符会打破它：
+    - VS16(U+FE0F)：把 ⚠ 这类窄字符翻成双宽 emoji——Rich 记 1 格、终端画 2 格，
+      行超宽换行 → 活动区高度抖动 → 残影（2026-07-17 截图思考行堆叠的真凶）；
+    - \\t：终端展开到制表位（最多 8 格），Rich 记 1 格；
+    - ZWJ 等格式字符：多个 emoji 合成单字形，宽度无法静态预测。
+    只往安全方向偏：宁可高估宽度提前截断，绝不低估导致换行。"""
+    out: list[str] = []
+    for ch in s:
+        o = ord(ch)
+        if ch == "\t":
+            out.append(" ")
+        elif 0xFE00 <= o <= 0xFE0F or 0xE0100 <= o <= 0xE01EF:  # 变体选择符
+            continue
+        elif unicodedata.category(ch) in ("Cc", "Cf"):  # 控制/格式字符（含 ZWJ）
+            continue
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _fit_cells(s: str, budget: int) -> str:
+    """按显示宽度（cell）截断字符串到 budget 列内，超出补省略号。
+
+    必须按 cell 而非字符数截断：中文/emoji 是双宽字符，用 len() 计数会让状态行
+    实际宽度翻倍、超出终端换行——多行 transient Live 高度抖动会在 scrollback
+    留下残影（思考行反复堆叠的真凶）。"""
+    if budget <= 0:
+        return ""
+    s = _sanitize_cells(s)
+    if cell_len(s) <= budget:
+        return s
+    budget -= 1  # 留 1 列给省略号
+    out: list[str] = []
+    used = 0
+    for ch in s:
+        w = cell_len(ch)
+        if used + w > budget:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out) + "…"
+
+
+# 执行中插话队列上限：防轮中粘贴多行文本（无 bracketed paste，每个 \r 都是一次提交）
+# 把队列灌爆——超限的提交静默丢弃
+_INPUT_QUEUE_MAX = 20
+
+
+def _fit_cells_tail(s: str, budget: int) -> str:
+    """按显示宽度截断到 budget 列内，保留**尾部**、头部补省略号。
+
+    输入回显要看的是正在打的那一端（尾部），与 _fit_cells 的方向相反；
+    同样先剥宽度不可预测字符，单行承诺同一套防线。"""
+    if budget <= 0:
+        return ""
+    s = _sanitize_cells(s)
+    if cell_len(s) <= budget:
+        return s
+    budget -= 1  # 留 1 列给省略号
+    out: list[str] = []
+    used = 0
+    for ch in reversed(s):
+        w = cell_len(ch)
+        if used + w > budget:
+            break
+        out.append(ch)
+        used += w
+    return "…" + "".join(reversed(out))
+
+
+def _pack_status_lines(items: list[str], width: int) -> list[str]:
+    """banner 状态条目打包成行：**只在条目边界断行**。
+
+    整行 join 后交给 Rich 自动换行会在条目内部的空格处断开——真机截图实锤：
+    「⚠ permissions: skip」被拆成行尾悬空的 ⚠ 和下一行的说明，警告变谜语。
+    按 cell 宽度打包（未来条目可能含中文），单条目超宽也不拆、独占一行。"""
+    lines: list[str] = []
+    current = ""
+    for item in items:
+        candidate = f"{current} | {item}" if current else item
+        if current and cell_len(candidate) > width:
+            lines.append(current)
+            current = item
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _apply_key(ch: str, buffer: str) -> tuple[str, str | None, bool]:
+    """键盘监听的纯函数内核：一个按键作用于行缓冲。
+
+    返回 (新缓冲, 提交的消息或 None, 是否请求中断)。Esc 语义不变：永远中断，
+    不做"先清缓冲再中断"的双击语义——零意外。功能键两字节序列（\\x00/\\xe0
+    前缀）的第二字节由调用方吞掉（需要再读一次 kbhit，纯函数管不到）。
+    非 BMP 字符（emoji）经 getwch 以代理对分两次到达：先原样累进缓冲，
+    提交时 repair_surrogates 收口成真字符。"""
+    if ch == "\x1b":
+        return buffer, None, True
+    if ch in ("\r", "\n"):
+        submitted = repair_surrogates(buffer).strip()
+        return "", (submitted or None), False
+    if ch in ("\x08", "\x7f"):
+        return buffer[:-1], None, False
+    if ch >= " ":
+        return buffer + ch, None, False
+    return buffer, None, False
 
 
 class SlashCompleter(Completer):
@@ -185,9 +300,14 @@ class TUI:
                 from prompt_toolkit.application import run_in_terminal
                 run_in_terminal(self._toggle_plan_mode)
 
+            # FileHistory：输入历史按项目落盘，新会话方向键直接可翻到过去的输入。
+            # 此前 InMemoryHistory 只活在进程内，开新会话历史为空（真机反馈）。
+            from loongcli.memory.conversation import input_history_path
+            hist_path = input_history_path()
+            hist_path.parent.mkdir(parents=True, exist_ok=True)
             self._session = PromptSession(
                 "❯ ",
-                history=InMemoryHistory(),
+                history=FileHistory(str(hist_path)),
                 key_bindings=kb,
                 prompt_continuation="  ",
                 completer=SlashCompleter(self.command_registry, self.skill_registry),
@@ -210,13 +330,35 @@ class TUI:
             agent.enter_plan_mode()
             self.console.print(Text("已进入规划模式（Shift+Tab 退出）— 下一条消息将先调研再规划"))
 
-    def _seed_history(self, messages: list[dict]):
-        session = self._get_session()
-        for msg in messages:
-            if msg.get("role") == "user":
-                content = message_text(msg)  # 多模态 list 取纯文本，图片计 [图片]
-                if content and not self._is_internal_message(content):
-                    session.history.append_string(content)
+    _HISTORY_BACKFILL_MAX = 200
+
+    def _backfill_input_history(self, store) -> None:
+        """首次启用持久输入历史时，把项目历史会话的用户消息一次性回填进历史文件，
+        让新会话立刻能用方向键翻旧输入。文件已存在则不动——正常输入由 FileHistory
+        实时追加，重复回填会造成条目翻倍。"""
+        from loongcli.memory.conversation import input_history_path
+        path = input_history_path()
+        if store is None or path.exists():
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            hist = FileHistory(str(path))
+            entries: list[str] = []
+            # list_sessions 新→旧，回填要旧→新（方向键↑先出最近的）
+            for meta in reversed(store.list_sessions(limit=20)):
+                sid = meta.get("session_id")
+                if not sid:
+                    continue
+                for msg in store.full_history(sid):
+                    if msg.get("role") != "user":
+                        continue
+                    content = message_text(msg)  # 多模态 list 取纯文本
+                    if content and not self._is_internal_message(content):
+                        entries.append(content)
+            for entry in entries[-self._HISTORY_BACKFILL_MAX:]:
+                hist.append_string(entry)
+        except OSError:
+            pass  # 回填失败不阻塞启动，历史从本次输入开始积累
 
     @staticmethod
     def _is_internal_message(content: str) -> bool:
@@ -289,7 +431,7 @@ class TUI:
         picker = SessionPicker(self.console, conversation)
         return await picker.pick()
 
-    async def start(self, agent: AgentLoop, resumed: bool = False, status_line: str = ""):
+    async def start(self, agent: AgentLoop, resumed: bool = False, status_items: list[str] | None = None):
         if resumed:
             title = (
                 f"[bold cyan]loongcli[/bold cyan] v0.1.0 — 已恢复会话 "
@@ -299,7 +441,9 @@ class TUI:
             title = "[bold cyan]loongcli[/bold cyan] v0.1.0 — Loong Agent CLI"
 
         lines = [title]
-        if status_line:
+        # Panel 内宽 ≈ 终端宽 − 边框 2 − 默认 padding 2，再留 2 列余量
+        inner_width = max(20, self.console.width - 6)
+        for status_line in _pack_status_lines(status_items or [], inner_width):
             lines.append(f"[dim]{status_line}[/dim]")
         lines.append(
             "[bold]/help[/bold] 查看命令  [bold]/exit[/bold] 退出  "
@@ -309,7 +453,8 @@ class TUI:
 
         if resumed:
             self.render_history(agent.messages)
-            self._seed_history(agent.messages)
+        # 必须在 _get_session 建 FileHistory 之前回填，否则首个 prompt 读到的还是空文件
+        self._backfill_input_history(agent.conversation_store)
 
         ctx = CommandContext(
             console=self.console,
@@ -331,10 +476,13 @@ class TUI:
                 need_divider = False
             try:
                 with patch_stdout():
-                    user_input = await session.prompt_async()
+                    # default=中断/轮末未消化的插话预填——用户可编辑后再发，不替他发
+                    user_input = await session.prompt_async(
+                        default=getattr(self, "_input_prefill", ""),
+                    )
+                self._input_prefill = ""
             except (EOFError, KeyboardInterrupt):
-                sid = agent.conversation_store.session_id
-                self.console.print(f"\n[dim]再见！会话 [cyan]{sid}[/cyan] 已保存，[cyan]loongcli --continue[/cyan] 可继续[/dim]")
+                self.console.print("\n" + self._farewell(agent))
                 break
 
             raw_input = user_input  # 擦除空提交要用它的行数（Esc+Enter 换行会多行）
@@ -352,8 +500,7 @@ class TUI:
                 continue
             need_divider = True  # 本轮有实际输入，处理后下一轮重新画分隔线
             if user_input == "/exit":
-                sid = agent.conversation_store.session_id
-                self.console.print(f"[dim]再见！会话 [cyan]{sid}[/cyan] 已保存，[cyan]loongcli --continue[/cyan] 可继续[/dim]")
+                self.console.print(self._farewell(agent))
                 break
 
             if user_input.startswith("/"):
@@ -378,6 +525,18 @@ class TUI:
 
             await self._handle_agent_response(agent, user_input)
 
+    def _farewell(self, agent: AgentLoop) -> str:
+        """退出致辞。空会话（一轮都没跑过，_persist 从未触发、会话文件不存在）不能
+        说"已保存"——那是撒谎，且会误导用户 --continue（恢复的会是上一个会话）。
+        以会话文件是否落盘为准，不猜内存状态。"""
+        store = agent.conversation_store
+        if store and store.session_path.exists():
+            return (
+                f"[dim]再见！会话 [cyan]{store.session_id}[/cyan] 已保存，"
+                f"[cyan]loongcli --continue[/cyan] 可继续[/dim]"
+            )
+        return "[dim]再见！（空会话，未保存）[/dim]"
+
     def _erase_lines(self, n: int) -> None:
         """擦掉终端上最近 n 行（上移 n 行 + 清到屏末），光标回列首原位。
 
@@ -401,54 +560,132 @@ class TUI:
         取消传播复用 stop_task 同一条链：CancelledError 打进 run_stream →
         _exec_tool_stream finally 收编 exec_task → shell 子进程随 Job 全灭。
         """
-        turn = asyncio.create_task(
-            self._run_turn_impl(agent, user_input, allowed_tools)
-        )
-        loop = asyncio.get_running_loop()
-        interrupted = False
+        # while 循环：轮正常结束后若插话队列有剩余（最后一次 drain 之后才提交的），
+        # 逐条自动作为新轮发出——用户按了 Enter 就是提交意图，不该被吃掉。
+        pending: str | None = user_input
+        auto_send = False
+        while pending is not None:
+            if auto_send:
+                # 自动发出的消息补一行 ❯ 回显，scrollback 上与手敲提交同构
+                line = Text("❯ ", style="bold green")
+                line.append(pending)
+                self.console.print(line)
 
-        def _request_interrupt():
-            nonlocal interrupted
-            interrupted = True
-            loop.call_soon_threadsafe(turn.cancel)
+            turn = asyncio.create_task(
+                self._run_turn_impl(agent, pending, allowed_tools)
+            )
+            loop = asyncio.get_running_loop()
+            interrupted = False
 
-        # Esc 为主触发键（无双义）；Ctrl+C 兜底（原行为=崩出应用，保留即降级保护）。
-        # 只在回合期间接管，输入框阶段仍由 prompt_toolkit 处理（退出语义不变）。
-        esc_task = asyncio.create_task(self._esc_listener(_request_interrupt))
-        prev_handler = signal.signal(signal.SIGINT, lambda *_: _request_interrupt())
-        try:
-            await turn
-        except asyncio.CancelledError:
-            if not interrupted:
-                raise  # 非用户中断的外部取消（如应用收尾），照常传播
-            agent.abort_turn()
-            self.console.print(Padding(Text.from_markup(
-                "[yellow]✗ 回合已中断——消息现场已修复，可继续输入[/yellow]"
-            ), self.PADDING))
-            self._at_gap = False
-        finally:
-            esc_task.cancel()
-            signal.signal(signal.SIGINT, prev_handler)
+            def _request_interrupt():
+                nonlocal interrupted
+                interrupted = True
+                loop.call_soon_threadsafe(turn.cancel)
 
-    async def _esc_listener(self, cancel_cb):
-        """回合期间监听 Esc（Windows msvcrt 轮询；非 Windows 暂无，Ctrl+C 兜底）。
+            # Esc 为主触发键（无双义）；Ctrl+C 兜底（原行为=崩出应用，保留即降级保护）。
+            # 只在回合期间接管，输入框阶段仍由 prompt_toolkit 处理（退出语义不变）。
+            key_task = asyncio.create_task(self._key_listener(_request_interrupt, agent))
+            prev_handler = signal.signal(signal.SIGINT, lambda *_: _request_interrupt())
+            try:
+                await turn
+            except asyncio.CancelledError:
+                if not interrupted:
+                    raise  # 非用户中断的外部取消（如应用收尾），照常传播
+                agent.abort_turn()
+                self.console.print(Padding(Text.from_markup(
+                    "[yellow]✗ 回合已中断——消息现场已修复，可继续输入[/yellow]"
+                ), self.PADDING))
+                self._at_gap = False
+                # 中断路径：队列剩余 + 未提交缓冲一律预填输入框，不替用户发
+                # ——用户刚按 Esc，此刻替他发消息违背中断意图
+                self._stash_prefill(agent)
+                return
+            finally:
+                key_task.cancel()
+                signal.signal(signal.SIGINT, prev_handler)
 
-        确认框/计划审批弹出时必须暂停读键（_prompt_active），否则会抢
-        prompt_toolkit 的按键。其余按键直接丢弃——回合中没有输入排队语义。"""
+            # 正常结束：未提交的半行缓冲预填输入框；队列剩余逐条自动发出
+            buf = repair_surrogates(getattr(self, "_typed_buffer", "")).strip()
+            self._typed_buffer = ""
+            if buf:
+                self._input_prefill = buf
+            leftovers = agent.take_queued_inputs()
+            if leftovers:
+                pending = leftovers[0]
+                for extra in leftovers[1:]:
+                    agent.queue_user_input(extra)  # 重新排队，下一轮迭代边界注入
+                auto_send = True
+            else:
+                pending = None
+
+    def _typed_echo_line(self, agent: AgentLoop):
+        """spinner Live 第二行的 provider：执行中已敲未提交的缓冲 + 排队数指示。
+
+        空态（无缓冲无排队）返回 None——Live 高度回到 1 行，与无回显逐帧一致；
+        确认框/审批框期间返回 None（缓冲已作废，别画尸体）。单行承诺三件套：
+        repair_surrogates（半个代理对不进渲染）+ _fit_cells_tail（剥宽度不可预测
+        字符 + 按 cell 截断，保尾部——正在打的那端）。在 Live 刷新线程被调用，
+        只读状态、只造 renderable，不碰 console。"""
+        if getattr(self, "_prompt_active", False):
+            return None
+        buf = getattr(self, "_typed_buffer", "")
+        queued = len(getattr(agent, "_queued_user_inputs", []))
+        if not buf and not queued:
+            # 空态给常驻占位而非隐藏：可发现性是这个功能的生死线——没有提示的
+            # 隐藏功能等于不存在（2026-07-19 真机测试反馈）。恒定 2 行高度也比
+            # "空态 1 行 / 打字 2 行"的抖动更稳（高度抖动才是残影根因）。
+            line = Text("❯ ", style="dim green")
+            line.append("打字可插话 · Esc 中断", style="dim")
+            return Padding(line, self.PADDING)
+        suffix = f"  [+{queued} 排队]" if queued else ""
+        budget = self.console.width - self.PADDING[1] * 2 - 2 - cell_len(suffix)  # 2 = "❯ "
+        if budget <= 0:
+            return None
+        line = Text("❯ ", style="green")
+        line.append(_fit_cells_tail(repair_surrogates(buf), budget))
+        if suffix:
+            line.append(suffix, style="dim")
+        return Padding(line, self.PADDING)
+
+    def _stash_prefill(self, agent: AgentLoop) -> None:
+        """把插话队列剩余 + 未提交缓冲合并预填到下一次输入框（中断路径专用）。"""
+        parts = agent.take_queued_inputs()
+        buf = repair_surrogates(getattr(self, "_typed_buffer", "")).strip()
+        self._typed_buffer = ""
+        if buf:
+            parts.append(buf)
+        if parts:
+            self._input_prefill = "\n".join(parts)
+
+    async def _key_listener(self, cancel_cb, agent: AgentLoop):
+        """回合期间监听键盘（Windows msvcrt 轮询；非 Windows 暂无，Ctrl+C 兜底）。
+
+        Esc 中断语义不变；其余可见字符进行行缓冲，Enter 提交为执行中插话
+        （agent.queue_user_input，下一迭代边界注入）。确认框/计划审批弹出时
+        暂停读键并作废已敲缓冲（_prompt_active，避免抢 prompt_toolkit 的按键、
+        防半行输入误提交）。每 tick 内层循环清空积压按键，粘贴突发不丢键。"""
         try:
             import msvcrt
         except ImportError:
             return
+        self._typed_buffer = ""
         while True:
-            if not getattr(self, "_prompt_active", False) and msvcrt.kbhit():
-                ch = msvcrt.getwch()
-                if ch in ("\x00", "\xe0"):
-                    # 功能键两字节序列：吞掉第二字节，避免残留半个键
-                    if msvcrt.kbhit():
-                        msvcrt.getwch()
-                elif ch == "\x1b":
-                    cancel_cb()
-                    return
+            if getattr(self, "_prompt_active", False):
+                self._typed_buffer = ""
+            else:
+                while msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch in ("\x00", "\xe0"):
+                        # 功能键两字节序列：吞掉第二字节，避免残留半个键
+                        if msvcrt.kbhit():
+                            msvcrt.getwch()
+                        continue
+                    self._typed_buffer, submitted, cancel = _apply_key(ch, self._typed_buffer)
+                    if cancel:
+                        cancel_cb()
+                        return
+                    if submitted and len(agent._queued_user_inputs) < _INPUT_QUEUE_MAX:
+                        agent.queue_user_input(submitted)
             await asyncio.sleep(0.05)
 
     async def _run_turn_impl(
@@ -475,7 +712,12 @@ class TUI:
         usage_before = {k: v for k, v in agent.token_usage.items()}
         cost_before = agent.cost_tracker.total_cost if agent.cost_tracker else 0
         thinking_buffer = ""
-        view = StreamView(self.console, left_pad=self.PADDING[1])
+        view = StreamView(
+            self.console, left_pad=self.PADDING[1],
+            # 实时打字回显：spinner 下方挂一行已敲缓冲。翻车回退点——去掉这个
+            # 参数即逐字节恢复无回显行为，排队功能不受影响。
+            input_line=lambda: self._typed_echo_line(agent),
+        )
         view.status(Padding(Spinner("dots", text="[dim]思考中... (Esc 中断)[/dim]"), self.PADDING))
 
         # 拖图/贴路径自动附图：[Image #N] 占位符（拖入）+ 裸路径（打字）一起解析。
@@ -493,12 +735,16 @@ class TUI:
                 if isinstance(event, ThinkingDelta):
                     thinking_buffer += event.text
                     last_line = thinking_buffer.split("\n")[-1]
-                    if len(last_line) > 80:
-                        last_line = last_line[:80] + "..."
-                    view.status(Padding(
-                        Text.from_markup(f"[dim italic]思考中... {last_line}[/dim italic]"),
-                        self.PADDING,
-                    ))
+                    # 按显示宽度截断到单行内（含左右 padding 与"思考中... "前缀），
+                    # 保证 spinner 恒为一行，避免双宽中文撑到两行造成残影堆叠。
+                    prefix = "思考中... "
+                    budget = self.console.width - self.PADDING[1] * 2 - cell_len(prefix)
+                    last_line = _fit_cells(last_line, budget)
+                    # from_markup 会把正文里的 [ ] 当标记解析——思考文本含方括号会串样式，
+                    # 故用 Text() 组装，仅前缀带样式。
+                    line = Text.from_markup("[dim italic]思考中... [/dim italic]")
+                    line.append(last_line, style="dim italic")
+                    view.status(Padding(line, self.PADDING))
 
                 elif isinstance(event, TextDelta):
                     thinking_buffer = ""
@@ -523,9 +769,8 @@ class TUI:
                         ))
                     else:
                         # 折叠模式：执行中只挂瞬态状态行，不落常驻痕迹
-                        summary = arg_summary(event.tool_name, event.arguments)
                         view.status(Padding(
-                            Spinner("dots", text=f"[dim]● {event.tool_name}({summary})[/dim]"),
+                            self._tool_spinner(event.tool_name, event.arguments),
                             self.PADDING,
                         ))
 
@@ -567,26 +812,43 @@ class TUI:
                     ))
                     self._at_gap = False
 
+                elif isinstance(event, QueuedInputInjected):
+                    # 执行中插话已注入：停 spinner 后 scrollback 回显 ❯ 原文
+                    # （与 CompactNotice 同款"停 Live 再 print"安全模式，零残影风险）。
+                    # 用户文本是任意内容，纯 Text 组装防 [ ] 被当 markup 解析。
+                    view.flush_text()
+                    view.stop_status()
+                    self._gap()
+                    line = Text("❯ ", style="bold green")
+                    line.append(event.text)
+                    self.console.print(Padding(line, self.PADDING))
+                    self._at_gap = False
+
                 elif isinstance(event, ShellOutput):
                     style = "dim" if event.stream == "stdout" else "dim red"
-                    display_line = event.line if len(event.line) <= 120 else event.line[:120] + "..."
+                    # 命令输出是任意文本：纯 Text 组装防 [ ] 被当标记解析，
+                    # 按 cell 截断防双宽字符撑到两行留残影（与思考行同一根因）。
+                    budget = self.console.width - self.PADDING[1] * 2 - 2  # 2 = 左侧缩进
                     view.status(Padding(
-                        Text.from_markup(f"[{style}]  {display_line}[/{style}]"),
+                        Text("  " + _fit_cells(event.line, budget), style=style),
                         self.PADDING,
                     ))
 
                 elif isinstance(event, BatchProgress):
-                    prompt_preview = event.task_prompt[:50] + "..." if len(event.task_prompt) > 50 else event.task_prompt
                     status_style = "green" if event.status == "completed" else "red"
-                    view.status(Padding(
-                        Text.from_markup(
-                            f"[cyan]并行任务 {event.completed}/{event.total}[/cyan] "
-                            f"[{status_style}]{event.status}[/{status_style}] "
-                            f"[dim]{prompt_preview}[/dim]"
-                        ), self.PADDING,
-                    ))
+                    line = Text()
+                    line.append(f"并行任务 {event.completed}/{event.total} ", style="cyan")
+                    line.append(f"{event.status} ", style=status_style)
+                    # 任务 prompt 多为中文/自由文本：按 cell 补满剩余预算并纯 Text
+                    # 组装，保证状态行恒为一行且 [ ] 不被当标记解析。
+                    budget = self.console.width - self.PADDING[1] * 2 - line.cell_len
+                    line.append(_fit_cells(event.task_prompt, budget), style="dim")
+                    view.status(Padding(line, self.PADDING))
 
                 elif isinstance(event, ConfirmRequest):
+                    # 提前置位：从这里到 prompt_async 之间的每一次 print 都是
+                    # key listener 抢键窗口（0.05s 轮询），置晚了会吞确认框首键
+                    self._prompt_active = True
                     view.flush_text()
                     view.stop_status()
                     self._gap()
@@ -601,7 +863,6 @@ class TUI:
                     self.console.print(Padding(
                         self._confirm_args_display(event.arguments), self.PADDING,
                     ))
-                    self._prompt_active = True  # 暂停 Esc 监听，避免抢确认框按键
                     try:
                         confirm_session = PromptSession()
                         with patch_stdout():
@@ -625,15 +886,16 @@ class TUI:
                                 Spinner("dots", text="[dim]执行中...[/dim]"), self.PADDING,
                             ))
                         else:
-                            summary = arg_summary(event.tool_name, event.arguments)
                             view.status(Padding(
-                                Spinner("dots", text=f"[dim]● {event.tool_name}({summary})[/dim]"),
+                                self._tool_spinner(event.tool_name, event.arguments),
                                 self.PADDING,
                             ))
                     else:
                         self.console.print("  [yellow]✗ 已拒绝[/yellow]")
 
                 elif isinstance(event, PlanApproval):
+                    # 提前置位，理由同 ConfirmRequest
+                    self._prompt_active = True
                     view.flush_text()
                     view.stop_status()
                     self._gap()
@@ -647,7 +909,6 @@ class TUI:
                         "[bold]1[/bold] 批准执行   [bold]2[/bold] 批准并自动接受编辑   "
                         "[bold]3[/bold] 提修改建议   [bold]4[/bold] 取消"
                     ), self.PADDING))
-                    self._prompt_active = True  # 暂停 Esc 监听，避免抢审批框按键
                     try:
                         plan_session = PromptSession()
                         with patch_stdout():
@@ -681,7 +942,18 @@ class TUI:
                         self._prompt_active = False
 
                 elif isinstance(event, AgentDone):
-                    pass
+                    # 正文内容已由 TextDelta 流式上屏（displayed=True）；错误/告警/
+                    # 上限提示等从未上屏的终局消息在此补显——此前一律 pass，
+                    # "LLM 调用失败"“空响应"等在 TUI 里无声无息（2026-07-17 事故）。
+                    if event.content and not event.displayed:
+                        view.flush_text()
+                        view.stop_status()
+                        self._gap()
+                        # 纯 Text 组装：错误文本可能含异常原文的 [ ]，不能走 markup
+                        self.console.print(Padding(
+                            Text(event.content, style="yellow"), self.PADDING,
+                        ))
+                        self._at_gap = False
 
         finally:
             view.close()
@@ -753,6 +1025,16 @@ class TUI:
             text.append(f"{k}=", style="dim")
             text.append(s, style="bold" if k == "command" else "dim")
         return text
+
+    def _tool_spinner(self, tool_name: str, arguments: dict) -> Spinner:
+        """折叠模式的工具执行动效：整行按显示宽度压进单行。
+
+        参数摘要是模型生成的自由文本——纯 Text 组装防 [ ] 被当标记解析，
+        _fit_cells 防长参数/双宽字符撑到两行留残影（与思考行同一根因）。"""
+        summary = arg_summary(tool_name, arguments)
+        budget = self.console.width - self.PADDING[1] * 2 - 2  # 2 = spinner 字形 + 空格
+        line = Text(_fit_cells(f"● {tool_name}({summary})", budget), style="dim")
+        return Spinner("dots", text=line)
 
     def _brief_args(self, args: dict) -> str:
         parts = []

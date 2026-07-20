@@ -11,6 +11,9 @@ from loongcli.tools.base import Tool
 from loongcli.core.events import ShellOutput
 
 _GRACEFUL_WAIT = 3  # seconds to wait between terminate and kill
+# 单条流的内存上限：超限后仍持续读取（让子进程别因管道满而阻塞），但不再累积进
+# lines，防 `yes` 这类无限输出在超时窗口内把内存吃满。
+_MAX_STREAM_CHARS = 5_000_000
 
 
 class _WindowsJob:
@@ -22,6 +25,14 @@ class _WindowsJob:
     由内核在进程创建时继承，与父子链无关，是 Windows 上唯一可靠的整树终止。
     KILL_ON_JOB_CLOSE 兜底：句柄关闭（含 loongcli 崩溃）时内核自动收尸——
     命令正常结束后关句柄也会带走它遗留的后台进程，harness 不留隐形残留。
+
+    ⚠ 不能加 JOB_OBJECT_LIMIT_BREAKAWAY_OK（看似是常驻 daemon 的 opt-in 出口）：
+    MSYS2/Cygwin runtime 一旦发现所在 job 允许 breakaway，会给它创建的**所有**
+    子进程加 CREATE_BREAKAWAY_FROM_JOB——git bash 的全部后代逃逸，整树终止
+    彻底失效（2026-07-16 A/B 实测：0x2800 下孙进程 not-in-job 且关句柄后存活）。
+    命令需要启动常驻 daemon 时，正解是经 job 外的中介创建进程（如 WMI
+    Win32_Process.Create，新进程挂在 WmiPrvSE 下、不继承调用者的 job）——
+    见 D:/skills/chrome-cli 的 _start_daemon。
     """
 
     def __init__(self, handle):
@@ -68,6 +79,7 @@ class _WindowsJob:
             return None
         info = _ExtendedLimits()
         info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
         ok = k32.SetInformationJobObject(
             handle, 9,  # JobObjectExtendedLimitInformation
             ctypes.byref(info), ctypes.sizeof(info),
@@ -198,9 +210,17 @@ class ShellTool(Tool):
         self._progress_callback = None
 
     async def _read_stream(self, stream, stream_name: str, lines: list[str]):
+        total = 0
+        capped = False
         async for raw in stream:
             line = raw.decode("utf-8", errors="replace").rstrip("\n").rstrip("\r")
-            lines.append(line)
+            if total < _MAX_STREAM_CHARS:
+                lines.append(line)
+                total += len(line) + 1
+                if total >= _MAX_STREAM_CHARS and not capped:
+                    lines.append("... (输出过多，后续内容已丢弃)")
+                    capped = True
+            # 超限后继续消费 stream（不 append）——避免管道写满阻塞子进程
             if self._progress_callback:
                 self._progress_callback(ShellOutput(line=line, stream=stream_name))
 
@@ -316,7 +336,11 @@ def _build_result(stdout_lines: list[str], stderr_lines: list[str], returncode: 
             output = f"[exit code: {returncode}]\n{output}"
 
     if len(output) > 10000:
-        output = output[:10000] + "\n... (output truncated)"
+        # 留头+尾：测试/编译的关键信息（assertion、summary、报错）常在尾部，
+        # 只留头会把最有用的部分丢掉。
+        head = output[:7000]
+        tail = output[-3000:]
+        output = f"{head}\n... (中间 {len(output) - 10000} 字符已省略) ...\n{tail}"
 
     return output if output else "(no output)"
 

@@ -123,13 +123,25 @@ class SkillRegistry:
         logger.info("Loaded %d skills", len(self._skills))
 
     def _scan_dir(self, base: Path):
-        for entry in sorted(base.iterdir()):
-            if not entry.is_dir():
+        try:
+            entries = sorted(base.iterdir())
+        except OSError as e:
+            logger.warning("Cannot list skill dir %s: %s", base, e)
+            return
+        for entry in entries:
+            # 单个坏条目（悬空 junction、无权限）不放倒整个注册器——真机：
+            # 悬空 junction 抛 WinError 1920，没有这层防护整个技能系统随启动一起崩。
+            try:
+                if not entry.is_dir():
+                    continue
+                skill_md = entry / "SKILL.md"
+                if not skill_md.is_file():
+                    skill_md = entry / "skill.md"
+                found = skill_md.is_file()
+            except OSError as e:
+                logger.warning("Skipping unreadable skill entry %s: %s", entry, e)
                 continue
-            skill_md = entry / "SKILL.md"
-            if not skill_md.is_file():
-                skill_md = entry / "skill.md"
-            if skill_md.is_file():
+            if found:
                 meta = _parse_skill_file(skill_md)
                 if meta and meta.name not in self._skills:
                     self._skills[meta.name] = meta
@@ -137,6 +149,10 @@ class SkillRegistry:
                 self._scan_nested_skills(entry)
 
     def _scan_nested_skills(self, project_dir: Path):
+        # 仅认项目约定目录，刻意不递归任意 collection/skills/——全局技能是「精选」，
+        # 不是「扫到就算」。技能集合（如 obra/superpowers：仓库根/skills/技能名/SKILL.md）
+        # 要挂用户级，就在 skill_dirs 里显式指向它的 skills/ 子目录（一次配置=一次背书）；
+        # 否则放项目级 .claude/skills 或 .loongcli/skills，只在该项目里加载。
         for prefix in (".claude/skills", ".loongcli/skills"):
             skills_dir = project_dir / prefix
             if skills_dir.is_dir():

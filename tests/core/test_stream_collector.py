@@ -37,6 +37,31 @@ async def test_collect_text_only():
 
 
 @pytest.mark.asyncio
+async def test_collect_captures_finish_reason():
+    """finish_reason 是截断/正常结束/内容过滤的唯一判别依据，必须收进 response。"""
+    chunks = []
+    for content, fr in [("hi", None), (None, "length")]:
+        chunk = MagicMock()
+        chunk.choices = [MagicMock()]
+        chunk.choices[0].delta.content = content
+        chunk.choices[0].delta.tool_calls = None
+        chunk.choices[0].finish_reason = fr
+        chunk.usage = None
+        chunks.append(chunk)
+
+    collector = StreamCollector()
+
+    async def fake_stream():
+        for c in chunks:
+            yield c
+
+    async for _ in collector.collect(fake_stream()):
+        pass
+
+    assert collector.response.finish_reason == "length"
+
+
+@pytest.mark.asyncio
 async def test_collect_with_tool_call():
     chunks = []
 

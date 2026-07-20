@@ -14,11 +14,11 @@ venv/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
-CLAUDE.md
-LOONG.md
+# 内部文档（docs/tasks/CLAUDE.md/LOONG.md）自 2026-07-19 起在 dev 追踪——
+# 此前不追踪导致零版本历史（todo 覆写/材料校准/文档重写全部不可回溯）。
+# 隐私由结构保证，不靠此处忽略：dev 永不推送（pre-push 钩子拦截）+
+# 推送 master 走 scripts/push-master.sh（确定性剔除 + 断言双闸）。
 demo/
-docs/
-tasks/
 .playwright-mcp/
 bench/worktrees/
 bench/results/

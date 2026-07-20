@@ -263,6 +263,10 @@ select:focus, input:focus, textarea:focus { border-color: var(--gold); }
 .tag-project   { color: var(--slate); border-color: var(--slate); }
 .tag-reference { color: var(--lilac); border-color: var(--lilac); }
 
+/* 作用域标签：全局库醒目金色，项目库（多数条目）弱化 */
+.tag-scope-global  { color: var(--gold);        border-color: var(--gold); }
+.tag-scope-project { color: var(--paper-faint); border-color: var(--paper-faint); }
+
 .filter-tabs { display: flex; gap: 0; border: 1px solid var(--line); }
 
 .filter-tabs button {
@@ -365,6 +369,9 @@ select:focus, input:focus, textarea:focus { border-color: var(--gold); }
   overflow-y: auto;
   color: var(--paper-dim);
 }
+
+/* 折叠块里 md 渲染的内容（如压缩摘要）与 pre 同样限高滚动，展开不撑爆页面 */
+.tool-body > .md { max-height: 420px; overflow-y: auto; }
 
 .show-more-btn { width: 100%; margin-bottom: 18px; }
 

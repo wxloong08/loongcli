@@ -17,6 +17,9 @@ class TaskStatus(Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    # 超时≠失败：被超时取消的任务通常已有部分成果（工具调用、已读页面），
+    # 与真正报错的任务必须可区分——gomami 事故里 8 篇已读测评被当零结果丢弃
+    TIMEOUT = "timeout"
 
 
 @dataclass
@@ -59,16 +62,22 @@ class TaskManager:
         if not task:
             return f"错误：未找到任务 {task_id}"
 
-        task.mailbox.append(message)
+        # RUNNING：塞信箱，由运行中的 agent 循环 drain。
+        if task.status == TaskStatus.RUNNING:
+            task.mailbox.append(message)
+            return f"消息已送达任务 {task_id}"
 
+        # COMPLETED 且可唤醒：塞信箱并复活。
         if task.status == TaskStatus.COMPLETED and task._agent_loop:
+            task.mailbox.append(message)
             task.status = TaskStatus.RUNNING
             task._async_task = asyncio.create_task(
                 self._run_agent_with_limit(task, resume_message=message)
             )
             return f"已唤醒任务 {task_id}，消息已送达"
 
-        return f"消息已送达任务 {task_id}"
+        # FAILED，或 COMPLETED 但无 agent_loop 无法唤醒——不塞死信箱假成功，明确报错。
+        return f"任务 {task_id} 已结束（{task.status.value}），无法接收消息，请另派新任务"
 
     def get_status(self, task_id: str) -> dict[str, Any]:
         task = self._tasks.get(task_id)

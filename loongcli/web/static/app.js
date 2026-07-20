@@ -210,9 +210,41 @@ function renderToolBlock(tc, result) {
     </details>`;
 }
 
+/* 机器注入的上下文管道消息：压缩摘要 / 恢复附件一条能顶几屏，人类浏览时是
+   噪音，默认折叠、点击展开（同工具调用块）。marker/ack 字面量须与
+   core/compact.py 与 core/attachments.py 的常量保持一致。 */
+const CONTEXT_MARKERS = [
+  // 摘要是压缩器生成的规范 markdown，渲染无风险；恢复附件装的是任意文件
+  // 原文（含 ``` 围栏），md 渲染遇文件自带围栏即嵌套破碎，且审计场景要
+  // 忠实字节——保持 pre 原样。
+  ["[对话历史摘要]", "对话历史摘要", "md"],
+  ["[压缩后上下文恢复]", "压缩后上下文恢复", "pre"],
+];
+const CONTEXT_ACKS = new Set([
+  "好的，我已了解之前的对话内容。请继续。",
+  "好的，我已了解恢复的上下文信息，继续工作。",
+]);
+
+function renderContextBlock(label, body, mode) {
+  const inner = mode === "md" ? md(body) : `<pre>${esc(body)}</pre>`;
+  return `
+    <details class="tool-block">
+      <summary>
+        <span class="tool-name">${esc(label)}</span>
+        <span class="tool-args-preview">${body.length.toLocaleString()} 字 · 机器注入的上下文</span>
+      </summary>
+      <div class="tool-body">${inner}</div>
+    </details>`;
+}
+
 function renderMessage(m, toolResults) {
   if (m.role === "user") {
     const text = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+    for (const [marker, label, mode] of CONTEXT_MARKERS) {
+      if (text.startsWith(marker)) {
+        return renderContextBlock(label, text.slice(marker.length).trim(), mode);
+      }
+    }
     return `<div class="msg msg-user">${esc(text)}</div>`;
   }
   if (m.role === "system") {
@@ -220,6 +252,12 @@ function renderMessage(m, toolResults) {
       `<span class="role-label">SYSTEM</span>${esc(m.content || "")}</div>`;
   }
   if (m.role === "assistant") {
+    // 对折叠块的固定应答（"好的，我已了解…"）是协议噪音：并入 system 消息
+    // 开关，默认隐藏，勾选"显示 system 消息"可见
+    if (typeof m.content === "string" && CONTEXT_ACKS.has(m.content.trim())) {
+      return `<div class="msg msg-system" data-sys hidden>` +
+        `<span class="role-label">ACK</span>${esc(m.content)}</div>`;
+    }
     let html = "";
     if (m.content) html += md(m.content);
     for (const tc of m.tool_calls || []) {
@@ -327,7 +365,7 @@ async function renderMemoryList() {
   stage.innerHTML = `
     <div class="page-head">
       <div class="page-title">记忆<span class="en">MEMORY</span></div>
-      <div class="page-sub">~/.loongcli/memory · ${data.memories.length} 条</div>
+      <div class="page-sub">当前项目库 + 全局库 · ${data.memories.length} 条</div>
     </div>
     <div class="toolbar">
       <div class="filter-tabs">${tabs}</div>
@@ -344,7 +382,7 @@ async function renderMemoryList() {
       : data.memories;
     document.getElementById("memory-list").innerHTML = filtered.map(m => `
       <a class="card" href="#/memories/${encodeURIComponent(m.name)}">
-        <div class="card-title"><span class="tag tag-${esc(m.type)}">${esc(m.type)}</span> &nbsp;${esc(m.name)}</div>
+        <div class="card-title"><span class="tag tag-${esc(m.type)}">${esc(m.type)}</span>${m.scope ? `&nbsp;<span class="tag tag-scope-${esc(m.scope)}">${m.scope === "global" ? "全局" : "项目"}</span>` : ""} &nbsp;${esc(m.name)}</div>
         <div class="card-meta">
           <span>${esc(m.description)}</span>
           <span>${relTime(m.updated_at)}</span>
@@ -372,7 +410,7 @@ async function renderMemoryDetail(name) {
     <div class="memo-head">
       <div class="page-head" style="margin-bottom:0">
         <div class="page-title">${esc(m.name)}</div>
-        <div class="page-sub"><span class="tag tag-${esc(m.type)}">${esc(m.type)}</span> &nbsp;${esc(m.description)}</div>
+        <div class="page-sub"><span class="tag tag-${esc(m.type)}">${esc(m.type)}</span>${m.scope ? `&nbsp;<span class="tag tag-scope-${esc(m.scope)}">${m.scope === "global" ? "全局" : "项目"}</span>` : ""} &nbsp;${esc(m.description)}</div>
       </div>
       <div class="form-actions">
         <button class="btn" id="edit-btn">编辑</button>

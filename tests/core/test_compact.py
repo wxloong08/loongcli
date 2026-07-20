@@ -5,8 +5,7 @@ from loongcli.core.compact import (
     COMPACT_INSTRUCTION, TOOL_RESULT_PLACEHOLDER, BOUNDARY_TEMPLATE,
     SNIP_AGE_THRESHOLD,
     _extract_summary, _segment_turns, _replace_tool_results, _fix_role_alternation,
-    micro_compact, snip,
-    RECLAIMABLE_TOOLS, MICRO_COMPACT_KEEP_RECENT, CLEARED_PLACEHOLDER,
+    snip,
 )
 
 
@@ -49,11 +48,11 @@ def _make_turn_messages(with_system: bool = True) -> list[dict]:
 
 
 def _make_messages_with_tools(n_turns: int) -> list[dict]:
-    """>20 轮 + 多个可回收工具结果——snip 和 micro_compact 在这种数据上会真的删改。"""
+    """>20 轮 + 多个工具结果——snip 在这种数据上会真的删旧轮。"""
     msgs: list[dict] = [{"role": "system", "content": "you are helpful"}]
     for i in range(n_turns):
         msgs.append({"role": "user", "content": f"question {i}"})
-        if i < 8:  # 前 8 轮带工具结果（> MICRO_COMPACT_KEEP_RECENT，micro_compact 会清理最老的）
+        if i < 8:  # 前 8 轮带工具结果
             msgs.append({"role": "assistant", "content": None,
                          "tool_calls": [{"id": f"tc{i}", "function": {"name": "read_file", "arguments": "{}"}}]})
             msgs.append({"role": "tool", "tool_call_id": f"tc{i}", "content": "x" * 500})
@@ -371,19 +370,17 @@ class TestCompact:
 
         llm = MagicMock()
         llm.model = "deepseek-v4-pro"
-        llm.cache_aware = True
         llm.chat_stream = capture
         c = Compactor(llm=llm, threshold=100)
 
-        msgs = _make_messages_with_tools(25)  # >20 轮 + 8 个工具结果：snip/micro 本会删改
+        msgs = _make_messages_with_tools(25)  # >20 轮 + 8 个工具结果：snip 本会删旧轮
         await c.compact(msgs, pre_tokens=500)  # 远在窗口内
 
         sent = calls[0]["messages"]
-        assert len(sent) == len(msgs) + 1, "窗口内应喂完整历史，不做 snip/micro 删减"
-        assert not any(CLEARED_PLACEHOLDER in str(m.get("content") or "") for m in sent), "不应清理工具结果"
+        assert len(sent) == len(msgs) + 1, "窗口内应喂完整历史（吃缓存），不做任何删减"
 
     async def test_degrades_to_snip_when_over_window(self):
-        """pre_tokens 超窗口 → 降级到 snip+micro_compact 兜底（牺牲缓存换不溢出）。"""
+        """pre_tokens 超窗口 → snip 扔最老的消息兜底（牺牲缓存换请求不溢出）。"""
         calls: list[dict] = []
 
         async def capture(**kwargs):
@@ -398,7 +395,6 @@ class TestCompact:
 
         llm = MagicMock()
         llm.model = "deepseek-v4-pro"
-        llm.cache_aware = True
         llm.chat_stream = capture
         c = Compactor(llm=llm, threshold=100)
 
@@ -406,37 +402,9 @@ class TestCompact:
         await c.compact(msgs, pre_tokens=10_000_000)  # 远超窗口
 
         sent = calls[0]["messages"]
-        degraded = len(sent) < len(msgs) + 1 or any(
-            CLEARED_PLACEHOLDER in str(m.get("content") or "") for m in sent)
-        assert degraded, "超窗口应降级到 snip+micro_compact"
-
-    async def test_non_cache_aware_runs_full_pyramid(self):
-        """非 cache-aware provider（无强缓存）→ 摘要走完整金字塔（snip+micro 减 token），即使窗口内。"""
-        calls: list[dict] = []
-
-        async def capture(**kwargs):
-            calls.append(kwargs)
-            chunk = MagicMock()
-            chunk.choices = [MagicMock()]
-            chunk.choices[0].delta.content = "<summary>本轮对话完成了压缩测试所需的全部准备工作，包括消息构造、角色交替修复、附件重建与边界标记，所有细节均已核对无误。</summary>"
-            chunk.choices[0].delta.tool_calls = None
-            chunk.choices[0].finish_reason = "stop"
-            chunk.usage = None
-            yield chunk
-
-        llm = MagicMock()
-        llm.model = "gpt-4o"
-        llm.cache_aware = False
-        llm.chat_stream = capture
-        c = Compactor(llm=llm, threshold=100)
-
-        msgs = _make_messages_with_tools(25)
-        await c.compact(msgs, pre_tokens=500)  # 窗口内，但非 cache-aware → 仍走完整金字塔减 token
-
-        sent = calls[0]["messages"]
-        degraded = len(sent) < len(msgs) + 1 or any(
-            CLEARED_PLACEHOLDER in str(m.get("content") or "") for m in sent)
-        assert degraded, "非 cache-aware 应走完整金字塔（snip+micro），即使窗口内"
+        assert len(sent) < len(msgs) + 1, "超窗口应 snip 扔旧轮，摘要请求不能超窗"
+        # provider 无关：统一逻辑下不存在"非 cache-aware 走金字塔"的第二条路径
+        # （金字塔已删 2026-07-19，理由见 compact.py 注释与 interview-qa Q43）
 
 
 # --- _extract_summary ---
@@ -648,89 +616,6 @@ class TestCompactBoundary:
         msgs = _make_messages(15)
         result = await c.compact(msgs, mode="exit")
         assert "mode=exit" in result[1]["content"]
-
-
-# --- micro_compact ---
-
-class TestMicroCompact:
-    def test_preserves_recent_reclaimable(self):
-        """Old reclaimable results are cleared, recent ones preserved."""
-        msgs = []
-        for i in range(8):
-            msgs.append({"role": "user", "content": f"q{i}"})
-            msgs.append({"role": "assistant", "content": None, "tool_calls": [
-                {"id": f"tc{i}", "function": {"name": "read_file", "arguments": f'{{"path":"f{i}.py"}}'}}
-            ]})
-            msgs.append({"role": "tool", "tool_call_id": f"tc{i}", "content": f"content of f{i}"})
-            msgs.append({"role": "assistant", "content": f"answer {i}"})
-        result = micro_compact(msgs)
-        tool_msgs = [m for m in result if m["role"] == "tool"]
-        preserved = [m for m in tool_msgs if "content of" in m["content"]]
-        cleared = [m for m in tool_msgs if m["content"] == CLEARED_PLACEHOLDER]
-        assert len(preserved) == MICRO_COMPACT_KEEP_RECENT
-        assert len(cleared) == 3  # 8 - 5 = 3
-
-    def test_never_clears_non_reclaimable(self):
-        """Non-reclaimable tool results (delegate, recall, etc.) are never touched."""
-        msgs = []
-        # 8 delegate calls — all should be preserved
-        for i in range(8):
-            msgs.append({"role": "user", "content": f"q{i}"})
-            msgs.append({"role": "assistant", "content": None, "tool_calls": [
-                {"id": f"tc{i}", "function": {"name": "delegate", "arguments": "{}"}}
-            ]})
-            msgs.append({"role": "tool", "tool_call_id": f"tc{i}", "content": f"subtask result {i}"})
-            msgs.append({"role": "assistant", "content": f"done {i}"})
-        result = micro_compact(msgs)
-        tool_msgs = [m for m in result if m["role"] == "tool"]
-        assert all("subtask result" in m["content"] for m in tool_msgs)
-
-    def test_mixed_reclaimable_and_non_reclaimable(self):
-        """Only reclaimable tools get cleared; non-reclaimable are untouched."""
-        msgs = []
-        # 6 read_file + 3 recall
-        for i in range(6):
-            name = "read_file"
-            msgs.append({"role": "user", "content": f"q{i}"})
-            msgs.append({"role": "assistant", "content": None, "tool_calls": [
-                {"id": f"tc{i}", "function": {"name": name, "arguments": "{}"}}
-            ]})
-            msgs.append({"role": "tool", "tool_call_id": f"tc{i}", "content": f"file {i}"})
-            msgs.append({"role": "assistant", "content": f"a{i}"})
-        for i in range(3):
-            msgs.append({"role": "user", "content": f"recall {i}"})
-            msgs.append({"role": "assistant", "content": None, "tool_calls": [
-                {"id": f"rc{i}", "function": {"name": "recall", "arguments": "{}"}}
-            ]})
-            msgs.append({"role": "tool", "tool_call_id": f"rc{i}", "content": f"memory {i}"})
-            msgs.append({"role": "assistant", "content": f"noted {i}"})
-        result = micro_compact(msgs)
-        # 6 read_file - 5 kept = 1 cleared
-        cleared = [m for m in result if m.get("role") == "tool" and m["content"] == CLEARED_PLACEHOLDER]
-        assert len(cleared) == 1
-        # All recall results preserved
-        recall_msgs = [m for m in result if m.get("role") == "tool" and "memory" in m["content"]]
-        assert len(recall_msgs) == 3
-
-    def test_empty_messages(self):
-        assert micro_compact([]) == []
-
-    def test_no_tool_messages(self):
-        msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
-        assert micro_compact(msgs) == msgs
-
-    def test_fewer_than_keep_recent_unchanged(self):
-        """If fewer reclaimable results than KEEP_RECENT, nothing changes."""
-        msgs = []
-        for i in range(3):
-            msgs.append({"role": "user", "content": f"q{i}"})
-            msgs.append({"role": "assistant", "content": None, "tool_calls": [
-                {"id": f"tc{i}", "function": {"name": "grep", "arguments": "{}"}}
-            ]})
-            msgs.append({"role": "tool", "tool_call_id": f"tc{i}", "content": f"match {i}"})
-            msgs.append({"role": "assistant", "content": f"found {i}"})
-        result = micro_compact(msgs)
-        assert result == msgs
 
 
 # ── 含图历史的 token 兜底估算 ────────────────────────────────────────

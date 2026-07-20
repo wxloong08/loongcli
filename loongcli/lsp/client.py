@@ -91,6 +91,17 @@ class JsonRpcClient:
                     future.set_exception(LSPError(msg["error"]))
                 else:
                     future.set_result(msg.get("result"))
+            elif "method" in msg and "id" in msg:
+                # 服务器发起的请求（workspace/configuration、client/registerCapability 等）。
+                # 我们不实现动态能力，但必须回一个响应——否则服务器会阻塞等待，某些实现
+                # （rust-analyzer 等）会卡在初始化。回 MethodNotFound 让它按无此能力继续。
+                try:
+                    await self._send({
+                        "jsonrpc": "2.0", "id": msg["id"],
+                        "error": {"code": -32601, "message": "Method not found"},
+                    })
+                except Exception:
+                    logger.debug("Failed to reply to server request %s", msg.get("method"), exc_info=True)
             elif "method" in msg and "id" not in msg:
                 if self._notification_handler:
                     try:

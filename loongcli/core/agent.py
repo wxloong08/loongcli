@@ -3,19 +3,23 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
+import time
 from collections import deque
+from pathlib import Path
+from dataclasses import dataclass
 from typing import AsyncIterator, Callable
 
 from loongcli.core.llm import LLMClient
-from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress, PlanApproval
+from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone, CompactStart, CompactNotice, TaskNotification, ConfirmRequest, BatchProgress, PlanApproval, QueuedInputInjected
 from loongcli.core.stream_collector import StreamCollector
-from loongcli.core.compact import Compactor, model_context_window
-from loongcli.core.context_collapse import should_collapse, collapse
+from loongcli.core.compact import Compactor, _estimate_tokens
 from loongcli.core.messages import (
     message_text, has_images, build_user_content, recycle_old_images, parse_image_sentinel,
 )
 from loongcli.core.circuit_breaker import CompactCircuitBreaker
+from loongcli.core.telemetry import EventLogger, NULL_TELEMETRY
 from loongcli.core.tool_result_manager import ToolResultManager
 from loongcli.tools.base import ToolRegistry
 from loongcli.tools.routing import AgentRole
@@ -92,12 +96,21 @@ ACTIVE_PLAN_INJECTION_TEMPLATE = """\
 """
 
 
-def _log_task_exception(task: asyncio.Task) -> None:
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc:
-        logger.warning("Background task failed: %s", exc)
+@dataclass
+class AgentServices:
+    """AgentLoop 的可选服务依赖集合——把散落在构造函数里的 9 个 service 收拢成一个包，
+    构造点只传 services= 一项（此前 18 参构造函数的主要来源）。全部可选（默认 None），
+    主装配注入全部、子代理/测试按需注入。内部仍用 self.<name> 引用，不改调用点。"""
+    conversation_store: "ConversationStore | None" = None
+    compactor: "Compactor | None" = None
+    task_manager: object | None = None
+    hook_manager: "HookManager | None" = None
+    skill_registry: "SkillRegistry | None" = None
+    system_prompt_builder: "Callable[[], str] | None" = None
+    recall_engine: object | None = None
+    auto_extractor: object | None = None
+    checkpoint_manager: object | None = None
+    telemetry: "EventLogger | None" = None
 
 
 class AgentLoop:
@@ -109,19 +122,12 @@ class AgentLoop:
         system_prompt: str = "",
         max_iterations: int = 50,
         max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN,
-        conversation_store: ConversationStore | None = None,
-        compactor: Compactor | None = None,
-        task_manager=None,
         task=None,
         role: AgentRole = AgentRole.MAIN,
-        hook_manager: HookManager | None = None,
-        skill_registry: SkillRegistry | None = None,
-        system_prompt_builder: Callable[[], str] | None = None,
-        recall_engine=None,
-        auto_extractor=None,
-        checkpoint_manager=None,
         interactive: bool = True,
+        services: AgentServices | None = None,
     ):
+        services = services or AgentServices()
         self.llm = llm
         self.tool_registry = tool_registry
         self.permission_checker = permission_checker
@@ -129,18 +135,21 @@ class AgentLoop:
         # 无人工交互通道（子代理 / 后台任务）：CONFIRM 无人应答，故直接当 DENY 处理，
         # 而不是 yield 一个无人消费的 ConfirmRequest（那会 await future 永久挂起）。见 run_stream。
         self.interactive = interactive
-        self.hook_manager = hook_manager
         self.max_iterations = max_iterations
-        self.conversation_store = conversation_store
-        self.compactor = compactor
-        self.task_manager = task_manager
-        self.task = task
         self.max_tool_calls = max_tool_calls
-        self.skill_registry = skill_registry
-        self._system_prompt_builder = system_prompt_builder
-        self.recall_engine = recall_engine
-        self.auto_extractor = auto_extractor
-        self.checkpoint_manager = checkpoint_manager
+        self.task = task
+        # 服务依赖从 services 包解出，内部引用保持 self.<name> 不变
+        self.conversation_store = services.conversation_store
+        self.compactor = services.compactor
+        self.task_manager = services.task_manager
+        self.hook_manager = services.hook_manager
+        self.skill_registry = services.skill_registry
+        self._system_prompt_builder = services.system_prompt_builder
+        self.recall_engine = services.recall_engine
+        self.auto_extractor = services.auto_extractor
+        self.checkpoint_manager = services.checkpoint_manager
+        # 空对象兜底：埋点处直接 emit，无需 None 检查
+        self.telemetry = services.telemetry or NULL_TELEMETRY
         self.cost_tracker = None
         self.plan_store = None
         self.lsp_manager = None
@@ -148,6 +157,10 @@ class AgentLoop:
         self._active_plan_id: str | None = None
         self._last_checkpoint: str | None = None
         self._files_modified_this_turn: list[str] = []
+        # 读后写硬闸的状态表：normcase(resolve(path)) → (mtime_ns, size)。
+        # 覆盖已存在的文件前必须本会话读过且读后未被外部改动——防「凭（compact 后
+        # 退化的）记忆整篇重写」这一事故根因。每个 AgentLoop 实例独立，子代理同样约束。
+        self._file_read_state: dict[str, tuple[int, int]] = {}
         self._test_ran_this_turn: bool = False
         from loongcli.core.verify_loop import VerifyState, MAX_VERIFY_ROUNDS
         self._verify_state = VerifyState()
@@ -174,30 +187,25 @@ class AgentLoop:
         self._exhausted_strikes: int = 0
         self._result_manager = ToolResultManager()
         self._compact_breaker = CompactCircuitBreaker()
+        # 执行中排队的用户插话：TUI key listener 在轮次运行时 queue_user_input()，
+        # run_stream 在迭代边界 drain 注入。单事件循环内同步操作，无需锁。
+        self._queued_user_inputs: list[str] = []
         self.messages: list[dict] = []
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
 
-    def _schedule_auto_extract(self):
-        if self.auto_extractor:
-            task = asyncio.create_task(self.auto_extractor.extract(list(self.messages)))
-
-            def _collect(t):
-                _log_task_exception(t)
-                try:
-                    saved = t.result()
-                except Exception:
-                    return
-                if saved:
-                    # 写入可见化：攒进 notices，TUI 在下一轮开始时展示
-                    #（后台任务完成时用户可能正停在输入行，直接打印会破坏提示符）
-                    self.memory_notices.extend(saved)
-
-            task.add_done_callback(_collect)
-
     def _persist(self):
         if self.conversation_store:
             self.conversation_store.save(self.messages)
+
+    def _effective_prompt_tokens(self) -> int:
+        """自动压缩的触发依据。优先用 API 报的真实 prompt_tokens；provider 不
+        回报 usage 时（部分本地 / 代理端点）它恒为 0，回退到基于消息的字符估算——否则
+        自动压缩会因"token 数未知"永不触发，上下文无界增长直到 API 400。
+        故意不改 should_compact 的"0=无信息"纯语义，只在此处收口。"""
+        if self._last_prompt_tokens > 0:
+            return self._last_prompt_tokens
+        return _estimate_tokens(self.messages)
 
     def abort_turn(self):
         """用户中断回合（Ctrl+C）后的消息一致性修复。
@@ -225,6 +233,17 @@ class AgentLoop:
                     })
         self.messages.append({"role": "user", "content": "[用户中断了本回合]"})
         self._persist()
+
+    def queue_user_input(self, text: str) -> None:
+        """轮次执行中排队一条用户消息，下一迭代边界注入。只应由 TUI 调用——
+        非交互模式与子代理不触碰此接口，行为与排队功能出现前逐字节一致。"""
+        self._queued_user_inputs.append(text)
+
+    def take_queued_inputs(self) -> list[str]:
+        """取走并清空排队消息（轮内 drain 与轮末收尾共用）。"""
+        taken = self._queued_user_inputs
+        self._queued_user_inputs = []
+        return taken
 
     def enter_plan_mode(self):
         self._plan_mode = True
@@ -272,6 +291,53 @@ class AgentLoop:
                 files.append(args[key])
         return files
 
+    @staticmethod
+    def _file_state_key(path: str) -> str | None:
+        """路径归一化为状态表 key。Windows 路径大小写不敏感，normcase 防同文件两个 key。"""
+        try:
+            return os.path.normcase(str(Path(path).resolve()))
+        except (OSError, ValueError):
+            return None
+
+    def _record_file_state(self, path: str) -> None:
+        key = self._file_state_key(path)
+        if not key:
+            return
+        try:
+            st = os.stat(key)
+            self._file_read_state[key] = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            pass
+
+    def _check_write_gate(self, tool_name: str, args: dict) -> str | None:
+        """读后写硬闸：修改已存在的文件前，要求本会话读过且读后未被外部改动。
+
+        新文件放行；未读过或已被外部修改则拒绝执行并要求先 read_file——
+        确定性代码闸门，不靠 LLM 自觉（prompt 规则在 compact 后会退化）。"""
+        from loongcli.core.checkpoint import MODIFY_TOOLS
+        if tool_name not in MODIFY_TOOLS:
+            return None
+        for f in self._extract_file_args(tool_name, args):
+            key = self._file_state_key(f)
+            if not key or not os.path.isfile(key):
+                continue
+            recorded = self._file_read_state.get(key)
+            if recorded is None:
+                return (
+                    f"错误：文件已存在且本会话未读取过：{f}\n"
+                    f"先用 read_file 查看当前内容，再决定用 edit_file 修改或确认覆盖。"
+                )
+            try:
+                st = os.stat(key)
+            except OSError:
+                continue
+            if (st.st_mtime_ns, st.st_size) != recorded:
+                return (
+                    f"错误：文件在读取后被外部修改：{f}\n"
+                    f"请重新 read_file 获取当前内容后再修改。"
+                )
+        return None
+
     def _maybe_checkpoint(self, tool_name: str, args: dict) -> None:
         """Save a checkpoint before file-modifying tool calls."""
         if not self.checkpoint_manager:
@@ -287,14 +353,13 @@ class AgentLoop:
         except Exception:
             logger.debug("checkpoint save failed", exc_info=True)
 
-    def _discard_checkpoint(self) -> None:
-        """Discard last checkpoint after successful tool execution."""
-        if self._last_checkpoint and self.checkpoint_manager:
-            try:
-                self.checkpoint_manager.discard(self._last_checkpoint)
-            except Exception:
-                logger.debug("checkpoint discard failed", exc_info=True)
-            self._last_checkpoint = None
+    def _release_checkpoint(self) -> None:
+        """成功路径：保留快照供 /rollback 会话内随时恢复，仅解除当前引用。
+
+        旧行为是成功即 discard——只防执行中抛异常，防不了「几轮之后用户才发现
+        内容被改坏」。留存由 CheckpointManager 自身封顶（MAX_CHECKPOINTS 淘汰
+        最旧 + 启动时清理 7 天孤儿），不会无界增长。"""
+        self._last_checkpoint = None
 
     def _restore_checkpoint(self) -> None:
         """修改类工具抛异常后回滚到最近一次 checkpoint。
@@ -345,6 +410,10 @@ class AgentLoop:
         return None
 
     async def _exec_tool_stream(self, tool_name: str, args: dict):
+        gate_err = self._check_write_gate(tool_name, args)
+        if gate_err:
+            yield ("__result__", gate_err)
+            return
         self._maybe_checkpoint(tool_name, args)
         tool = self.tool_registry._tools.get(tool_name)
         if not tool or not getattr(tool, 'supports_progress', False):
@@ -456,6 +525,7 @@ class AgentLoop:
             })
             return
         self._tool_call_count += 1
+        exec_t0 = time.monotonic()
         yield ToolCallStart(tool_name=tool_name, arguments=args)
 
         # 派发层硬闸：schema 过滤只是"告知"，有的模型（真机：qwen 在规划模式下
@@ -581,6 +651,14 @@ class AgentLoop:
         if tool_name in ("edit_file", "write_file"):
             self._test_ran_this_turn = False
 
+        # 读后写闸门状态更新：读过的文件记录 (mtime_ns, size)；写/改成功视同已知
+        # 最新内容，后续连续修改无需重读。工具级错误（"错误："）与拒绝（"⚠"）不记录。
+        if isinstance(result, str) and not tool_errored:
+            if tool_name == "read_file" and not result.startswith("错误"):
+                self._record_file_state(args.get("path", ""))
+            elif tool_name in ("write_file", "edit_file") and result.startswith("成功"):
+                self._record_file_state(args.get("path", ""))
+
         if tool_name == "shell" and isinstance(result, str):
             from loongcli.core.verify_loop import detect_test_failure, is_test_command
             if self._verify_state.is_active and detect_test_failure(result):
@@ -637,11 +715,11 @@ class AgentLoop:
                 )
 
         # 修改类工具执行中抛异常时留有备份——回滚该文件，避免半写损坏；
-        # 否则丢弃备份。
+        # 成功则保留快照供 /rollback（会话内随时可恢复）。
         if tool_errored:
             self._restore_checkpoint()
         else:
-            self._discard_checkpoint()
+            self._release_checkpoint()
 
         # read_file 读到图片：结果是 sentinel。tool 消息只放占位文本，图片攒进
         # _pending_images、由 run_stream 在本轮全部 tool 结果之后以 user 消息注入
@@ -666,13 +744,135 @@ class AgentLoop:
 
         yield ToolCallResult(tool_name=tool_name, result=result)
 
+        stored = self._result_manager.process(tool_name, result) if isinstance(result, str) else result
         self.messages.append({
             "role": "tool",
             "tool_call_id": tc["id"],
-            "content": self._result_manager.process(tool_name, result) if isinstance(result, str) else result,
+            "content": stored,
         })
+        # 截断判定用长度对比（truncated_calls 是按迭代 clear 的共享状态，不碰）。
+        # 早退路径（非法 JSON/硬闸/上限/循环/hook 拦截）不经此处，v1 不覆盖。
+        self.telemetry.emit(
+            "tool_exec", name=tool_name, role=self.role.value,
+            duration_ms=int((time.monotonic() - exec_t0) * 1000),
+            result_chars=len(result) if isinstance(result, str) else 0,
+            truncated=isinstance(result, str) and isinstance(stored, str) and len(stored) < len(result),
+            error=tool_errored,
+        )
+
+    async def _inject_recall(self, user_input: str) -> None:
+        """记忆语义召回并注入。注入到当前 user message 之前——每轮变化的召回内容尽量靠近
+        末尾，不打断 system prompt + 工具 schema + 历史对话的前缀缓存（实测 bench/cache_probe.py：
+        position 1 注入命中 ~53%，末尾 ~99%）。失败静默跳过，不影响主流程。"""
+        if not (self.recall_engine and len(user_input.strip()) >= _MIN_RECALL_LENGTH):
+            return
+        recall_t0 = time.monotonic()
+        try:
+            recalled = await self.recall_engine.auto_recall(user_input)
+            self.telemetry.emit(
+                "recall", count=len(recalled or []),
+                duration_ms=int((time.monotonic() - recall_t0) * 1000),
+            )
+            if not recalled:
+                return
+            # 先删掉上一轮的召回注入，避免跨轮累积
+            self.messages = [
+                m for m in self.messages
+                if not (m.get("role") == "system" and message_text(m).startswith("# 相关记忆"))
+            ]
+            injection = self.recall_engine.format_for_injection(recalled)
+            if self.messages and self.messages[-1].get("role") == "user":
+                insert_idx = len(self.messages) - 1
+            else:
+                insert_idx = len(self.messages)
+            self.messages.insert(insert_idx, {"role": "system", "content": injection})
+        except Exception as e:
+            logger.warning("Memory recall failed: %s", e)
+
+    async def _maybe_auto_compact(self) -> AsyncIterator:
+        """回合边界自动压缩：达阈值且未熔断时，归档原文后 LLM 摘要重建 messages。触发依据用
+        _effective_prompt_tokens（provider 不回报 usage 时回退估算）。产出 CompactStart/CompactNotice
+        事件透传给调用方（故为异步生成器）。"""
+        if not (self.compactor
+                and not self._compact_breaker.is_open
+                and self.compactor.should_compact(self._effective_prompt_tokens(), self.messages)):
+            return
+        before = len(self.messages)
+        yield CompactStart(message_count=before)
+        compact_ok = False
+        try:
+            active_skill = self._detect_active_skill()
+            if self.conversation_store:
+                # 压缩会就地替换 messages，先归档原文，否则完整历史在磁盘上也会丢失
+                self.conversation_store.archive_segment(self.messages, reason="auto-compact")
+            self.messages = await self.compactor.compact(
+                self.messages, active_skill=active_skill,
+                mode="auto", pre_tokens=self._last_prompt_tokens,
+            )
+            self._compact_breaker.record_success()
+            self._rebuild_system_prompt()
+            compact_ok = True
+        except Exception as e:
+            logger.warning("Compact failed: %s", e)
+            self._compact_breaker.record_failure()
+        self.telemetry.emit(
+            "compact", mode="auto", before=before, after=len(self.messages), ok=compact_ok,
+        )
+        yield CompactNotice(before=before, after=len(self.messages))
+
+    def _prepare_turn_tools(self, disable_tools: bool, allowed_tools: set[str] | None) -> None:
+        """构造本轮工具集。规划模式只留只读白名单 + MCP 工具（MCP 走"用户确认制"：首次调用必过
+        确认闸，放行的是人批准过的调用而非 MCP 本身），再套 allowed_tools。_turn_tools 是 API 参数
+        （空塌成 None）；_turn_tool_names 是派发层硬闸的允许集，必须能区分「空允许集」和「无限制」，故单独存。"""
+        if disable_tools:
+            self._turn_tools = None
+            self._turn_tool_names = set()
+            return
+        schemas = self.tool_registry.get_tool_schemas(role=self.role) or []
+        if self._plan_mode:
+            schemas = [
+                s for s in schemas
+                if s["function"]["name"] in PLAN_MODE_TOOLS
+                or getattr(self.tool_registry._tools.get(s["function"]["name"]), "is_mcp", False)
+            ]
+        if allowed_tools is not None:
+            schemas = [s for s in schemas if s["function"]["name"] in allowed_tools]
+        self._turn_tools = schemas or None
+        self._turn_tool_names = {s["function"]["name"] for s in schemas}
 
     async def run_stream(
+        self,
+        user_input: str,
+        disable_tools: bool = False,
+        allowed_tools: set[str] | None = None,
+        images: list[str] | None = None,
+    ) -> AsyncIterator:
+        """薄包装：turn 级遥测。end 事件在 finally 里发——正常收尾、异常、
+        用户 Esc 取消（CancelledError/GeneratorExit）都有归宿，aborted 标记区分。
+        对事件流与 future 协议完全透明，逻辑全部在 _run_stream_impl。"""
+        t0 = time.monotonic()
+        self.telemetry.emit(
+            "turn", phase="start", role=self.role.value,
+            input_chars=len(user_input), plan_mode=self._plan_mode,
+        )
+        aborted = False
+        try:
+            async for ev in self._run_stream_impl(
+                user_input, disable_tools=disable_tools,
+                allowed_tools=allowed_tools, images=images,
+            ):
+                yield ev
+        except (asyncio.CancelledError, GeneratorExit):
+            aborted = True
+            raise
+        finally:
+            self.telemetry.emit(
+                "turn", phase="end", role=self.role.value,
+                duration_ms=int((time.monotonic() - t0) * 1000),
+                tool_calls=self._tool_call_count, aborted=aborted,
+            )
+
+    async def _run_stream_impl(
         self,
         user_input: str,
         disable_tools: bool = False,
@@ -716,75 +916,25 @@ class AgentLoop:
             yield AgentDone(content=NO_VISION_MSG)
             return
 
-        if self.recall_engine and len(user_input.strip()) >= _MIN_RECALL_LENGTH:
-            try:
-                recalled = await self.recall_engine.auto_recall(user_input)
-                if recalled:
-                    # 先删掉上一轮的召回注入，避免跨轮累积
-                    self.messages = [
-                        m for m in self.messages
-                        if not (m.get("role") == "system" and message_text(m).startswith("# 相关记忆"))
-                    ]
-                    injection = self.recall_engine.format_for_injection(recalled)
-                    # 注入到当前 user message 之前：每轮变化的召回内容尽量靠近末尾，
-                    # 不打断 system prompt + 工具 schema + 历史对话的前缀缓存。
-                    # 实测（bench/cache_probe.py）：position 1 注入命中率 ~53%，末尾注入 ~99%。
-                    if self.messages and self.messages[-1].get("role") == "user":
-                        insert_idx = len(self.messages) - 1
-                    else:
-                        insert_idx = len(self.messages)
-                    self.messages.insert(insert_idx, {"role": "system", "content": injection})
-            except Exception as e:
-                logger.warning("Memory recall failed: %s", e)
+        await self._inject_recall(user_input)
 
-        if (self.compactor
-                and not self._compact_breaker.is_open
-                and self.compactor.should_compact(self._last_prompt_tokens, self.messages)):
-            before = len(self.messages)
-            yield CompactStart(message_count=before)
-            try:
-                active_skill = self._detect_active_skill()
-                if self.conversation_store:
-                    # 压缩会就地替换 messages，先归档原文，否则完整历史在磁盘上也会丢失
-                    self.conversation_store.archive_segment(self.messages, reason="auto-compact")
-                self.messages = await self.compactor.compact(
-                    self.messages, active_skill=active_skill,
-                    mode="auto", pre_tokens=self._last_prompt_tokens,
-                )
-                self._compact_breaker.record_success()
-                self._rebuild_system_prompt()
-            except Exception as e:
-                logger.warning("Compact failed: %s", e)
-                self._compact_breaker.record_failure()
-            yield CompactNotice(before=before, after=len(self.messages))
+        async for ev in self._maybe_auto_compact():
+            yield ev
 
-        if disable_tools:
-            self._turn_tools = None
-            self._turn_tool_names = set()
-        else:
-            schemas = self.tool_registry.get_tool_schemas(role=self.role) or []
-            if self._plan_mode:
-                # 只读白名单 + MCP 工具。MCP 走"用户确认制"：每个工具首次调用必过
-                # 确认闸（批准后本会话免确认）——放行的是"人批准过的调用"而非 MCP 本身；
-                # 写型 MCP 的副作用风险由确认框（完整参数展示）兜底，规划模式不为其
-                # 背只读保证。用户拍板：自己配的 MCP 可信，别人的靠不批来拒。
-                schemas = [
-                    s for s in schemas
-                    if s["function"]["name"] in PLAN_MODE_TOOLS
-                    or getattr(self.tool_registry._tools.get(s["function"]["name"]), "is_mcp", False)
-                ]
-            if allowed_tools is not None:
-                schemas = [s for s in schemas if s["function"]["name"] in allowed_tools]
-            self._turn_tools = schemas or None
-            # 允许集单独存：schemas 为空时 _turn_tools 塌缩成 None（API 参数语义），
-            # 但派发层硬闸必须能区分「空允许集」和「无限制」
-            self._turn_tool_names = {s["function"]["name"] for s in schemas}
+        self._prepare_turn_tools(disable_tools, allowed_tools)
 
         if self._plan_mode or self._active_plan_id:
             self._rebuild_system_prompt()
 
+        empty_retries = 0  # 空响应（只思考不作答）本轮已重试次数，上限 1 防打摆子烧钱
         for iteration in range(self.max_iterations):
             self._result_manager.reset_turn()
+            # 执行中插话在迭代顶部注入：上一迭代的 assistant(tool_calls)→tool×N 序列
+            # 已完整落库，此刻插 user 消息 API 合法（与 mailbox 注入同一时间点）；
+            # 排在 verify/mailbox 注入之后 = 离模型注意力最近。
+            for queued_text in self.take_queued_inputs():
+                self.messages.append({"role": "user", "content": queued_text})
+                yield QueuedInputInjected(text=queued_text)
             # 撞限后收走全部工具（请求不带 tools），只留文字总结一条路
             if self._tools_exhausted:
                 self._turn_tools = None
@@ -792,14 +942,13 @@ class AgentLoop:
             exhausted_this_iter = self._tools_exhausted
             collector = StreamCollector()
 
-            # cache-aware provider（如 DeepSeek）跳过 collapse：保持前缀稳定让缓存命中，
-            # 减 token 在自动缓存场景是负优化。其他 provider 走完整压缩金字塔。
-            if self.llm.cache_aware:
-                api_messages = self.messages
-            else:
-                level = should_collapse(self._last_prompt_tokens, model_context_window(self.llm.model))
-                api_messages = collapse(self.messages, level) if level > 0 else self.messages
+            # 请求永远发完整历史，不做任何中段删改（collapse 金字塔已删，2026-07-19）：
+            # 主流云厂商全有自动前缀缓存（DS 1:120、qwen 实测 72% 命中），改写历史省
+            # token = 打破前缀缓存 = 负优化（bench 实测 22x）；本地模型 token 免费，
+            # 只剩窗口约束——由入口截断 + Compactor 近窗保险丝兜住。
+            api_messages = self.messages
 
+            llm_t0 = time.monotonic()
             try:
                 async for event in collector.collect(
                     self.llm.chat_stream(messages=api_messages, tools=self._turn_tools),
@@ -807,10 +956,25 @@ class AgentLoop:
                     yield event
             except Exception as e:
                 logger.warning("LLM call failed: %s", e)
+                self.telemetry.emit(
+                    "llm_call", role=self.role.value, model=self.llm.model,
+                    iteration=iteration, error=str(e),
+                    duration_ms=int((time.monotonic() - llm_t0) * 1000),
+                )
                 yield AgentDone(content=f"⚠ LLM 调用失败: {e}")
                 return
 
             response = collector.response
+            self.telemetry.emit(
+                "llm_call", role=self.role.value, model=self.llm.model,
+                iteration=iteration, finish_reason=response.finish_reason,
+                prompt_tokens=response.prompt_tokens,
+                completion_tokens=response.completion_tokens,
+                cache_hit=response.prompt_cache_hit_tokens,
+                cache_miss=response.prompt_cache_miss_tokens,
+                reasoning=response.reasoning_tokens,
+                duration_ms=int((time.monotonic() - llm_t0) * 1000),
+            )
 
             if response.prompt_tokens > 0:
                 self._last_prompt_tokens = response.prompt_tokens
@@ -832,6 +996,24 @@ class AgentLoop:
                 self.cost_tracker.record(self.role.value, self.llm.model, usage_snap)
 
             if not response.tool_calls:
+                # 空响应（DeepSeek reasoner 偶发：只吐 reasoning、正文零字节就收流）：
+                # 空 assistant 消息不入历史（污染上下文），原地重试一次——消息未变，
+                # 重发大概率命中缓存；仍空则显式报错，绝不静默收场。
+                if not (response.content or "").strip():
+                    logger.warning(
+                        "空响应：finish_reason=%s reasoning_tokens=%d（已重试 %d 次）",
+                        response.finish_reason or "?", response.reasoning_tokens, empty_retries,
+                    )
+                    if empty_retries < 1:
+                        empty_retries += 1
+                        continue
+                    yield AgentDone(content=(
+                        f"⚠ 模型连续两次只输出思考、未产生正文回复"
+                        f"（finish_reason={response.finish_reason or '未知'}，"
+                        f"thinking {response.reasoning_tokens} tokens）。请重试或换个问法。"
+                    ))
+                    return
+
                 self.messages.append({"role": "assistant", "content": response.content})
 
                 # Verify loop: if code files were modified, kick off verification
@@ -843,12 +1025,15 @@ class AgentLoop:
                     if not code_files:
                         self._files_modified_this_turn = []
                         self._persist()
-                        self._schedule_auto_extract()
-                        yield AgentDone(content=response.content)
+                        yield AgentDone(content=response.content, displayed=True)
                         return
 
                     test_cmd = discover_test_command(changed_files=code_files)
                     self._verify_state.start(code_files, test_cmd)
+                    self.telemetry.emit(
+                        "verify", phase="start",
+                        test_command=test_cmd, changed_files=len(code_files),
+                    )
                     prompt = build_verify_prompt(
                         changed_files=self._files_modified_this_turn,
                         test_command=test_cmd,
@@ -866,6 +1051,9 @@ class AgentLoop:
                     if is_failure and self._verify_state.is_active:
                         self._verify_state.last_error = response.content
                         self._verify_state.round += 1
+                        self.telemetry.emit(
+                            "verify", phase="retry", round=self._verify_state.round,
+                        )
                         prompt = build_verify_prompt(
                             changed_files=self._verify_state.changed_files,
                             test_command=self._verify_state.test_command,
@@ -880,11 +1068,14 @@ class AgentLoop:
                             f"⚠ 验证失败：已重试 {self._max_verify_rounds} 轮仍未通过。\n\n"
                             f"{response.content}"
                         )
+                    self.telemetry.emit(
+                        "verify", phase="end", rounds=self._verify_state.round,
+                        exhausted=is_failure and self._verify_state.is_exhausted,
+                    )
                     self._verify_state.reset()
 
                 self._persist()
-                self._schedule_auto_extract()
-                yield AgentDone(content=response.content)
+                yield AgentDone(content=response.content, displayed=True)
                 return
 
             self.messages.append(response.to_message())
@@ -931,5 +1122,4 @@ class AgentLoop:
 
         msg = f"⚠ 已达到迭代上限（{self.max_iterations}轮），自动停止。"
         self._persist()
-        self._schedule_auto_extract()
         yield AgentDone(content=msg)

@@ -129,7 +129,13 @@ class HookManager:
                 exit_code=proc.returncode or 0,
             )
         except asyncio.TimeoutError:
+            # wait_for 只取消 communicate 协程，子进程会变孤儿继续跑——显式 kill 收尸
             logger.warning("Hook '%s' timed out after %.0fs", hook.command, hook.timeout)
+            try:
+                proc.kill()
+                await proc.wait()
+            except (ProcessLookupError, Exception):
+                pass
             return HookResult(output=f"Hook timed out: {hook.command}", exit_code=1)
         except Exception as e:
             logger.warning("Hook '%s' failed: %s", hook.command, e)

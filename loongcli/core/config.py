@@ -1,10 +1,23 @@
 from __future__ import annotations
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+def _safe_token_size(value: Any, field_name: str = "") -> int:
+    """load 里用的容错版 parse_token_size：畸形值（如 context_window: "abc"）记一条
+    警告并按 0（自动）处理，而不是让一个配置打字击穿整个启动。"""
+    try:
+        return parse_token_size(value)
+    except ValueError as e:
+        logger.warning("config %s 解析失败，按自动处理：%s", field_name or "token 字段", e)
+        return 0
 
 
 def parse_token_size(value: Any) -> int:
@@ -78,7 +91,7 @@ class Config:
                 model=pdata.get("model", name),
                 api_key=pdata.get("api_key", ""),
                 base_url=pdata.get("base_url", "https://api.deepseek.com"),
-                max_tokens=parse_token_size(pdata.get("max_tokens", 0)),
+                max_tokens=_safe_token_size(pdata.get("max_tokens", 0), f"models.{name}.max_tokens"),
             )
 
         from loongcli.core.provider import ProviderConfig, RoleBinding
@@ -97,7 +110,7 @@ class Config:
                 model=rdata.get("model", "deepseek-v4-flash"),
                 thinking=rdata.get("thinking", False),
                 reasoning_effort=rdata.get("reasoning_effort", "max"),
-                context_window=parse_token_size(rdata.get("context_window", 0)),
+                context_window=_safe_token_size(rdata.get("context_window", 0), f"roles.{name}.context_window"),
                 vision=rdata.get("vision", False),
             )
 
@@ -106,8 +119,8 @@ class Config:
             model=os.environ.get("DSCLI_MODEL") or file_data.get("model", "deepseek-v4-flash"),
             sub_model=os.environ.get("DSCLI_SUB_MODEL") or file_data.get("sub_model", ""),
             base_url=os.environ.get("DSCLI_BASE_URL") or file_data.get("base_url", "https://api.deepseek.com"),
-            model_max_tokens=parse_token_size(file_data.get("model_max_tokens", 0)),
-            compact_threshold=parse_token_size(file_data.get("compact_threshold", 0)),
+            model_max_tokens=_safe_token_size(file_data.get("model_max_tokens", 0), "model_max_tokens"),
+            compact_threshold=_safe_token_size(file_data.get("compact_threshold", 0), "compact_threshold"),
             thinking=file_data.get("thinking", True),
             reasoning_effort=file_data.get("reasoning_effort", "max"),
             skill_dirs=file_data.get("skill_dirs", []),

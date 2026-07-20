@@ -11,8 +11,9 @@ import json
 import re
 from pathlib import Path
 
-from loongcli.memory.conversation import ConversationStore, _project_sessions_dir
+from loongcli.memory.conversation import ConversationStore, _project_sessions_dir, project_memory_dir
 from loongcli.memory.markdown_store import MarkdownMemoryStore
+from loongcli.memory.memory_router import MemoryRouter
 
 
 # ── 定位 ─────────────────────────────────────────────────────────
@@ -59,11 +60,17 @@ def parse_cc_memory(path: Path) -> dict | None:
 
 def import_memories(
     cc_dir: Path,
-    store: MarkdownMemoryStore | None = None,
+    store: MarkdownMemoryStore | MemoryRouter | None = None,
     overwrite: bool = False,
 ) -> dict:
-    """导入 <cc_dir>/memory/*.md（跳过 MEMORY.md 索引）。同名默认跳过（幂等）。"""
-    store = store or MarkdownMemoryStore()
+    """导入 <cc_dir>/memory/*.md（跳过 MEMORY.md 索引）。同名默认跳过（幂等）。
+
+    默认走 MemoryRouter 按 type 路由：user → 全局库，其余 → 当前项目库
+    （CC 数据本就按项目隔离，导入不再把项目记忆倒进全局）。"""
+    store = store or MemoryRouter(
+        global_dir=Path.home() / ".loongcli" / "memory",
+        project_dir=project_memory_dir(),
+    )
     stats = {"imported": 0, "skipped": 0, "failed": 0}
     mem_dir = cc_dir / "memory"
     if not mem_dir.is_dir():
@@ -75,18 +82,23 @@ def import_memories(
         if not parsed or not parsed["content"]:
             stats["failed"] += 1
             continue
-        target = store.base_dir / f"{parsed['name']}.md"
-        if target.exists() and not overwrite:
+        # load 而非 base_dir 文件探测：store/router 鸭子兼容（router 查项目+全局两库）
+        if store.load(parsed["name"]) is not None and not overwrite:
             stats["skipped"] += 1
             continue
-        store.save(
-            name=parsed["name"],
-            description=parsed["description"],
-            type=parsed["type"],
-            content=parsed["content"],
-            source="claude-code",
-        )
-        stats["imported"] += 1
+        # CC 记忆可能有 _sanitize_name 不接受的纯符号/全数字名字（如 "---"），
+        # 不死磕——计入失败、继续下一条，不崩掉整个迁移
+        try:
+            store.save(
+                name=parsed["name"],
+                description=parsed["description"],
+                type=parsed["type"],
+                content=parsed["content"],
+                source="claude-code",
+            )
+            stats["imported"] += 1
+        except (ValueError, OSError):
+            stats["failed"] += 1
     return stats
 
 
@@ -213,7 +225,9 @@ def import_sessions(
     sessions_dir = sessions_dir or _project_sessions_dir()
     stats = {"imported": 0, "skipped": 0, "empty": 0}
     for f in sorted(cc_dir.glob("*.jsonl")):
-        sid = f.stem.replace("-", "")[:12]
+        # CC 的 session ID 是 uuid4-hex（含连字符的 36 位 UUID），
+        # 去连字符后完整保留为 loongcli session_id——不截断，溯源不需要猜。
+        sid = f.stem.replace("-", "")
         if (sessions_dir / f"{sid}.json").exists():
             stats["skipped"] += 1
             continue

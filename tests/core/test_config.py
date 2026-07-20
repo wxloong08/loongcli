@@ -71,6 +71,19 @@ def test_invalid_json(tmp_path):
     assert cfg.model == "deepseek-v4-flash"
 
 
+def test_malformed_token_size_does_not_crash(tmp_path):
+    """畸形 token 字段（如 context_window: "abc"）按 0 处理，不击穿启动。"""
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({
+        "api_key": "sk-test",
+        "model_max_tokens": "not-a-number",
+        "roles": {"main": {"model": "x", "context_window": "abc"}},
+    }), encoding="utf-8")
+    cfg = Config.load(path=p)  # 不抛
+    assert cfg.model_max_tokens == 0
+    assert cfg.role_bindings["main"].context_window == 0
+
+
 def test_sub_model_default():
     cfg = Config.load(path=Path("/nonexistent/config.json"))
     assert cfg.sub_model == ""

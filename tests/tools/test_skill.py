@@ -2,7 +2,7 @@ import pytest
 from pathlib import Path
 
 from loongcli.skills.registry import SkillRegistry
-from loongcli.tools.skill import SkillTool, SKILL_TOOL_PREFIX, NO_SKILLS_DESC
+from loongcli.tools.skill import SkillTool, SKILL_TOOL_DESC, NO_SKILLS_DESC
 
 
 VALID_SKILL = """\
@@ -37,25 +37,23 @@ def _make_registry(tmp_path, skills: dict[str, str]) -> SkillRegistry:
 
 
 class TestSkillTool:
-    def test_description_with_skills(self, tmp_path):
+    def test_description_static_without_listing(self, tmp_path):
+        # 技能清单不进 description（进系统提示易变段，防打断前缀缓存）——description 是静态指引
         reg = _make_registry(tmp_path, {"debug": VALID_SKILL})
         tool = SkillTool(reg)
-        assert SKILL_TOOL_PREFIX in tool.description
-        assert "debug" in tool.description
+        assert tool.description == SKILL_TOOL_DESC
+        assert "debug" not in tool.description
 
     def test_description_no_skills(self, tmp_path):
         reg = SkillRegistry(project_dir=tmp_path, personal_dir=tmp_path / "empty")
         tool = SkillTool(reg)
         assert tool.description == NO_SKILLS_DESC
 
-    def test_description_excludes_model_disabled(self, tmp_path):
-        reg = _make_registry(tmp_path, {
-            "debug": VALID_SKILL,
-            "deploy": USER_ONLY_SKILL,
-        })
+    def test_description_only_model_disabled_counts_as_none(self, tmp_path):
+        # 全部技能都 disable-model-invocation 时，对模型而言等于没有技能
+        reg = _make_registry(tmp_path, {"deploy": USER_ONLY_SKILL})
         tool = SkillTool(reg)
-        assert "debug" in tool.description
-        assert "deploy" not in tool.description
+        assert tool.description == NO_SKILLS_DESC
 
     async def test_execute_found(self, tmp_path):
         reg = _make_registry(tmp_path, {"debug": VALID_SKILL})

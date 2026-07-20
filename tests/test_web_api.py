@@ -10,6 +10,7 @@ import pytest
 
 from loongcli.memory.conversation import list_all_projects
 from loongcli.memory.markdown_store import MarkdownMemoryStore
+from loongcli.memory.memory_router import MemoryRouter
 from loongcli.web.api import WebAPI
 from loongcli.web.server import create_server, server_url
 
@@ -21,6 +22,20 @@ def api(tmp_path):
     projects_root.mkdir()
     return WebAPI(
         memory_store=MarkdownMemoryStore(memory_dir),
+        projects_root=projects_root,
+        current_dir=tmp_path,
+    )
+
+
+@pytest.fixture
+def router_api(tmp_path):
+    """MemoryRouter 背书的 WebAPI——运行时真实装配（main.py web / TUI /web）。"""
+    projects_root = tmp_path / "projects"
+    return WebAPI(
+        memory_store=MemoryRouter(
+            global_dir=tmp_path / "memory",
+            project_dir=projects_root / "D-current" / "memory",
+        ),
         projects_root=projects_root,
         current_dir=tmp_path,
     )
@@ -141,6 +156,58 @@ class TestMemoryCRUD:
         assert status == 400
 
 
+class TestMemoryCRUDWithRouter:
+    """两层路由下的 CRUD：user 落全局库、其余落项目库，list/get 带 scope。"""
+
+    def test_create_routes_by_type(self, router_api):
+        router_api.create_memory({
+            "name": "u1", "description": "用户身份与背景", "type": "user", "content": "x",
+        })
+        router_api.create_memory({
+            "name": "p1", "description": "项目具体决策记录", "type": "project", "content": "x",
+        })
+        router = router_api.memory
+        assert (router.global_store.base_dir / "u1.md").exists()
+        assert (router.project_store.base_dir / "p1.md").exists()
+
+    def test_list_and_get_carry_scope(self, router_api):
+        router_api.create_memory({
+            "name": "u1", "description": "用户身份与背景", "type": "user", "content": "x",
+        })
+        router_api.create_memory({
+            "name": "p1", "description": "项目具体决策记录", "type": "project", "content": "x",
+        })
+        _, data = router_api.list_memories()
+        scopes = {m["name"]: m["scope"] for m in data["memories"]}
+        assert scopes == {"u1": "global", "p1": "project"}
+        _, entry = router_api.get_memory("u1")
+        assert entry["scope"] == "global"
+
+    def test_update_type_change_moves_scope(self, router_api):
+        router_api.create_memory({
+            "name": "fact", "description": "某个事实的描述", "type": "project", "content": "v1",
+        })
+        status, _ = router_api.update_memory("fact", {
+            "description": "某个事实的描述", "type": "user", "content": "v2",
+        })
+        assert status == 200
+        router = router_api.memory
+        assert (router.global_store.base_dir / "fact.md").exists()
+        assert not (router.project_store.base_dir / "fact.md").exists()
+        _, entry = router_api.get_memory("fact")
+        assert entry["scope"] == "global"
+        assert entry["content"] == "v2"
+
+    def test_delete_falls_back_to_global(self, router_api):
+        router_api.create_memory({
+            "name": "u1", "description": "用户身份与背景", "type": "user", "content": "x",
+        })
+        status, _ = router_api.delete_memory("u1")
+        assert status == 200
+        status, _ = router_api.get_memory("u1")
+        assert status == 404
+
+
 # ── 会话（只读） ──────────────────────────────────────────
 
 
@@ -187,7 +254,9 @@ class TestSessions:
         assert status == 404
 
     @pytest.mark.parametrize("session_id", [
-        "../../etc/passwd", "ABCDEF123456", "abc", "a" * 13, "a" * 12 + "/x",
+        "../../etc/passwd", "ABCDEF123456", "abc",  # 路径穿越 / 大写 / 太短
+        "a" * 11, "a" * 37,                         # 低于 12 位 / 超过 36 位
+        "a" * 12 + "/x",                            # 含路径分隔符
     ])
     def test_invalid_session_id_rejected(self, api, session_id):
         status, _ = api.get_session("proj", session_id)
