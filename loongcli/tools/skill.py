@@ -13,6 +13,11 @@ SKILL_TOOL_DESC = """\
 
 NO_SKILLS_DESC = "当前没有可用的技能。"
 
+# 技能内容自管上限（入口 ToolResultManager 对本工具豁免——技能是指令，被一刀切截成
+# 2000 预览等于按残缺工作流执行，且重调返回同样的截断）。上限取宽：现存最大技能
+# 45.9K，50K 全放行；真超限时截断并指向源文件，绝不建议"重新调用"。
+SKILL_CONTENT_CAP = 50000
+
 
 class SkillTool(Tool):
     name = "skill"
@@ -55,6 +60,16 @@ class SkillTool(Tool):
         content = self.registry.load_content(meta.name)
         if not content:
             return f"无法加载技能 '{name}' 的内容。"
+
+        if len(content) > SKILL_CONTENT_CAP:
+            kept = content[:SKILL_CONTENT_CAP]
+            nl = kept.rfind("\n")
+            if nl > SKILL_CONTENT_CAP * 0.7:
+                kept = kept[:nl]
+            content = kept + (
+                f"\n\n[技能原文超长已截断：保留 {len(kept)}/{len(content)} 字符。"
+                f"剩余部分用 read_file 读取 {meta.path}（带 offset 分页），不要重新调用 skill 工具]"
+            )
 
         header = f"## 技能: {meta.name}\n{meta.description}\n\n"
         instruction = "请按照以下指令执行：\n\n"

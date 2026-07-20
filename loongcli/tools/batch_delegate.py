@@ -2,13 +2,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from loongcli.tools.base import Tool, ToolRegistry
 from loongcli.tools.routing import AgentRole, filter_tools
 from loongcli.tools.agent_tool import SUBAGENT_SYSTEM_PROMPT
-from loongcli.core.task import TaskManager, TaskStatus
+from loongcli.core.task import (
+    BATCH_RESULT_BUDGET,
+    MIN_TASK_RESULT_CAP,
+    TaskManager,
+    TaskStatus,
+    cap_task_result,
+    trace_path_of,
+)
 from loongcli.core.agent import AgentLoop, AgentServices
 from loongcli.core.compact import Compactor
 from loongcli.core.events import BatchProgress
@@ -220,6 +226,10 @@ class BatchDelegateTool(Tool):
         n_completed = 0
         n_timed_out = 0
         n_failed = 0
+        # 结果自管预算：总额按任务数均摊、截断附 trace 指针。入口的 ToolResultManager
+        # 对本工具豁免（结果不可重放，一刀切 2000 预览曾把 7 路 37K 调研截到合成层近盲），
+        # 预算责任在这里。prompt 回显只留摘要——全文是主代理上一条消息里自己写的，纯重复。
+        per_cap = max(MIN_TASK_RESULT_CAP, BATCH_RESULT_BUDGET // len(task_objs))
         for i, tobj, prompt in task_objs:
             if tobj.status == TaskStatus.COMPLETED:
                 n_completed += 1
@@ -229,9 +239,9 @@ class BatchDelegateTool(Tool):
                 n_failed += 1
             results.append({
                 "index": i,
-                "prompt": prompt,
+                "prompt": prompt if len(prompt) <= 200 else prompt[:200] + "…",
                 "status": tobj.status.value,
-                "result": tobj.result,
+                "result": cap_task_result(tobj.result or "", per_cap, trace_path_of(tobj)),
             })
 
         # warning 放字典首位：合成纪律提醒挂在失败发生点，确定性文本比系统
@@ -295,13 +305,9 @@ class BatchDelegateTool(Tool):
             if len(last_text) > 500:
                 last_text = last_text[:500] + "…"
             lines.append(f"最后输出：{last_text}")
-        store = getattr(loop, "conversation_store", None)
-        if store is not None:
-            try:
-                trace_path = Path(store.base_dir) / f"{store.session_id}.json"
-                lines.append(f"完整现场：{trace_path}")
-            except Exception:
-                pass
+        trace = trace_path_of(task_obj)
+        if trace:
+            lines.append(f"完整现场：{trace}")
         return "\n".join(lines)
 
     def _build_sub_registry(self, allowed_tools: list[str] | None) -> ToolRegistry:

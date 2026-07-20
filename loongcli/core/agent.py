@@ -30,7 +30,9 @@ from loongcli.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_CALLS_PER_TURN = 200
+# 整次 run_stream（一条用户消息的完整执行）的工具调用总额，不是迭代轮级——
+# 曾名 PER_TURN 与 reset_turn() 的迭代级 turn 撞名误导，2026-07-21 改名。
+MAX_TOOL_CALLS_PER_RUN = 200
 LOOP_DETECT_THRESHOLD = 3
 # 循环检测的最大周期：1=同参连打（AAA），2/3=交替模式（ABAB…/ABCABC…）。
 # 仍是精确签名匹配——整周期原样重复满 THRESHOLD 遍才触发，合法的
@@ -121,7 +123,7 @@ class AgentLoop:
         permission_checker: PermissionChecker,
         system_prompt: str = "",
         max_iterations: int = 50,
-        max_tool_calls: int = MAX_TOOL_CALLS_PER_TURN,
+        max_tool_calls: int = MAX_TOOL_CALLS_PER_RUN,
         task=None,
         role: AgentRole = AgentRole.MAIN,
         interactive: bool = True,
@@ -540,7 +542,7 @@ class AgentLoop:
                         " plan 工具制定计划，再调用 exit_plan_mode 提交用户审批——审批通过后所有工具自动恢复。"
                     )
                 elif self._tools_exhausted:
-                    result = "⚠ 已达单轮工具调用上限，本轮工具已收走，请直接文字总结当前进展。"
+                    result = "⚠ 已达本次任务工具调用上限，工具已收走，请直接文字总结当前进展。"
                 else:
                     result = f"⚠ 工具 {tool_name} 不在本轮允许的工具列表中。"
                 yield ToolCallResult(tool_name=tool_name, result=result)
@@ -558,7 +560,7 @@ class AgentLoop:
             # 的收场通道也一起拒，模型只能挣扎到 max_iterations 耗尽。
             self._tools_exhausted = True
             result = (
-                f"⚠ 已达到单轮工具调用上限（{self.max_tool_calls}次），"
+                f"⚠ 已达到本次任务工具调用上限（{self.max_tool_calls}次），"
                 "请总结当前进展并回复用户。"
             )
             yield ToolCallResult(tool_name=tool_name, result=result)
@@ -1090,8 +1092,8 @@ class AgentLoop:
                 self._exhausted_strikes += 1
                 if self._exhausted_strikes >= 2:
                     msg = (
-                        "⚠ 已达单轮工具调用上限，且工具收走后模型仍持续尝试调用，"
-                        "已强制结束本轮。请拆分任务或换个说法重试。"
+                        "⚠ 已达本次任务工具调用上限，且工具收走后模型仍持续尝试调用，"
+                        "已强制结束本次执行。请拆分任务或换个说法重试。"
                     )
                     self.messages.append({"role": "assistant", "content": msg})
                     self._persist()

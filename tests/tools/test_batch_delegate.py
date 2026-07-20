@@ -355,6 +355,69 @@ class TestBatchDelegateTool:
             assert r["index"] == i
             assert r["prompt"] == prompts[i]
 
+    @pytest.mark.asyncio
+    @patch("loongcli.tools.batch_delegate.Compactor")
+    async def test_big_result_single_task_mostly_preserved(self, _mock_compactor):
+        # 真实事故复现防护：37K 合成结果曾被入口截成 2K。单任务预算 36000，
+        # 40K 结果须保留 ≥30K（而非 2000 预览），截断提示附 trace 指针、无误导文案。
+        from loongcli.core.task import BATCH_RESULT_BUDGET
+
+        class BigResultAgent(FakeAgent):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.conversation_store = MagicMock(
+                    base_dir="/tmp/tasks", session_id="big000000001")
+
+            async def run_stream(self, prompt):
+                yield AgentDone(content="调研发现一行\n" * 6000)  # 42K chars
+
+        with patch("loongcli.tools.batch_delegate.AgentLoop", BigResultAgent):
+            tool, _ = self._make_tool()
+            result = await tool.execute(tasks=[{"prompt": "深度调研"}])
+
+        data = json.loads(result)
+        r = data["results"][0]["result"]
+        assert len(r) >= BATCH_RESULT_BUDGET * 0.8
+        assert "结果已截断" in r
+        assert "big000000001.json" in r
+        assert "重新调用工具" not in r
+
+    @pytest.mark.asyncio
+    @patch("loongcli.tools.batch_delegate.Compactor")
+    async def test_big_results_split_budget_across_tasks(self, _mock_compactor):
+        # 3 任务均摊 36000 预算：各保留 ~12K，总量有界且每路都有实质内容
+        class BigResultAgent(FakeAgent):
+            async def run_stream(self, prompt):
+                yield AgentDone(content=f"{prompt}-数据\n" * 3000)  # ~20K each
+
+        with patch("loongcli.tools.batch_delegate.AgentLoop", BigResultAgent):
+            tool, _ = self._make_tool()
+            result = await tool.execute(tasks=[
+                {"prompt": "调研A"}, {"prompt": "调研B"}, {"prompt": "调研C"},
+            ])
+
+        data = json.loads(result)
+        assert data["completed"] == 3
+        for i, entry in enumerate(data["results"]):
+            r = entry["result"]
+            assert 10000 <= len(r) <= 13000  # per_cap=12000 + 截断提示
+            assert f"调研{'ABC'[i]}-数据" in r
+            assert "结果已截断" in r
+
+    @pytest.mark.asyncio
+    @patch("loongcli.tools.batch_delegate.Compactor")
+    @patch("loongcli.tools.batch_delegate.AgentLoop", FakeAgent)
+    async def test_long_prompt_echo_trimmed(self, _mock_compactor):
+        # prompt 回显是主代理自己上一条消息的复制品，只留 200 字符摘要
+        long_prompt = "你是深度调研系统的调研员。" * 200  # ~2.4K
+        tool, _ = self._make_tool()
+        result = await tool.execute(tasks=[{"prompt": long_prompt}])
+        data = json.loads(result)
+        echoed = data["results"][0]["prompt"]
+        assert len(echoed) == 201  # 200 + "…"
+        assert echoed.startswith("你是深度调研系统的调研员。")
+        assert echoed.endswith("…")
+
     def test_sub_llm_defaults_to_llm(self):
         tool, _ = self._make_tool()
         assert tool._sub_llm is tool._llm

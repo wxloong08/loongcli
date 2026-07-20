@@ -12,6 +12,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# delegate 类结果预算：这些结果不可重放（重跑子代理非确定且烧钱），不能交给
+# ToolResultManager 的一刀切截断——其"重新调用工具"提示对 delegate 前提失效，
+# 2000 字符预览曾把 7 路子代理 37K 调研截到合成层近盲（2026-07-20 真实会话事故）。
+# 由 batch_delegate/task_status/wait_tasks 按此预算自行截断，附 trace 指针可恢复。
+BATCH_RESULT_BUDGET = 36000     # 一批结果的总预算，按任务数均摊
+MIN_TASK_RESULT_CAP = 2000      # 均摊下限：任务再多也保住可用的最小结果
+SINGLE_TASK_RESULT_CAP = 16000  # 单任务查询（task_status）的上限
+
 
 class TaskStatus(Enum):
     RUNNING = "running"
@@ -38,6 +46,40 @@ class Task:
         msgs = list(self.mailbox)
         self.mailbox.clear()
         return msgs
+
+
+def trace_path_of(task: Task | None) -> str | None:
+    """子任务 trace 文件路径（<trace_dir>/<task_id>.json）；trace 未启用返回 None。"""
+    loop = task._agent_loop if task else None
+    store = getattr(loop, "conversation_store", None) if loop else None
+    if store is None:
+        return None
+    try:
+        return str(Path(store.base_dir) / f"{store.session_id}.json")
+    except Exception:
+        return None
+
+
+def cap_task_result(text: str, cap: int, trace_path: str | None) -> str:
+    """delegate 类结果的自管截断：换行边界截到 cap，提示指向 trace 恢复。
+    绝不写"重新调用工具"——重跑子代理非确定且烧钱，是错误的恢复建议。"""
+    if len(text) <= cap:
+        return text
+    kept = text[:cap]
+    nl = kept.rfind("\n")
+    if nl > cap * 0.7:
+        kept = kept[:nl]
+    if trace_path:
+        notice = (
+            f"\n\n[结果已截断：保留 {len(kept)}/{len(text)} 字符。"
+            f"完整结果在 trace: {trace_path}，用 read_file 分页读取，不要重跑子任务]"
+        )
+    else:
+        notice = (
+            f"\n\n[结果已截断：保留 {len(kept)}/{len(text)} 字符。"
+            f"trace 未启用，截断部分不可恢复]"
+        )
+    return kept + notice
 
 
 class TaskManager:

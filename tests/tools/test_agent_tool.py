@@ -158,3 +158,27 @@ class TestTaskStatusTool:
         result = await tool.execute(task_id=task.id)
         assert "running" in result
         assert task.id in result
+
+    @pytest.mark.asyncio
+    async def test_big_result_capped_with_trace_pointer(self):
+        # 自管预算：入口豁免后无人兜底，超长结果须在这里截断并附 trace 指针
+        # （入口一刀切时重调本工具会返回同样的截断——死循环陷阱）
+        import json
+        from loongcli.core.task import SINGLE_TASK_RESULT_CAP
+
+        tm = TaskManager()
+        task = Task(prompt="big")
+        task.status = TaskStatus.COMPLETED
+        task.result = "调研数据行\n" * 5000  # 30K chars
+        loop = MagicMock()
+        loop.conversation_store = MagicMock(
+            base_dir="/tmp/tasks", session_id="cap000000001")
+        task._agent_loop = loop
+        tm.register(task)
+
+        tool = TaskStatusTool(tm)
+        info = json.loads(await tool.execute(task_id=task.id))
+        assert len(info["result"]) <= SINGLE_TASK_RESULT_CAP + 200
+        assert "结果已截断" in info["result"]
+        assert "cap000000001.json" in info["result"]
+        assert "重新调用工具" not in info["result"]

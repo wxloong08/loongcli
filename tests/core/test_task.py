@@ -207,3 +207,50 @@ def test_stop_task_without_async_task_finalizes_inline():
     assert task.status == TaskStatus.FAILED
     assert "手工停止" in task.result
     assert len(tm.drain_notifications()) == 1
+
+
+# ---- delegate 类结果自管截断（cap_task_result / trace_path_of）----
+
+from loongcli.core.task import cap_task_result, trace_path_of  # noqa: E402
+
+
+def test_cap_task_result_short_text_unchanged():
+    assert cap_task_result("短结果", 1000, None) == "短结果"
+
+
+def test_cap_task_result_cuts_at_newline_with_trace_pointer():
+    text = "\n".join(f"line-{i:04d}" for i in range(1000))  # ~10K
+    capped = cap_task_result(text, 3000, "/tmp/tasks/abc123.json")
+    assert len(capped) < len(text)
+    # 换行边界截断：保留部分是原文前缀、且以完整行结尾
+    import re
+    body = capped.split("\n\n[结果已截断")[0]
+    assert body == text[: len(body)]
+    assert re.fullmatch(r"line-\d{4}", body.splitlines()[-1])
+    assert "/tmp/tasks/abc123.json" in capped
+    assert "read_file" in capped
+    assert "不要重跑" in capped
+    # 绝不出现误导性恢复建议——delegate 结果不可重放
+    assert "重新调用工具" not in capped
+
+
+def test_cap_task_result_without_trace_says_unrecoverable():
+    capped = cap_task_result("x" * 5000, 2000, None)
+    assert "trace 未启用" in capped
+    assert "重新调用工具" not in capped
+
+
+def test_trace_path_of_reads_conversation_store():
+    task = Task(prompt="t")
+    loop = MagicMock()
+    loop.conversation_store = MagicMock(base_dir="/tmp/tasks", session_id="abc123def456")
+    task._agent_loop = loop
+    path = trace_path_of(task)
+    assert path is not None and path.endswith("abc123def456.json")
+
+
+def test_trace_path_of_none_when_no_store():
+    task = Task(prompt="t")
+    task._agent_loop = MagicMock(conversation_store=None)
+    assert trace_path_of(task) is None
+    assert trace_path_of(None) is None

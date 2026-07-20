@@ -4,6 +4,7 @@ from loongcli.core.tool_result_manager import (
     MAX_SINGLE_RESULT,
     MAX_TOTAL_PER_TURN,
     PREVIEW_SIZE,
+    SELF_BUDGETED_TOOLS,
     TRUNCATION_NOTICE,
 )
 
@@ -122,3 +123,26 @@ def test_error_result_still_truncated_when_too_large():
     result = mgr.process("shell", error_text)
     assert "已截断" in result
     assert len(result) < len(error_text)
+
+
+@pytest.mark.parametrize("tool_name", sorted(SELF_BUDGETED_TOOLS))
+def test_self_budgeted_tools_exempt_from_truncation(tool_name):
+    """delegate 类结果不可重放，入口不截断——预算由工具自身管理（真实事故：
+    7 路子代理 37K 合成结果被截成 2K，合成层近盲）。"""
+    mgr = ToolResultManager()
+    big = "x" * (MAX_SINGLE_RESULT * 5)
+    result = mgr.process(tool_name, big)
+    assert result == big
+    assert mgr.truncated_calls == []
+
+
+def test_self_budgeted_result_still_counts_toward_turn_total():
+    """豁免不等于隐身：仍计入 turn 总额，后续普通工具结果照常被总额闸压缩。"""
+    mgr = ToolResultManager()
+    big = "x" * (MAX_TOTAL_PER_TURN + 1000)
+    mgr.process("batch_delegate", big)
+    assert mgr._turn_total == len(big)
+
+    normal = "y" * (PREVIEW_SIZE + 500)
+    result = mgr.process("read_file", normal)
+    assert "已截断" in result

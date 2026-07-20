@@ -2,7 +2,7 @@ import asyncio
 import pytest
 import json
 from unittest.mock import MagicMock
-from loongcli.core.agent import AgentLoop, AgentServices, MAX_TOOL_CALLS_PER_TURN, LOOP_DETECT_THRESHOLD
+from loongcli.core.agent import AgentLoop, AgentServices, MAX_TOOL_CALLS_PER_RUN, LOOP_DETECT_THRESHOLD
 from loongcli.core.llm import LLMClient
 from loongcli.core.events import TextDelta, ToolCallStart, ToolCallResult, AgentDone, ConfirmRequest, BatchProgress
 from loongcli.tools.base import Tool, ToolRegistry
@@ -849,7 +849,7 @@ def test_tool_signature_deterministic():
 
 
 def test_default_max_tool_calls():
-    assert MAX_TOOL_CALLS_PER_TURN == 200
+    assert MAX_TOOL_CALLS_PER_RUN == 200
 
 
 def test_default_loop_threshold():

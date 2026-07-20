@@ -120,6 +120,28 @@ class TestWaitTasksTool:
         assert statuses[t2.id] == "failed"
         assert statuses["nope"] == "not_found"
 
+    @pytest.mark.asyncio
+    async def test_big_results_capped_with_trace_pointer(self):
+        # 自管预算（与 batch_delegate 同口径）：入口豁免后超长结果在这里按
+        # 任务数均摊截断，附 trace 指针
+        tool, tm = self._make()
+
+        t1 = Task(prompt="big")
+        t1.status = TaskStatus.COMPLETED
+        t1.result = "数据行\n" * 10000  # 40K chars
+        loop = MagicMock()
+        loop.conversation_store = MagicMock(
+            base_dir="/tmp/tasks", session_id="wt0000000001")
+        t1._agent_loop = loop
+        tm.register(t1)
+
+        result = json.loads(await tool.execute(task_ids=[t1.id]))
+        r = result["results"][0]["result"]
+        assert len(r) <= 36000 + 200  # 单任务 per_cap = BATCH_RESULT_BUDGET
+        assert "结果已截断" in r
+        assert "wt0000000001.json" in r
+        assert "重新调用工具" not in r
+
 
 # ── StopTaskTool ────────────────────────────────────────────────────
 
