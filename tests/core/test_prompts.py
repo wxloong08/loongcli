@@ -142,6 +142,15 @@ def test_prompt_content_accuracy_clause():
     assert "不臆造" in prompt
 
 
+def test_prompt_synthesis_discipline_clause():
+    """主代理合成纪律：负面信号禁丢、矛盾须裁决——百得思维事故（合成层丢弃不利证据）。"""
+    prompt = get_system_prompt(model="deepseek-v4-flash")
+    assert "负面信号" in prompt
+    assert "禁止静默丢弃" in prompt
+    assert "正面与负面同权保留" in prompt
+    assert "免责声明" in prompt
+
+
 def test_prompt_plan_usage():
     prompt = get_system_prompt(model="deepseek-v4-flash")
     assert "计划（Plan）使用" in prompt

@@ -25,8 +25,11 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
 fi
 
 git checkout master
-# 从这里起，任何失败都要回到 dev，不把用户留在 master 的半成品状态上
-trap 'git checkout dev >/dev/null 2>&1' ERR
+# 从这里起，任何失败都要回到 dev，不把用户留在 master 的半成品状态上。
+# 回程必须 -f：git rm --cached 后私有文件在 master 侧变成未跟踪文件，而 dev
+# 跟踪它们，普通 checkout 会拒绝覆盖。-f 在此流程可证无损——磁盘内容就是
+# read-tree 从 dev 铺出来的，且入口闸保证出发时 dev 工作区干净（无未提交编辑）。
+trap 'git checkout -f dev >/dev/null 2>&1' ERR
 
 git read-tree -u --reset dev
 
@@ -37,13 +40,13 @@ git rm -r -q --cached --ignore-unmatch "${PRIVATE_PATHS[@]}"
 if git diff --cached --name-only | grep -qE "$PRIVATE_RE"; then
     echo "⚠ 私有文件仍在暂存区，中止推送：" >&2
     git diff --cached --name-only | grep -E "$PRIVATE_RE" >&2
-    git checkout dev
+    git checkout -f dev
     exit 1
 fi
 
 if git diff --cached --quiet; then
     echo "master 已与 dev 对齐，无需推送"
-    git checkout dev
+    git checkout -f dev
     exit 0
 fi
 
@@ -51,5 +54,5 @@ echo "── 待提交清单 ──"
 git diff --cached --name-only
 git commit -m "$msg"
 git push origin master
-git checkout dev
+git checkout -f dev
 echo "✓ 已推送 master 并返回 dev"
