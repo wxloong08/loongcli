@@ -16,6 +16,9 @@ _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 MAX_AUTO_SKILLS = 2
 MAX_SKILL_CHARS = 5000
 MAX_INPUT_FOR_TRIGGERS = 150
+# 清单里每条描述的截断上限：描述与名字同易变性（手动增删技能才变），进前缀不伤缓存
+# 稳定性，但要封顶防单个技能的长描述吃掉整段预算
+LISTING_DESC_CHARS = 80
 
 
 @dataclass
@@ -210,5 +213,13 @@ class SkillRegistry:
         if not skills:
             return ""
         if verbose:
-            return "\n".join(f"- {s.name}: {s.description}" for s in skills)
+            return "\n".join(f"- {s.name}: {_listing_desc(s.description)}" for s in skills)
         return ", ".join(s.name for s in skills)
+
+
+def _listing_desc(description: str) -> str:
+    # 只取首行：frontmatter 描述偶有多行，清单是一行一条的索引格式
+    first_line = description.strip().splitlines()[0] if description.strip() else ""
+    if len(first_line) > LISTING_DESC_CHARS:
+        return first_line[:LISTING_DESC_CHARS] + "…"
+    return first_line

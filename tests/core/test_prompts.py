@@ -50,12 +50,13 @@ def test_prompt_includes_mcp():
 
 def test_prompt_includes_skills_listing():
     skills = MagicMock(spec=["build_listing"])
-    skills.build_listing.return_value = "debug, tdd"
+    skills.build_listing.return_value = "- debug: 调试工作流\n- tdd: 测试驱动开发"
     prompt = get_system_prompt(model="deepseek-v4-flash", skills=skills)
     assert "# 可用技能" in prompt
-    assert "debug, tdd" in prompt
-    # 对模型隐藏 disable-model-invocation 的技能——清单从工具 description 挪来时语义不变
-    skills.build_listing.assert_called_once_with(include_model_disabled=False)
+    assert "- debug: 调试工作流" in prompt
+    # 对模型隐藏 disable-model-invocation 的技能——清单从工具 description 挪来时语义不变；
+    # verbose=True 带一句话描述（自主触发的语义匹配靠它）
+    skills.build_listing.assert_called_once_with(include_model_disabled=False, verbose=True)
 
 
 def test_prompt_no_skills_section_when_empty():
@@ -72,7 +73,7 @@ def test_prompt_skills_section_position():
     mcp = MagicMock()
     mcp.get_tool_descriptions.return_value = "MCP: searxng tools available"
     skills = MagicMock(spec=["build_listing"])
-    skills.build_listing.return_value = "debug, tdd"
+    skills.build_listing.return_value = "- debug: 调试工作流\n- tdd: 测试驱动开发"
     prompt = get_system_prompt(model="deepseek-v4-flash", memory=memory, mcp=mcp, skills=skills)
     assert prompt.index("searxng") < prompt.index("# 可用技能") < prompt.index("记忆索引")
 

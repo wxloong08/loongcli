@@ -231,6 +231,20 @@ description: 项目级调试工作流
         assert "debug:" in verbose
         assert "调试" in verbose
 
+    def test_build_listing_verbose_truncates_description(self, tmp_path):
+        # 超长/多行描述：只取首行、截 80 字符加省略号——清单是一行一条的索引，
+        # 单个技能的长描述不许吃掉整段前缀预算
+        long_desc = "长" * 120
+        skill_md = f"---\nname: chatty\ndescription: {long_desc}\n---\n\n正文\n"
+        skills_dir = tmp_path / ".loongcli" / "skills"
+        self._setup_skills(skills_dir, {"chatty/": skill_md})
+
+        reg = SkillRegistry(project_dir=tmp_path, personal_dir=tmp_path / "empty")
+        verbose = reg.build_listing(verbose=True)
+        line = next(l for l in verbose.splitlines() if l.startswith("- chatty:"))
+        assert "长" * 80 + "…" in line
+        assert "长" * 81 not in line
+
     def test_nested_claude_skills(self, tmp_path):
         project = tmp_path / "myproject" / ".claude" / "skills" / "myskill"
         project.mkdir(parents=True)

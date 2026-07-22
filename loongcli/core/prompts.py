@@ -50,9 +50,12 @@ def get_system_prompt(
             parts.append(mcp_desc)
 
     if skills:
-        listing = skills.build_listing(include_model_disabled=False)
+        # 带一句话描述（截 80 字符）：自主触发靠模型从清单里认出该用哪个技能，
+        # 名字的自描述性参差不齐，描述让模型在决策点直接做语义匹配。
+        # 描述与名字同易变性（手动增删技能才变），进前缀不伤缓存稳定性。
+        listing = skills.build_listing(include_model_disabled=False, verbose=True)
         if listing:
-            parts.append(f"# 可用技能\n用 skill(name) 加载技能内容。可用技能：{listing}")
+            parts.append(f"# 可用技能\n用 skill(name) 加载完整技能内容。可用技能：\n{listing}")
 
     if memory:
         parts.append(_memory_section(memory))
