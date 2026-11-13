@@ -170,6 +170,22 @@ Local browser interface for archives — zero new dependencies (stdlib `http.ser
 
 ## Setup
 
+Requires Python 3.12+.
+
+```bash
+git clone https://github.com/wxloong08/loongcli.git
+cd loongcli
+python scripts/setup_env.py
+```
+
+`setup_env.py` creates a `.venv`, probes package indexes (TUNA → USTC → Tencent
+Cloud → Aliyun → PyPI) and installs from the first one that answers — its own
+probe, so a broken `pip.conf` mirror won't break the install. It then verifies
+the install by importing `loongcli.main`, so a half-working environment fails
+here instead of when you first run the CLI.
+
+Manual install, if you prefer:
+
 ```bash
 pip install -e .
 loongcli
