@@ -99,7 +99,7 @@ class LLMClient:
 
     # cache_aware 属性已删（2026-07-19）：曾用于「压缩金字塔 vs 保前缀」的 provider 分流，
     # 金字塔删除后请求路径统一为保前缀发完整历史，分流失去消费者。provider 缓存实测
-    # 结论（DS 1:120、qwen 稳态命中 72%）存档于 tests/e2e_cache.py 与 interview-qa Q43。
+    # 结论（DS 1:120、qwen 稳态命中 72%）存档于 tests/e2e_cache.py。
 
     def _build_thinking_params(self, kwargs: dict, stream: bool = False) -> None:
         """Inject provider-specific thinking/reasoning parameters."""

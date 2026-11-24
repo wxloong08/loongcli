@@ -2,7 +2,7 @@
 
 结论（2026-07 真机）：B（完整历史吃缓存）比 A（snip+micro"省 token"）便宜 ~22 倍、
 命中率 98% vs 12%——这个结论直接导致 2026-07-19 压缩金字塔（collapse/micro_compact）
-被整体删除。本探针的被测对象已不存在，脚本保留作证据链，见 interview-qa Q43。
+被整体删除。本探针的被测对象已不存在，脚本保留作证据链，删除理由见 compact.py 注释。
 
 原实验设计：
 1. 预热——发一次完整历史（模拟 compact 触发前、主对话上一轮已发过并被缓存）
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 raise SystemExit(
     "已存档：micro_compact 已于 2026-07-19 随压缩金字塔删除（本探针的结论即删除依据），"
-    "不可再运行。结论与叙事见 tasks/interview-qa.md Q43。"
+    "不可再运行。结论见本文件说明与 loongcli/core/compact.py 注释。"
 )
 
 import asyncio

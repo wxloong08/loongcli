@@ -1,6 +1,6 @@
 """守卫：代码里直接 import 的第三方包，必须在 pyproject 里声明。
 
-2026-11-12 线下面试现场演示 harness 时，换到对方机器上报 `ModuleNotFoundError`，
+2026-11-12 换到另一台机器上演示 harness 时报 `ModuleNotFoundError`，
 缺的正是 httpx —— `loongcli/core/llm.py` 直接 import 它，pyproject 却没写，
 本地一直靠 mcp 的传递依赖活着。换一台干净机器（或 mcp 哪天不再依赖 httpx）就炸。
 

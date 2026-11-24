@@ -406,7 +406,7 @@ class TestPlanCommand:
         assert "活跃计划" in output
 
 
-# ── 活跃计划注入的前缀稳定性（域 5 拷问产出）───────────────────────
+# ── 活跃计划注入的前缀稳定性 ───────────────────────
 
 
 class TestActivePlanInjectionCacheStability:

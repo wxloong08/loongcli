@@ -404,7 +404,7 @@ class TestCompact:
         sent = calls[0]["messages"]
         assert len(sent) < len(msgs) + 1, "超窗口应 snip 扔旧轮，摘要请求不能超窗"
         # provider 无关：统一逻辑下不存在"非 cache-aware 走金字塔"的第二条路径
-        # （金字塔已删 2026-07-19，理由见 compact.py 注释与 interview-qa Q43）
+        # （金字塔已删 2026-07-19，理由见 compact.py 注释）
 
 
 # --- _extract_summary ---

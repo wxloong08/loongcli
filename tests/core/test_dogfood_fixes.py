@@ -165,14 +165,14 @@ async def test_date_rollover_marker_injected_before_user_message():
     """上一回合在昨天、这一回合在今天：用户消息之前出现一对「日期变更」标记。
 
     事故（会话 0eb18513fbee）：11-10 下午开的会话聊到 11-11 凌晨，模型仍按系统提示里
-    11-10 的日期快照推算，把 11-12 的面试说成「今天下午」。"""
+    11-10 的日期快照推算，把 11-12 的安排说成「今天下午」。"""
     agent = _agent(_scripted_llm([_make_text_chunks(["ok"])]), system_prompt="sys")
     agent._last_turn_date = date.today() - timedelta(days=1)
 
-    [e async for e in agent.run_stream("面试是哪天？")]
+    [e async for e in agent.run_stream("会议是哪天？")]
 
     contents = [(m["role"], m["content"]) for m in agent.messages]
-    idx = next(i for i, (_, c) in enumerate(contents) if c == "面试是哪天？")
+    idx = next(i for i, (_, c) in enumerate(contents) if c == "会议是哪天？")
     marker_role, marker_text = contents[idx - 2]
     assert marker_role == "user" and marker_text.startswith(DATE_ROLLOVER_MARKER)
     assert datetime.now().strftime("%Y-%m-%d") in marker_text

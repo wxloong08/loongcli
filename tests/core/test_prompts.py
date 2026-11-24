@@ -178,7 +178,7 @@ def test_prompt_plan_usage():
     assert "step_output" in prompt
 
 
-# ── 会话级快照族：前缀缓存的承重不变量（域 5 拷问产出）────────────
+# ── 会话级快照族：前缀缓存的承重不变量 ────────────
 
 
 class TestSessionPinnedSnapshots:

@@ -3,7 +3,7 @@
 #
 # 背景：master 与 dev 历史不相关（filter-repo 重写过），推送靠 read-tree 树对齐；
 # dev 自 2026-07-19 起追踪内部文档（docs/tasks/CLAUDE.md/LOONG.md），read-tree
-# 会把它们整棵带进 master 暂存区——含面试材料等隐私，绝不能上 GitHub。
+# 会把它们整棵带进 master 暂存区——内部文档不发布。
 # 本脚本：剔除（第一闸）+ 断言（第二闸），任一异常中止并回到 dev。
 #
 # 用法：bash scripts/push-master.sh "commit message"
