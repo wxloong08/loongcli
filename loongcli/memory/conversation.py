@@ -46,6 +46,18 @@ def project_tasks_dir(project_dir: Path | None = None) -> Path:
     return _projects_root() / slug / "tasks"
 
 
+def project_tool_results_dir(project_dir: Path | None = None) -> Path:
+    """普通工具（当前仅 shell）完整结果的落盘目录——与 sessions/tasks 平级隔离。
+
+    有副作用、重跑代价高的工具结果超预算时全量落这里，上下文只留头+尾预览 + 文件指针
+    （模型用 read_file 的 offset/limit 廉价重取被截的中段，不必重跑命令）。只算路径不建
+    目录——由 ToolResultManager 首次落盘时懒建，避免测试/无落盘场景产生空目录。"""
+    if project_dir is None:
+        project_dir = Path.cwd()
+    slug = _path_to_slug(project_dir)
+    return _projects_root() / slug / "tool_results"
+
+
 def project_memory_dir(project_dir: Path | None = None) -> Path:
     """项目级记忆库目录——与 sessions 平级，按项目隔离。
 
@@ -144,6 +156,13 @@ class ConversationStore:
     @property
     def session_path(self) -> Path:
         return self.base_dir / f"{self.session_id}.json"
+
+    @property
+    def meta(self) -> dict[str, Any]:
+        """当前会话 meta 的只读快照。resume 后装的是磁盘上那次会话的 meta，
+        其中 updated_at = 上次活动时间（resume 时间跳跃标记据此算间隔）。
+        返回副本，避免调用方改坏落盘用的那份。"""
+        return dict(self._meta)
 
     def _session_path(self, session_id: str | None = None) -> Path:
         return self.base_dir / f"{session_id or self.session_id}.json"

@@ -13,6 +13,15 @@ class TextDelta:
 
 
 @dataclass
+class ToolCallProgress:
+    """模型正在流式写工具调用的参数（还没写完、还没执行）。chars = 已收到的参数字符数。
+
+    写大文件时参数要流几十秒，此前这段时间没有任何事件，界面一片静止（真机：以为终端或 API 卡死）。"""
+    tool_name: str
+    chars: int
+
+
+@dataclass
 class ToolCallStart:
     tool_name: str
     arguments: dict[str, Any]

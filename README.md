@@ -100,6 +100,16 @@ Safety Floor (hardcoded) → Rule Engine (configurable) → User Confirm (intera
 - **Tiered model** — reads auto-pass, writes learn on approval, dangerous operations always confirm
 - Common dangerous patterns (rm -rf, format, etc.) blocked at baseline level
 
+Three permission modes, picked at launch:
+
+| Mode | Flag | What happens to a call that would need confirmation | Use for |
+|---|---|---|---|
+| Default | — | You approve or reject it in the TUI | Interactive work |
+| Auto review | `--auto-permissions` | A utility model reviews the full call (including the source of project scripts it runs) against the goal and current plan step; ordinary dev work runs, risky actions are blocked and the agent is told to stop and ask you. Review timeouts, errors and unparseable output count as blocks | Unattended `/goal` runs |
+| Skip | `--dangerously-skip-permissions` | Runs it | Throwaway sandboxes only |
+
+Auto review blocks: synthetic keyboard/mouse input, global input hooks, microphone/camera/screen capture, clipboard access, registry/startup/scheduled-task/service changes, global package installs, deletes or writes outside the project, pushes and outbound sends, download-and-execute, and killing processes the agent didn't start. The deterministic layers are unchanged in every mode — hard-blocked calls stay blocked and read-only calls never reach the reviewer. The reviewer is probabilistic: it lowers risk, it doesn't guarantee safety (`bench/auto_review_eval.py` measures it on a labeled set).
+
 ### Hook System (`loongcli/hooks/`)
 
 User-programmable interception at 4 lifecycle events — deterministic policy enforced by the harness, not by prompt goodwill:
@@ -207,7 +217,7 @@ export DEEPSEEK_API_KEY="sk-..."
 /help      — Show all commands          /plan [desc]   — Enter plan mode
 /model     — Switch model/profile       /goal <desc>   — Autonomous execution
 /compact   — Manual compaction          /think [level] — Toggle thinking mode
-/usage     — Token usage & cost         /fast /pro     — Quick model switch
+/usage     — Token usage & cost
 /remember  — Save memory                /forget        — Delete memory
 /memories  — List memories              /init          — Create LOONG.md template
 /clear     — Clear conversation         /verbose       — Toggle tool output detail

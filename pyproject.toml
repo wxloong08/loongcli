@@ -12,6 +12,10 @@ dependencies = [
     "httpx>=0.27.1,<1.0.0",
 ]
 
+[project.optional-dependencies]
+# Alt+V 从剪贴板贴截图（loongcli/tui/clipboard_image.py）；不装也能用，按 Alt+V 时提示安装
+clipboard = ["pillow>=10.0"]
+
 [project.scripts]
 loongcli = "loongcli.main:main"
 

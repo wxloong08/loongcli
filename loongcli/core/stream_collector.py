@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 
-from loongcli.core.events import TextDelta, ThinkingDelta
+from loongcli.core.events import TextDelta, ThinkingDelta, ToolCallProgress
 
 
 @dataclass
@@ -83,8 +83,10 @@ class StreamCollector:
                             tc["function"]["name"] = tc_delta.function.name
                         if tc_delta.function.arguments:
                             tc["function"]["arguments"] += tc_delta.function.arguments
-
-                    pass
+                    # 参数还在流：报个进度，界面据此显示「正在生成 X 调用… N 字」（否则写大文件时几十秒一片静止）
+                    if tc["function"]["name"]:
+                        yield ToolCallProgress(tool_name=tc["function"]["name"],
+                                               chars=len(tc["function"]["arguments"]))
 
         sorted_tool_calls = [
             tool_calls_by_index[i]

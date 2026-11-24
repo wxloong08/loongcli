@@ -4,7 +4,7 @@ import platform
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from loongcli.core.git_context import collect_git_context
+from loongcli.core.git_context import GitContext, collect_git_context
 from loongcli.core.project_context import load_project_context
 from loongcli.tools.shell import resolve_shell
 
@@ -20,7 +20,21 @@ def get_system_prompt(
     mcp: MCPManager | None = None,
     plan_store=None,
     skills: SkillRegistry | None = None,
+    git_ctx: GitContext | None = None,
+    plan_text: str | None = None,
+    memory_index: str | None = None,
 ) -> str:
+    """git_ctx / plan_text / memory_index 是「会话级快照」族：由调用方在会话开始时
+    各采集一次并逐次传入，之后所有重建复用同一份。
+
+    为什么需要：_rebuild_system_prompt 会重拼整个提示词，且在计划执行期每轮触发。
+    这三个源不固定住就会每轮现采——git dirty 清单随每次改文件变、计划摘要随每步
+    推进变、记忆索引随 memorize 变——于是 messages[0] 每轮都变，前缀缓存从
+    messages[0] 起（连同其后的全部对话历史）作废。而它们本就该是快照：环境段自己
+    声明过「采集时的快照、不随本会话操作实时更新」，计划进度由 plan update_step
+    的返回值实时携带，新存的记忆模型在 memorize 的返回值里就看到了。
+
+    三者都传 None 时保持旧行为（现采），供测试与一次性构建使用。"""
     parts = [
         _identity_section(),
         _system_section(),
@@ -58,14 +72,19 @@ def get_system_prompt(
             parts.append(f"# 可用技能\n用 skill(name) 加载完整技能内容。可用技能：\n{listing}")
 
     if memory:
-        parts.append(_memory_section(memory))
+        parts.append(_memory_section(memory, memory_index))
 
     if plan_store:
-        plan_text = plan_store.format_for_prompt()
-        if plan_text:
-            parts.append(f"# 活跃计划\n以下是跨会话持久化的工作计划，继续推进未完成的步骤：\n\n{plan_text}")
+        text = plan_store.format_for_prompt() if plan_text is None else plan_text
+        if text:
+            parts.append(
+                "# 活跃计划\n以下是跨会话持久化的工作计划，继续推进未完成的步骤：\n\n"
+                f"{text}\n\n"
+                "（以上是会话开始时的快照，步骤状态不随本会话实时更新——"
+                "最新进度见 plan update_step 的返回值，或用 plan get 查询）"
+            )
 
-    parts.append(_environment_section(model))
+    parts.append(_environment_section(model, git_ctx))
 
     return "\n\n".join(parts)
 
@@ -117,6 +136,7 @@ def _actions_section() -> str:
 - 破坏性操作：rm -rf、drop table、git reset --hard、删除文件/分支
 - 难以逆转的操作：git push --force、修改 CI/CD 配置
 - 影响他人的操作：推送代码、创建/关闭 PR、发送消息
+- 作用于用户正在使用的电脑和外设的操作：模拟按键或鼠标、装全局键盘/鼠标钩子、打开麦克风/摄像头/录屏、改注册表或开机启动项、结束不是自己启动的进程。这些在真机上立即生效，写在脚本里一样算；中途被打断会留下残局（如 Ctrl 停在按下状态）。「核实环境」只做只读查询（版本、设备列表、配置）；需要这类实测时停下来，写清楚要做什么，由用户亲手做或同意后再做
 
 遇到障碍时，不要用破坏性操作作为捷径。找到根因并修复，而不是绕过安全检查。
 发现陌生文件/分支/配置时，先调查再删除——可能是用户正在进行的工作。"""
@@ -124,18 +144,15 @@ def _actions_section() -> str:
 
 def _verify_section() -> str:
     return """\
-# 验证循环
+# 验证
 
-每次修改代码后，你必须验证修改是否正确。系统会自动检测项目测试命令并提供给你。
+每次修改代码后，你必须验证修改是否正确。
 
-工作流程：
-1. 用 Shell 工具运行测试命令
-2. 如果测试通过 → 直接报告完成，不要再次运行相同的测试
-3. 如果测试失败 → 仔细阅读报错，分析根因
-4. 修复问题后重新运行测试
-5. 最多 3 轮验证，若仍失败则向用户报告具体原因
+1. 用 Shell 工具运行测试命令（系统检测到项目测试命令时会告诉你）
+2. 测试通过 → 直接报告完成，不要重复运行相同的测试
+3. 测试失败 → 读报错、找根因、修复后再跑一次
+4. 修不好就向用户报告具体原因，不要假装成功
 
-重要：测试已经通过就不要重复运行。一次通过即可报告完成。
 如果项目没有测试框架，至少用 Shell 工具手动验证（运行脚本/检查语法/验证输出）。"""
 
 
@@ -147,34 +164,30 @@ def _tools_section() -> str:
         shell_hint = f"执行 shell 命令（{spec.label}）。不支持 &&，用分号 ; 连接多条命令"
     return f"""\
 # 使用工具
-优先使用专用工具而非 shell 等价命令：
-- 读文件用 read_file，不用 cat/type
+- 读文件用 read_file，不用 cat/type（带行号、按页返回、自动识别编码、能看图片）
 - 编辑文件用 edit_file，不用 sed
-- 搜索文件用 glob，不用 find/dir
-- 搜索内容用 grep，不用 grep/findstr
-- shell 只用于：包管理、构建、测试、git 操作等真正需要 shell 的任务
+- 搜索内容和找文件用 shell：`git grep -n 关键词`、`git ls-files 'src/*.py'`（会跳过 .gitignore 里的目录，
+  如 .venv、node_modules）；不在 git 仓库里用 `grep -rn`、`ls`。没有 git bash 的 Windows 用 PowerShell 的 Select-String / Get-ChildItem
+- 这些只读命令免确认；规划阶段 shell 也只能跑这类只读命令
 
 工具列表：
 - read_file: 读取文件内容（带行号），支持 offset/limit 分页读取
 - write_file: 写入/创建文件，自动创建父目录，覆盖已有内容
 - edit_file: 精确字符串替换（old_string 必须在文件中唯一出现）
 - shell: {shell_hint}
-- glob: 按模式搜索文件路径（支持 ** 递归）
-- grep: 按正则搜索文件内容（支持 glob 过滤、大小写忽略）
 - recall: 检索已保存的记忆
 - memorize: 保存/更新/删除记忆条目（用户偏好、反馈、项目决策、外部引用）
 - plan: 创建/更新/查询持久化工作计划（跨会话保存进度）。目标模式下自主执行的核心追踪机制
 - delegate: 将任务派发给后台 SubAgent，返回 task_id
 - batch_delegate: 并行派发多个子任务，等待全部完成后返回聚合结果
 - task_status: 查询 SubAgent 状态和结果
-- send_message: 向 SubAgent 发送消息（可唤醒已完成的 SubAgent）
 
 SubAgent 使用指引：
 - 当任务可以并行独立完成时，用 delegate 派发给 SubAgent
 - SubAgent 适合：代码搜索、文件分析、独立子任务
 - 不要把简单的单步操作委派出去，直接做
 - delegate 后用 task_status 轮询结果，不要空等
-- SubAgent 的工具集是父 Agent 的子集（排除 delegate/send_message/task_status/recall）"""
+- SubAgent 的工具集是父 Agent 的子集（排除 delegate/task_status/recall）"""
 
 
 def _plan_usage_section() -> str:
@@ -190,17 +203,20 @@ plan 工具是目标模式（/goal）自主执行的核心。系统通过 plan �
 ## 好的 plan 是什么样的
 - **步骤粒度适中**：每步是一个独立可验证的交付，不是操作指令。\
 "分析日志并输出错误分类" 好于 "打开日志文件"
-- **每步有明确完成标准**：描述中包含预期产出。\
-"调研 3 个方案并对比优劣" 好于 "调研方案"
+- **每步带 1-5 条完成判据（criteria）**：执行期你自己能检查的事实——跑什么命令看到什么、文件里有什么。\
+"pytest tests/test_auth.py 全部通过" 好于 "验证正确性"；需要用户本人操作的验收：要等用户结果就单列最后一步、\
+判据写「用户回复验收通过」并停下等回复，不用等就写「验收清单已列出」
 - **步骤间有逻辑依赖**：前面步骤的产出是后面的输入
 - **包含验证步骤**：跑测试、检查输出、人工确认
 - 一般 3-8 步。超过 8 步考虑拆分子目标
 
 ## 执行规则
-- 每完成一步立即调用 plan(update_step) 更新状态和产出
-- step_output 记录关键结果（文件名、数据摘要、决策），不是过程描述
+- 每完成一步立即调用 plan(update_step, step_status=completed)，evidence 里逐条判据交证据\
+（命令 + 关键输出、文件:行号）。缺证据会被拒绝
+- 证据要证明判据本身，不能拿相邻的事实充数：判据是运行时行为，静态检查不算证据
+- step_output 记录关键结果（文件名、数据摘要、决策），不是过程描述；做不了的步骤标 skipped 并写理由
 - 遇到需要用户决策的问题直接提问，不要自行假设
-- 全部步骤完成后调用 plan(complete)"""
+- 全部步骤完成后调用 plan(complete)；有步骤未完成或缺证据时会被拒绝"""
 
 
 def _skill_discipline_section() -> str:
@@ -244,6 +260,7 @@ def _communication_section() -> str:
 # 交流风格
 - 简洁直接。少用加粗、标题、列表，能用散文讲清就用散文，只保留把事情说清所必需的格式。简单问题直接给答案。
 - 调用工具前，用一句话说明你要做什么。工作中在关键节点给简短更新。
+- 工具的输出用户在界面上能看到（折叠成前几行）。不要把输出原样抄一遍，说结论和需要注意的地方；用户明确要看全文时再贴。
 - 不要叙述内部过程（"让我搜索一下..."、"我来调用 grep..."），用用户能理解的语言描述行为。
 - 拒绝或无法完成某项任务时，用一段话好好说明原因，不要用 bullet 列理由。
 - 需要用户澄清时，一次只问最关键的一个问题，不要一次抛一串。
@@ -252,7 +269,7 @@ def _communication_section() -> str:
 - 不要主动提及知识截止日期，除非与用户的问题直接相关。"""
 
 
-def _memory_section(memory) -> str:
+def _memory_section(memory, memory_index: str | None = None) -> str:
     guidelines = """\
 # 记忆系统
 你有持久化记忆能力。用 memorize 工具保存重要信息，用 recall 工具检索。
@@ -276,20 +293,27 @@ def _memory_section(memory) -> str:
 - 写入前先 recall 检查是否已有同类记忆，有则更新而非重复创建
 - 不要在每次对话都保存 — 只保存对未来会话有价值的信息"""
 
-    content = memory.get_index(max_bytes=25_000)
+    content = memory.get_index(max_bytes=25_000) if memory_index is None else memory_index
 
     if content:
-        return f"{guidelines}\n\n## 记忆索引\n以下是所有已保存记忆的索引，详细内容通过 recall 工具获取：\n\n{content}"
+        return (
+            f"{guidelines}\n\n## 记忆索引\n"
+            "以下是所有已保存记忆的索引，详细内容通过 recall 工具获取：\n\n"
+            f"{content}\n\n"
+            "（索引是会话开始时的快照，本会话中新存的记忆不会出现在这里——"
+            "它们在 memorize 的返回值里，需要全量最新索引时用 recall 检索）"
+        )
     return guidelines
 
 
-def _environment_section(model: str) -> str:
+def _environment_section(model: str, git_ctx: GitContext | None = None) -> str:
     cwd = os.getcwd()
     system = platform.system()
     release = platform.version()
     shell = resolve_shell().label
 
-    git_ctx = collect_git_context(Path(cwd))
+    if git_ctx is None:
+        git_ctx = collect_git_context(Path(cwd))
     git_info = git_ctx.to_prompt()
 
     # 时间感知：模型训练截止后对"现在"一无所知，不注入就会用旧年份推理

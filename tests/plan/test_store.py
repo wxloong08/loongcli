@@ -154,3 +154,76 @@ def test_format_summary_is_markdown_list():
     assert lines[2].startswith("- ○ ")         # 列表项
     assert lines[3].startswith("- ✓ ")
     assert any("产出：+3 行" in l for l in lines)
+
+
+def test_format_summary_marks_criteria_evidence():
+    plan = Plan(title="T", steps=[
+        PlanStep(index=0, description="录音", criteria=["WAV 头一致", "界面不写盘"], evidence=["test_wav ok", ""]),
+    ])
+    s = plan.format_summary()
+    assert "判据 1 [✓] WAV 头一致" in s            # 对外编号从 1 起
+    assert "判据 2 [○] 界面不写盘" in s
+    assert "test_wav ok" not in s                    # 默认不回显证据原文
+    assert "证据：test_wav ok" in plan.format_summary(show_evidence=True)
+
+
+def test_evidence_normalized_to_criteria_length():
+    """手改过的文件证据条数和判据不一致：补齐/截断，按下标取不越界。"""
+    assert PlanStep(index=0, description="d", criteria=["a", "b"]).evidence == ["", ""]
+    assert PlanStep(index=0, description="d", criteria=["a"], evidence=["x", "y"]).evidence == ["x"]
+
+
+def _exec4_scale_plan() -> Plan:
+    """exec-4 规模：8 步、每步 5 条长判据，完整摘要约 6500 字符。"""
+    steps = [
+        PlanStep(index=i, description=f"第 {i} 步：" + "实现并验证某个模块的具体改动内容" * 4,
+                 status="completed" if i < 3 else "pending",
+                 criteria=[f"判据{i}-{j}：" + "运行某条命令并看到某个具体输出" * 3 for j in range(5)],
+                 evidence=[f"证据{i}-{j}" for j in range(5)] if i < 3 else [])
+        for i in range(8)
+    ]
+    return Plan(title="Windows 语音输入 v1：P1+P2", steps=steps)
+
+
+def test_format_for_prompt_never_drops_large_plan(store):
+    """回归：判据让计划摘要超出 2000 字符预算后，曾被整份丢弃、只剩「... (还有 1 个活跃计划)」。"""
+    plan = _exec4_scale_plan()
+    assert len(plan.format_summary()) > 2000      # 完整版确实超预算
+    store.save(plan)
+    text = store.format_for_prompt(max_chars=2000)
+    assert "Windows 语音输入 v1" in text
+    assert "当前步骤 4 的判据" in text            # 当前步骤的判据在
+    assert "判据3-0" in text
+    assert "还有 1 个活跃计划" not in text
+    assert len(text) <= 2000 + 40
+
+
+def test_format_compact_only_expands_current_step():
+    plan = _exec4_scale_plan()
+    compact = plan.format_compact()
+    assert "判据3-0" in compact
+    assert "判据4-0" not in compact               # 后面步骤的判据不展开
+    assert "判据0-0" not in compact               # 已完成步骤的判据不展开
+    assert f"id {plan.id}" in compact
+
+
+def test_format_for_prompt_truncates_oversized_first_plan(store):
+    plan = Plan(title="超长", steps=[PlanStep(index=0, description="x" * 90, criteria=["y" * 3000])])
+    store.save(plan)
+    text = store.format_for_prompt(max_chars=500)
+    assert "超长" in text
+    assert "已截断" in text
+
+
+def test_closure_problems():
+    plan = Plan(title="T", steps=[
+        PlanStep(index=0, description="a", status="completed", criteria=["c"], evidence=["e"]),
+        PlanStep(index=1, description="b", status="completed", criteria=["c0", "c1"], evidence=["e", ""]),
+        PlanStep(index=2, description="c", status="skipped"),
+        PlanStep(index=3, description="d", status="in_progress"),
+    ])
+    problems = plan.closure_problems()
+    assert len(problems) == 3
+    assert "步骤 2 判据 2 没有证据" in problems[0]    # 对外编号从 1 起
+    assert "步骤 3 标了跳过但没写理由" in problems[1]
+    assert "步骤 4 未完成" in problems[2]

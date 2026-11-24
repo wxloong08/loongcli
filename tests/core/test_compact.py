@@ -647,3 +647,111 @@ async def test_empty_summary_aborts_compact():
     msgs = _make_messages(6)
     with pytest.raises(ValueError, match="过短"):
         await compactor.compact(msgs, mode="auto")
+
+
+# --- 单个长回合（goal 一次执行迭代）：2026-11-19 p4-1 上下文 236K、57 次超阈值、0 次压缩 ---
+
+def _long_single_turn(n_calls=50, result_size=2000, end_with_tool=True):
+    msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "实施 P4：协调器与离线失败路径"}]
+    for i in range(n_calls):
+        msgs.append({"role": "assistant", "content": f"第 {i} 步", "tool_calls": [
+            {"id": f"tc{i}", "type": "function", "function": {"name": "shell", "arguments": "{}"}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"tc{i}", "content": f"result-{i} " + "x" * result_size})
+    if not end_with_tool:
+        msgs.append({"role": "assistant", "content": "阶段总结"})
+    return msgs
+
+
+def _assert_valid_order(msgs):
+    """API 合法性：每条 tool 都有前面的 assistant 发起；每个 tool_call 都有结果；没有连续同角色的 user/assistant。"""
+    pending = set()
+    prev_role = None
+    for m in msgs:
+        if m["role"] == "tool":
+            assert m["tool_call_id"] in pending, f"孤儿 tool 消息 {m['tool_call_id']}"
+            pending.discard(m["tool_call_id"])
+        else:
+            assert not pending, f"tool_call 没有结果：{pending}"
+            if m["role"] in ("user", "assistant"):
+                assert m["role"] != prev_role, f"连续两条 {m['role']}"
+            pending = {tc["id"] for tc in m.get("tool_calls") or []}
+        prev_role = m["role"]
+    assert not pending
+
+
+class TestLongSingleTurn:
+    def test_should_compact_in_single_long_turn(self):
+        c = Compactor(llm=_mock_llm(), threshold=100)
+        assert c.should_compact(150000, _long_single_turn())
+
+    async def test_compacts_mid_turn_with_valid_order(self):
+        c = Compactor(llm=_mock_llm(), threshold=100)
+        msgs = _long_single_turn()
+        result = await c.compact(msgs)
+        assert len(result) < len(msgs) // 4
+        _assert_valid_order(result)
+
+    async def test_pending_tool_results_kept_verbatim(self):
+        """消息停在工具结果上（回合中途）：模型还没回应的那批原样保留，更早的换占位。"""
+        result = await Compactor(llm=_mock_llm(), threshold=100).compact(_long_single_turn())
+        tools = [m for m in result if m["role"] == "tool"]
+        assert tools[-1]["content"].startswith("result-49 ")
+        assert all(t["content"] == TOOL_RESULT_PLACEHOLDER for t in tools[:-1])
+
+    async def test_responded_tool_results_all_placeholdered(self):
+        """消息停在模型回复上：保留区的工具结果都已被回应过，全部换占位（与多轮对话行为一致）。"""
+        result = await Compactor(llm=_mock_llm(), threshold=100).compact(_long_single_turn(end_with_tool=False))
+        assert all(m["content"] == TOOL_RESULT_PLACEHOLDER for m in result if m["role"] == "tool")
+
+    async def test_user_task_pinned_verbatim(self):
+        result = await Compactor(llm=_mock_llm(), threshold=100).compact(_long_single_turn())
+        assert any(m["role"] == "user" and m["content"] == "实施 P4：协调器与离线失败路径" for m in result)
+
+    async def test_pin_skips_previous_compaction_artifacts(self):
+        """第二次压缩时，钉住的是真正的任务消息，而不是上一次的摘要。"""
+        c = Compactor(llm=_mock_llm(), threshold=100)
+        once = await c.compact(_long_single_turn())
+        more = once + _long_single_turn(30)[2:]          # 同一回合继续跑 30 次工具调用
+        twice = await c.compact(more)
+        _assert_valid_order(twice)
+        pinned = [m for m in twice if m["role"] == "user" and m["content"] == "实施 P4：协调器与离线失败路径"]
+        assert len(pinned) == 1
+
+    async def test_kept_units_capped(self):
+        from loongcli.core.compact import KEEP_RECENT_UNITS
+        result = await Compactor(llm=_mock_llm(), threshold=100).compact(_long_single_turn())
+        assert len([m for m in result if m.get("tool_calls")]) <= KEEP_RECENT_UNITS
+
+    async def test_multi_turn_chat_still_keeps_last_three_turns(self):
+        """多轮对话（每轮很小）：仍保留最近 3 个用户轮次，行为与原来一致。"""
+        msgs = _make_messages(10)
+        result = await Compactor(llm=_mock_llm(), threshold=100).compact(msgs)
+        users = [m["content"] for m in result if m["role"] == "user" and "question" in str(m["content"])]
+        assert users[-3:] == ["question 7", "question 8", "question 9"]
+        assert "question 6" not in users
+
+
+class TestThresholdFollowsModel:
+    """压缩线按当前模型实时算：会话中换模型后跟着变（真机：换了模型压缩线还是原模型的）。"""
+
+    def test_window_for_tracks_model_switch(self):
+        from loongcli.core.compact import Compactor, SUMMARY_TOKEN_RESERVE
+        llm = MagicMock()
+        llm.model = "big"
+        c = Compactor(llm=llm, window_for=lambda m: {"big": 1_000_000, "small": 128_000}[m])
+        assert c.threshold == 1_000_000 - SUMMARY_TOKEN_RESERVE
+        llm.model = "small"
+        assert c.threshold == 128_000 - SUMMARY_TOKEN_RESERVE
+
+    def test_fixed_threshold_when_configured(self):
+        from loongcli.core.compact import Compactor
+        c = Compactor(llm=MagicMock(), threshold=150_000)
+        assert c.threshold == 150_000
+        c.threshold = 90_000
+        assert c.threshold == 90_000 and c.window_for is None
+
+    def test_role_window_override_only_for_bound_model(self):
+        from loongcli.core.provider import ModelRouter, RoleBinding, context_window
+        router = ModelRouter(providers={}, roles={"main": RoleBinding(provider="p", model="mine", context_window=64_000)})
+        assert router.context_window_for_model("mine") == 64_000
+        assert router.context_window_for_model("deepseek-v4-pro") == context_window("deepseek-v4-pro")

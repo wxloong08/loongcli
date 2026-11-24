@@ -2,7 +2,7 @@ import pytest
 import json
 from unittest.mock import MagicMock
 from loongcli.core.stream_collector import StreamCollector
-from loongcli.core.events import TextDelta
+from loongcli.core.events import TextDelta, ToolCallProgress
 
 
 @pytest.mark.asyncio
@@ -121,7 +121,8 @@ async def test_collect_with_tool_call():
     assert result.tool_calls[0]["id"] == "call_123"
     assert result.tool_calls[0]["function"]["name"] == "shell"
     assert json.loads(result.tool_calls[0]["function"]["arguments"]) == {"command": "ls"}
-    assert len(events) == 0
+    # 参数流式到达时逐片报进度（界面据此显示「正在生成 shell 调用… N 字」，否则写大文件时几十秒一片静止）
+    assert events == [ToolCallProgress(tool_name="shell", chars=6), ToolCallProgress(tool_name="shell", chars=17)]
 
 
 @pytest.mark.asyncio

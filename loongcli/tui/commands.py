@@ -7,11 +7,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
-from rich.markdown import Markdown
-from rich.panel import Panel
+from loongcli.tui.mdstream import LeftMarkdown as Markdown   # 原版 h1 套满宽盒子，拉窄窗口会碎
+from loongcli.tui.cards import section
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.patch_stdout import patch_stdout
 
 if TYPE_CHECKING:
     from loongcli.core.agent import AgentLoop
@@ -71,7 +69,7 @@ class HelpCommand(SlashCommand):
             usage = f" {cmd.usage}" if cmd.usage else ""
             lines.append(f"  [bold cyan]/{cmd.name}[/bold cyan]{usage} — {cmd.description}")
         lines.append(f"  [bold cyan]/exit[/bold cyan] — 退出")
-        ctx.console.print(Panel("\n".join(lines), title="命令列表", border_style="cyan"))
+        ctx.console.print(section("\n".join(lines), title="命令列表"))
 
 
 class ClearCommand(SlashCommand):
@@ -96,19 +94,6 @@ def _vision_for_model(config, model: str) -> bool:
             if bind.model == model and bind.vision:
                 return True
     return False
-
-
-def _deepseek_provider(config):
-    """找 deepseek 供应商配置：显式名字优先，其次 base_url 含 deepseek 的（含 _default）。"""
-    providers = getattr(config, "providers", None) if config else None
-    if not providers:
-        return None
-    if "deepseek" in providers:
-        return providers["deepseek"]
-    for prov in providers.values():
-        if "deepseek" in (prov.base_url or ""):
-            return prov
-    return None
 
 
 def _persist_main_role(
@@ -279,7 +264,7 @@ class MemoriesCommand(SlashCommand):
         lines = []
         for e in entries:
             lines.append(f"[{e['type']}] {e['name']} — {e['description']}")
-        ctx.console.print(Panel("\n".join(lines), title="记忆", border_style="cyan"))
+        ctx.console.print(section("\n".join(lines), title="记忆"))
 
 
 class InitCommand(SlashCommand):
@@ -359,53 +344,7 @@ class UsageCommand(SlashCommand):
                         f"({rc.calls} calls, {rc.model})"
                     )
 
-        ctx.console.print(Panel("\n".join(lines), title="Token 用量", border_style="cyan"))
-
-
-MODEL_ALIASES = {
-    "flash": "deepseek-v4-flash",
-    "pro": "deepseek-v4-pro",
-}
-
-
-async def _switch_deepseek(ctx: CommandContext, alias: str, label: str) -> None:
-    """/fast /pro 共用：切到 DeepSeek 目标模型，端点/密钥随 provider 配置一起换。
-
-    主力若是其他供应商（如 qwen），只换模型名会拿 deepseek 模型名打错端点（400）——
-    必须找到 deepseek provider 配置整体切换；找不到且当前端点也不是 DeepSeek 则明确拒绝。
-    """
-    llm = ctx.agent.llm
-    target = MODEL_ALIASES[alias]
-    prov = _deepseek_provider(ctx.config)
-    if prov:
-        llm.switch(model=target, api_key=prov.api_key, base_url=prov.base_url, vision=False)
-    elif "deepseek" in (getattr(llm, "base_url", "") or ""):
-        llm.switch(model=target, vision=False)
-    else:
-        ctx.console.print(
-            "[red]未配置 deepseek provider，无法切换[/red]"
-            "（当前端点非 DeepSeek，需在 config.json providers 段配置 deepseek）"
-        )
-        return
-    ctx.console.print(
-        f"[green]✓ 已切换到[/green] [bold cyan]{target}[/bold cyan] [dim]({label})[/dim]"
-    )
-
-
-class FastCommand(SlashCommand):
-    name = "fast"
-    description = "切换到 deepseek-v4-flash（快速、低成本）"
-
-    async def run(self, args: list[str], ctx: CommandContext) -> None:
-        await _switch_deepseek(ctx, "flash", "快速模式")
-
-
-class ProCommand(SlashCommand):
-    name = "pro"
-    description = "切换到 deepseek-v4-pro（强推理、高质量）"
-
-    async def run(self, args: list[str], ctx: CommandContext) -> None:
-        await _switch_deepseek(ctx, "pro", "专业模式")
+        ctx.console.print(section("\n".join(lines), title="Token 用量"))
 
 
 LOONG_TEMPLATE = """\
@@ -437,10 +376,7 @@ class PlanCommand(SlashCommand):
             elif ctx.agent._active_plan_id and ctx.agent.plan_store:
                 plan = ctx.agent.plan_store.load(ctx.agent._active_plan_id)
                 if plan:
-                    ctx.console.print(Panel(
-                        Markdown(plan.format_summary()),
-                        title="活跃计划", border_style="cyan",
-                    ))
+                    ctx.console.print(section(Markdown(plan.format_summary()), title="活跃计划"))
                 else:
                     ctx.console.print("[dim]没有活跃计划[/dim]")
             else:
@@ -456,16 +392,25 @@ class PlanCommand(SlashCommand):
 
 class GoalCommand(SlashCommand):
     name = "goal"
-    description = "设定目标，Agent 自动规划并执行直到完成"
+    description = "设定目标，Agent 自动规划并执行直到完成（/goal stop 结束，/goal 查看状态）"
     usage = "<目标描述>"
 
     async def run(self, args: list[str], ctx: CommandContext) -> None:
+        tui = ctx.tui
         if not args:
-            ctx.console.print(f"[yellow]用法: /{self.name} {self.usage}[/yellow]")
+            status = tui.describe_goal() if tui is not None else ""
+            if status:
+                from rich.text import Text
+                ctx.console.print(Text(status))
+            else:
+                ctx.console.print(f"[yellow]用法: /{self.name} {self.usage}；/{self.name} stop 结束当前目标[/yellow]")
+            return
+        if len(args) == 1 and args[0].lower() == "stop":
+            tui.stop_goal(ctx.agent)
             return
 
         description = " ".join(args)
-        await ctx.tui.run_goal(ctx.agent, description)
+        await tui.run_goal(ctx.agent, description)
 
 
 class WebCommand(SlashCommand):
@@ -545,7 +490,7 @@ class ConfigCommand(SlashCommand):
                 lines.append(f"  {rname}: {bind.provider}:{bind.model}{vis}")
         lines.append("")
         lines.append(f"[dim]文件: {path}   （/config open 打开编辑；/model x:y --save 持久化主力）[/dim]")
-        ctx.console.print(Panel("\n".join(lines), title="配置", border_style="cyan"))
+        ctx.console.print(section("\n".join(lines), title="配置"))
 
 
 class VerboseCommand(SlashCommand):
@@ -586,7 +531,7 @@ class RollbackCommand(SlashCommand):
                 label = f"  [dim]({s['label']})[/dim]" if s["label"] else ""
                 lines.append(f"  [bold cyan]{i:>2}[/bold cyan]  {ts}  {files}{label}")
             lines.append("\n  [dim]/rollback <序号> 恢复到该次修改前的内容[/dim]")
-            ctx.console.print(Panel("\n".join(lines), title="文件快照（新→旧）", border_style="cyan"))
+            ctx.console.print(section("\n".join(lines), title="文件快照（新→旧）"))
             return
 
         try:
@@ -623,8 +568,6 @@ def create_default_registry() -> CommandRegistry:
     registry.register(InitCommand())
     registry.register(UsageCommand())
     registry.register(ThinkCommand())
-    registry.register(FastCommand())
-    registry.register(ProCommand())
     registry.register(WebCommand())
     registry.register(VerboseCommand())
     registry.register(ConfigCommand())

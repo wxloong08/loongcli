@@ -24,3 +24,7 @@ bench/worktrees/
 bench/results/
 bench/patches/
 bench/candidates.jsonl
+# 草稿区：拷问过程的原始对话副本（结论已沉淀进 tasks/interview-qa.md，
+# 题面原件在会话 transcript 里）。排除理由是噪声不是隐私——与上面那条
+# 「内部文档在 dev 追踪」的政策不冲突。
+docs/tmp.md

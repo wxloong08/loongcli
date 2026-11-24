@@ -17,11 +17,12 @@ scrollback 不对付。」`update()` 自适应节流（目标 ~20fps，渲染慢
 from __future__ import annotations
 
 import io
+import re
 import time
 
 from rich.console import Console
 from rich.live import Live
-from rich.markdown import Markdown, Heading
+from rich.markdown import CodeBlock, Heading, HorizontalRule, Markdown
 from rich.padding import Padding
 from rich.text import Text
 
@@ -56,22 +57,49 @@ class _LeftHeading(Heading):
         yield text
 
 
+class _ShortRule(HorizontalRule):
+    """`---` 画成一小段线而不是满宽线：满宽线进了终端历史，窗口拉窄时会被终端折成一长一短两截。"""
+
+    def __rich_console__(self, console, options):
+        yield Text("─" * min(24, options.max_width), style=console.get_style("markdown.hr", default="dim"))
+
+
+class _FitCodeBlock(CodeBlock):
+    """代码块：不铺背景色，只留语法高亮（见 cards.code_block）。"""
+
+    def __rich_console__(self, console, options):
+        from loongcli.tui.cards import code_block
+        yield code_block(str(self.text).rstrip(), self.lexer_name, self.theme)
+
+
 class LeftMarkdown(Markdown):
-    """标题一律左对齐的 Markdown（用于流式渲染、历史回放、计划展示）。"""
-    elements = {**Markdown.elements, "heading_open": _LeftHeading}
+    """标题左对齐、不画满宽元素的 Markdown（用于流式渲染、历史回放、计划展示）。"""
+    elements = {**Markdown.elements, "heading_open": _LeftHeading, "hr": _ShortRule,
+                "fence": _FitCodeBlock, "code_block": _FitCodeBlock}
+
+
+_LIST_ITEM = re.compile(r"^ {0,3}([-*+]|\d{1,9}[.)])(\s|$)")
+_TABLE_ROW = re.compile(r"^ {0,3}\|", re.M)
 
 
 class MarkdownStream:
-    def __init__(self, console: Console, left_pad: int = 2, live_window: int = 6):
+    def __init__(self, console: Console, left_pad: int = 2, live_window: int = 6, live_target=None):
         self.console = console
         self.left_pad = left_pad
         self.live_window = live_window
-        self.printed: list[str] = []        # 已作为稳定行输出的行（去重指针）
+        self.printed: list[str] = []        # 当前未定稿块里已作为稳定行输出的行（去重指针）
+        self._base = 0                      # text[:_base] 是已定稿、整块打印过的部分，不再参与渲染
         self.min_delay = 1.0 / 20
+        self._render_cost = 0.0             # 单次渲染耗时的指数平滑（秒）
         self.when = 0.0
         self._live: Live | None = None
+        # 常驻输入框的动态区出口（InputBar.set_live_renderable）。给了它就不建 Rich Live：
+        # 尾部交给输入框上方的动态区，稳定行照常 print（经 patch_stdout 打到输入框上方）。
+        self._live_target = live_target
 
     def _ensure_live(self) -> None:
+        if self._live_target is not None:
+            return
         if self._live is None:
             # auto_refresh=False：只在 update(refresh=True) 时重绘，杜绝 20fps 后台重绘
             # 与 console.print 交错造成的闪烁；重绘频率由 update() 的自适应节流控制。
@@ -90,11 +118,40 @@ class MarkdownStream:
         tmp.print(LeftMarkdown(text))
         return buf.getvalue().splitlines(keepends=True)
 
+    def _render_block(self, chunk: str) -> list[str]:
+        """渲染一段（从 _base 起）。不是开头的那段前面垫一个占位段落「x」再去掉第一行：Rich 块与块之间的空行、
+        一二级标题自带的空行、列表开头的空行都看上下文，垫上之后这段前面的空行和整篇渲染时一模一样。"""
+        if self._base == 0:
+            return self._render_to_lines(chunk)
+        return self._render_to_lines("x\n\n" + chunk)[1:]
+
+    def _commit_point(self, text: str) -> int:
+        """能定稿到哪：最后一个「空行之后、新块已经开头」的位置（在代码块围栏外）。返回 text 下标，没有就是 _base。
+
+        不在两种块前定稿：列表项开头（松散列表分开渲染会多出空行）、缩进开头（列表续段 / 缩进代码，脱离上文含义就变了）。
+        新块开头太短（不到 4 个字、行也没写完）先不判断：「1」可能长成「1. 」列表。"""
+        best = self._base
+        pos = self._base
+        in_fence = False
+        prev_blank = False
+        for line in text[self._base:].splitlines(keepends=True):
+            head = line.lstrip(" ")
+            if head.startswith(("```", "~~~")):
+                in_fence = not in_fence
+            elif (not in_fence and prev_blank and pos > self._base and line[:1] not in (" ", "\t", "\n", "\r")
+                  and (len(line.rstrip("\r\n")) >= 4 or line.endswith("\n")) and not _LIST_ITEM.match(line)):
+                best = pos
+            prev_blank = not line.strip()
+            pos += len(line)
+        return best
+
     def _pad(self, text: Text):
         return Padding(text, (0, 0, 0, self.left_pad)) if self.left_pad else text
 
     def _emit_stable(self, lines: list[str]) -> None:
-        block = "".join(lines).rstrip("\n")  # console.print 自带换行，避免行间多空行
+        # 不能 rstrip("\n")：那会把这批末尾的空行全剥掉，块间空行留不留看合批边界落在哪（真机：有的标题前有空行、有的没有）。
+        # 末尾那一个换行 Text.from_ansi 按 splitlines 拆行时已经吃掉，console.print 自带的换行不会叠出多余空行
+        block = "".join(lines)
         if not block:
             return
         self.console.print(self._pad(Text.from_ansi(block)))
@@ -107,14 +164,33 @@ class MarkdownStream:
         text = strip_variation_selectors(text)
 
         start = time.time()
-        lines = self._render_to_lines(text)
+        # 写完的块定稿：整块打印、往后不再渲染。此前每次更新都从头渲染整篇，耗时随回复长度线性涨（4400 字 18ms），
+        # 节流又按渲染耗时 ×10 放宽——长回复刷新拖到一秒三次、每次还卡住事件循环几十毫秒（真机：输出一顿一顿的）
+        cut = len(text) if final else self._commit_point(text)
+        if cut > self._base:
+            done = self._render_block(text[self._base:cut])
+            if len(done) > len(self.printed):
+                if self._live_target is None:
+                    self._teardown()
+                self._emit_stable(done[len(self.printed):])
+            self.printed = []
+            self._base = cut
+        lines = self._render_block(text[self._base:]) if self._base < len(text) else []
         render_time = time.time() - start
-        # 渲染越慢，节流越松，避免长回答卡顿；区间 [1/20s, 2s]
-        self.min_delay = min(max(render_time * 10, 1.0 / 20), 2)
+        # 渲染越慢，节流越松，区间 [1/20s, 0.5s]。按平滑后的耗时算：原先直接拿单次耗时 ×10，偶发一次 85ms 的渲染
+        # （首个代码块加载词法分析器、GC）就停更 0.85 秒（实测后半程最大间隔 754ms）
+        self._render_cost = 0.8 * self._render_cost + 0.2 * render_time
+        self.min_delay = min(max(self._render_cost * 4, 1.0 / 20), 0.5)
 
         num_lines = len(lines)
         if not final:
             num_lines -= self.live_window
+            # 在写的是表格：整张留在动态区、写完再定稿。表格每多一行列宽都可能变，表头和前几行要是先打出去，
+            # 就和后面的行对不上（真机：表头「依据 / 结论」和下面的值错开）。太长（> 60 行）才退回边写边打，免得动态区比屏幕还高
+            # 只是不再新打印：已经打出去的行（表格前面的段落）不能回到动态区——此前置 0，尾部从块开头算，
+            # 打过的行在动态区又出现一遍，定稿时动态区多缩一截，输入框跳（e2e metric_jitter_markdown 偶发上跳）
+            if _TABLE_ROW.search(text, self._base) and len(lines) <= 60:
+                num_lines = min(num_lines, len(self.printed))
 
         # 有新稳定行就打印到 Live 区上方——关键：先拆掉 Live 再 print。
         # transient Live 拆除会擦净活动区，随后的 console.print 落进干净的 scrollback；
@@ -122,7 +198,8 @@ class MarkdownStream:
         # 活动区交错 + 终端滚动会把旧帧留成残影（表格/多行块反复重复的真凶）。
         num_printed = len(self.printed)
         if (final or num_lines > 0) and num_lines - num_printed > 0:
-            self._teardown()
+            if self._live_target is None:
+                self._teardown()   # 输入框模式不先清动态区：新尾部随稳定行同一帧换上（见 InputBar.set_live_renderable）
             self._emit_stable(lines[num_printed:num_lines])
             self.printed = lines[:num_lines]
 
@@ -131,11 +208,18 @@ class MarkdownStream:
             return
 
         # 尾部剩余行重绘进（可能刚重建的）Live 窗口
-        self._ensure_live()
         rest = lines[max(num_lines, 0):]
-        self._live.update(self._pad(Text.from_ansi("".join(rest))), refresh=True)
+        tail = self._pad(Text.from_ansi("".join(rest)))
+        if self._live_target is not None:
+            self._live_target(tail)          # 和输入框之间的空行由输入框统一加（InputBar._message_text）
+            return
+        self._ensure_live()
+        self._live.update(tail, refresh=True)
 
     def _teardown(self) -> None:
+        if self._live_target is not None:
+            self._live_target(None)
+            return
         if self._live is not None:
             try:
                 self._live.update(Text(""))
@@ -149,54 +233,33 @@ class MarkdownStream:
         self._teardown()
 
 
-class _StatusGroup:
-    """spinner 状态行 + 可选输入回显行的组合 renderable。
-
-    provider 每帧被求值（spinner Live 以 refresh_per_second 重渲染同一
-    renderable），返回 None 时第二行不渲染——Live 高度回到 1 行，与无回显
-    时逐帧一致。provider 抛异常按 None 处理：回显是锦上添花，绝不能把
-    渲染线程炸掉。"""
-
-    def __init__(self, base, input_line):
-        self._base = base
-        self._input_line = input_line
-
-    def __rich_console__(self, console, options):
-        yield self._base
-        try:
-            line = self._input_line()
-        except Exception:
-            line = None
-        if line is not None:
-            yield line
-
-
 class StreamView:
-    """统一管理一轮对话里那个唯一的 Rich Live。
+    """统一管理一轮对话里的动态区：assistant 正文的尾部，或单行状态（thinking/工具执行/压缩等）。
 
-    不变量：任一时刻至多一个 Live 活着。两种互斥模式——assistant 正文走
-    `MarkdownStream`，thinking/工具执行/压缩等状态走单行 spinner。切换模式时先拆掉
-    另一个，这正是消灭旧版 stop/restart churn 的关键。
+    不变量：任一时刻至多一种动态内容。两种互斥模式——正文走 `MarkdownStream`，状态走 spinner；
+    切换模式时先拆掉另一个，这正是消灭旧版 stop/restart churn 的关键。
 
-    input_line：可选的输入回显行 provider（() -> renderable | None），挂在
-    spinner 状态行下方，用于"执行中打字"的实时回显。只作用于 spinner 模式；
-    MarkdownStream 正文流不回显（其自适应节流最长 2s，回显会卡成幻灯片）。
+    live_target：常驻输入框的动态区出口（InputBar.set_live_renderable）。给了它，动态内容画在输入框上方，
+    不建任何 Rich Live（Rich Live 的光标重画与 patch_stdout 冲突，见 docs/tui-persistent-input.md）；
+    不给则退回 Rich Live（非交互、测试）。
     """
 
-    def __init__(self, console: Console, left_pad: int = 2, input_line=None):
+    def __init__(self, console: Console, left_pad: int = 2, live_target=None):
         self.console = console
         self.left_pad = left_pad
         self._md: MarkdownStream | None = None
         self._spinner: Live | None = None
+        self._spinner_shown = False  # live_target 模式下：状态是否正挂在动态区
+        self.current_status = None   # 当前挂着的状态对象（调用方据此判断「还是不是同一个思考状态」）
         self._buf = ""  # 当前正文块累积文本（本块结束即冲刷进 scrollback）
-        self._input_line = input_line
+        self._live_target = live_target
 
     # ── assistant 正文 ──
     def append_text(self, delta: str) -> None:
         self._stop_spinner()
         self._buf += delta
         if self._md is None:
-            self._md = MarkdownStream(self.console, left_pad=self.left_pad)
+            self._md = MarkdownStream(self.console, left_pad=self.left_pad, live_target=self._live_target)
         self._md.update(self._buf)
 
     def flush_text(self) -> None:
@@ -217,8 +280,12 @@ class StreamView:
     def status(self, renderable) -> None:
         """显示/更新单行状态。会先冲刷未结束的正文块（状态意味着正文已暂停/结束）。"""
         self.flush_text()
-        if self._input_line is not None:
-            renderable = _StatusGroup(renderable, self._input_line)
+        self.current_status = renderable
+        if self._live_target is not None:
+            # 状态行上下的空行由输入框加：上方要不要空行得看滚动区末尾是不是已经空着（只有输入框知道）
+            self._live_target(renderable, status=True)
+            self._spinner_shown = True
+            return
         if self._spinner is None:
             # transient：spinner 停止即擦除，不把空帧固化成空行（同 MarkdownStream）
             self._spinner = Live(renderable, console=self.console, refresh_per_second=8, transient=True)
@@ -230,6 +297,10 @@ class StreamView:
         self._stop_spinner()
 
     def _stop_spinner(self) -> None:
+        self.current_status = None
+        if self._spinner_shown:
+            self._live_target(None)
+            self._spinner_shown = False
         if self._spinner is not None:
             try:
                 self._spinner.update(Text(""))

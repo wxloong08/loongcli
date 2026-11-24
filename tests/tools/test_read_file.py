@@ -238,3 +238,76 @@ async def test_read_oversized_image_clear_error(tool, tmp_path):
 async def test_read_text_file_no_sentinel(tool, sample_file):
     result = await tool.execute(path=sample_file)
     assert "line1" in result and "__image__" not in result
+
+
+# ── 按字符预算分页（2026-11-19：此前交给入口截断，中等文件被掐头去尾砍掉约八成）──
+
+from loongcli.tools.read_file import READ_CHAR_BUDGET  # noqa: E402
+
+
+def _big_file(tmp_path, n_lines=3000, width=60):
+    f = tmp_path / "big.py"
+    f.write_text("\n".join(f"line_{i:05d} " + "x" * width for i in range(1, n_lines + 1)), encoding="utf-8")
+    return f
+
+
+@pytest.mark.asyncio
+async def test_pages_at_char_budget_on_line_boundary(tool, tmp_path):
+    f = _big_file(tmp_path)  # 每行约 75 字符，3000 行 ≈ 22.5 万字符
+    result = await tool.execute(path=str(f))
+    assert len(result) <= READ_CHAR_BUDGET + 300          # 头部说明之外不超预算
+    body = result.splitlines()
+    last = [l for l in body if l.split("\t", 1)[0].isdigit()][-1]
+    last_no = int(last.split("\t", 1)[0])
+    assert last.endswith("x" * 60)                        # 最后一行完整，不在行中间断开
+    assert f"[第 1-{last_no} 行 / 共 3000 行]" in result    # 总行数是准确值
+    assert f"继续读用 offset={last_no + 1}" in result
+    assert "字符上限" in result
+
+
+@pytest.mark.asyncio
+async def test_next_page_continues_without_gap(tool, tmp_path):
+    f = _big_file(tmp_path)
+    first = await tool.execute(path=str(f))
+    nxt = int(first.split("继续读用 offset=")[1].split("]")[0])
+    second = await tool.execute(path=str(f), offset=nxt)
+    assert f"{nxt}\tline_{nxt:05d}" in second
+    assert f"{nxt - 1}\tline_" not in second
+
+
+@pytest.mark.asyncio
+async def test_medium_file_returned_whole(tool, tmp_path):
+    """p3-1 里被截的那类文件（8.8K–13.6K 字符）现在整份返回，没有续读提示。"""
+    f = tmp_path / "audio_service.py"
+    f.write_text("\n".join(f"    value_{i} = compute({i})  # 注释" for i in range(1, 400)), encoding="utf-8")
+    assert 9000 < f.stat().st_size < 20000
+    result = await tool.execute(path=str(f))
+    assert "399\t" in result
+    assert "未读完" not in result and "共" not in result
+
+
+@pytest.mark.asyncio
+async def test_line_limit_still_reported(tool, tmp_path):
+    f = tmp_path / "s.txt"
+    f.write_text("\n".join(f"l{i}" for i in range(1, 50)), encoding="utf-8")
+    result = await tool.execute(path=str(f), limit=10)
+    assert "[第 1-10 行 / 共 49 行]" in result
+    assert "行数上限" in result and "offset=11" in result
+
+
+@pytest.mark.asyncio
+async def test_single_overlong_line_is_clipped(tool, tmp_path):
+    f = tmp_path / "min.js"
+    f.write_text("a" * (READ_CHAR_BUDGET * 2) + "\nsecond", encoding="utf-8")
+    result = await tool.execute(path=str(f))
+    assert "该行过长" in result
+    assert len(result) < READ_CHAR_BUDGET + 500
+    assert "继续读用 offset=2" in result
+
+
+@pytest.mark.asyncio
+async def test_full_page_passes_entry_fuse_untouched(tool, tmp_path):
+    """满页的 read_file 结果低于入口保险丝，原样进上下文（不再被掐头去尾）。"""
+    from loongcli.core.tool_result_manager import ToolResultManager
+    page = await tool.execute(path=str(_big_file(tmp_path)))
+    assert ToolResultManager().process("read_file", page) == page

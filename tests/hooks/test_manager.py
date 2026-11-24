@@ -189,3 +189,28 @@ class TestHookManagerRun:
         )
         assert result.blocked
         assert "should not run" not in result.output
+
+
+class TestHookConsoleIsolation:
+    """hook 子进程不得附着在 TUI 的控制台上（见 loongcli/core/subproc.py）。"""
+
+    @pytest.mark.asyncio
+    async def test_hook_spawned_with_isolation_kwargs(self, monkeypatch):
+        import asyncio
+        from loongcli.core.subproc import isolated_console_kwargs
+
+        seen = {}
+        real = asyncio.create_subprocess_shell
+
+        async def spy(cmd, **kwargs):
+            seen.update(kwargs)
+            return await real(cmd, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_shell", spy)
+        m = HookManager.from_config({"PreToolUse": [{"matcher": "*", "command": "echo ok"}]})
+        result = await m.run(HookEvent.PRE_TOOL_USE, {}, tool_name="shell")
+
+        assert result.exit_code == 0
+        assert seen["stdin"] == asyncio.subprocess.PIPE  # 不继承父进程 stdin
+        for k, v in isolated_console_kwargs().items():
+            assert seen.get(k) == v

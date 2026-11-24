@@ -5,7 +5,7 @@ import re
 
 from loongcli.core.llm import LLMClient
 from loongcli.core.stream_collector import StreamCollector
-from loongcli.core.attachments import build_attachments
+from loongcli.core.attachments import ATTACHMENT_MARKER, build_attachments
 from loongcli.core.messages import message_text, to_content_parts, count_images
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,9 @@ BOUNDARY_TEMPLATE = (
 )
 
 KEEP_RECENT_TURNS = 3
+# 保留区按「段」计（见 _segment_units），最多这么多段。只按用户轮次算的话，一个长回合（goal 一次执行迭代
+# 可有上百次工具调用）整个都在「最近 3 轮」里，压了等于没压——2026-11-19 p4-1 实测上下文 236K、57 次超阈值、0 次压缩。
+KEEP_RECENT_UNITS = 8
 TOOL_RESULT_PLACEHOLDER = "[工具已执行，结果见摘要]"
 
 SNIP_AGE_THRESHOLD = 20
@@ -109,6 +112,39 @@ def _segment_turns(messages: list[dict], start: int) -> list[list[dict]]:
     return turns
 
 
+def _segment_units(messages: list[dict], start: int) -> list[list[dict]]:
+    """按「段」切：每条用户消息开一段，紧跟在工具结果之后的模型回复（回合内的下一次迭代）也开一段。
+
+    一段 = [用户消息] + 模型回复 + 它的工具结果。工具结果永远和发起它的那条模型回复在同一段，
+    所以按段截取不会留下孤儿 tool 消息（API 会以 400 拒绝）。"""
+    units: list[list[dict]] = []
+    current: list[dict] = []
+    for msg in messages[start:]:
+        starts_unit = msg["role"] == "user" or (
+            msg["role"] == "assistant" and current and current[-1]["role"] == "tool"
+        )
+        if starts_unit and current:
+            units.append(current)
+            current = []
+        current.append(msg)
+    if current:
+        units.append(current)
+    return units
+
+
+def _kept_unit_count(units: list[list[dict]]) -> int:
+    """保留多少段：最近 KEEP_RECENT_TURNS 个用户轮次里的段，但不超过 KEEP_RECENT_UNITS。"""
+    user_starts = [i for i, u in enumerate(units) if u[0]["role"] == "user"]
+    first = user_starts[-KEEP_RECENT_TURNS] if len(user_starts) >= KEEP_RECENT_TURNS else 0
+    return min(len(units) - first, KEEP_RECENT_UNITS)
+
+
+def _is_compaction_artifact(msg: dict) -> bool:
+    """上一次压缩留下的摘要 / 重挂附件消息——不当作「本回合的用户任务」钉住。"""
+    text = message_text(msg)
+    return text.startswith("[compact-boundary]") or SUMMARY_MARKER in text[:200] or text.startswith(ATTACHMENT_MARKER)
+
+
 def _replace_tool_results(messages: list[dict]) -> list[dict]:
     result = []
     for msg in messages:
@@ -151,12 +187,26 @@ def _fix_role_alternation(prefix: list[dict], kept: list[dict]) -> list[dict]:
 
 class Compactor:
     def __init__(self, llm: LLMClient, threshold: int = 800000, plan_store=None,
-                 task_manager=None, skill_registry=None):
+                 task_manager=None, skill_registry=None, window_for=None):
+        """window_for(model) -> 上下文窗口：给了就按**当前**模型实时算压缩线（会话中 /model 换模型后跟着变）；
+        不给则用固定的 threshold（配置里写死 compact_threshold、子代理等）。"""
         self.llm = llm
-        self.threshold = threshold
+        self._threshold = threshold
+        self.window_for = window_for
         self.plan_store = plan_store
         self.task_manager = task_manager
         self.skill_registry = skill_registry
+
+    @property
+    def threshold(self) -> int:
+        if self.window_for is not None:
+            return max(0, self.window_for(self.llm.model) - SUMMARY_TOKEN_RESERVE)
+        return self._threshold
+
+    @threshold.setter
+    def threshold(self, value: int) -> None:
+        self._threshold = value
+        self.window_for = None
 
     def should_compact(self, prompt_tokens: int, messages: list[dict]) -> bool:
         if prompt_tokens <= 0:
@@ -164,8 +214,8 @@ class Compactor:
         if prompt_tokens <= self.threshold:
             return False
         start = 1 if messages and messages[0].get("role") == "system" else 0
-        turns = _segment_turns(messages, start)
-        return len(turns) > KEEP_RECENT_TURNS
+        units = _segment_units(messages, start)
+        return len(units) > _kept_unit_count(units)
 
     async def compact(
         self,
@@ -177,11 +227,12 @@ class Compactor:
         system_msg = messages[0] if messages[0].get("role") == "system" else None
         start = 1 if system_msg else 0
 
-        turns = _segment_turns(messages, start)
-        if len(turns) <= KEEP_RECENT_TURNS:
+        units = _segment_units(messages, start)
+        keep_n = _kept_unit_count(units)
+        if len(units) <= keep_n:
             return messages
 
-        keep_turns = turns[-KEEP_RECENT_TURNS:]
+        kept_units = units[-keep_n:]
         summary = await self._summarize(messages, active_skill, mode=mode, pre_tokens=pre_tokens)
         logger.info("Compacted %d messages into summary (%d chars)", len(messages), len(summary))
 
@@ -192,9 +243,18 @@ class Compactor:
             timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
 
+        # 保留区的工具结果换占位（结论已写进模型自己的回复）——唯一例外是模型还没回应过的那批：
+        # 消息停在工具结果上 = 回合中途、马上要再调模型，它下一步要看的正是这些结果，换掉就等于让它白调一次。
+        pending = kept_units[-1] if kept_units[-1][-1]["role"] == "tool" else None
         kept_messages = []
-        for turn in keep_turns:
-            kept_messages.extend(_replace_tool_results(turn))
+        for unit in kept_units:
+            kept_messages.extend(unit if unit is pending else _replace_tool_results(unit))
+        # 回合中途压缩时保留区从模型回复开始：把本回合的用户消息原样钉在前面，任务原文不靠摘要转述
+        if kept_messages[0]["role"] != "user":
+            for unit in reversed(units[:-keep_n]):
+                if unit[0]["role"] == "user" and not _is_compaction_artifact(unit[0]):
+                    kept_messages.insert(0, unit[0])
+                    break
 
         prefix: list[dict] = []
         if system_msg:

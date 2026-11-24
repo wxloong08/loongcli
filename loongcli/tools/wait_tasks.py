@@ -41,8 +41,7 @@ class WaitTasksTool(Tool):
             return json.dumps({"error": "task_ids 为空"}, ensure_ascii=False)
 
         data = await self._task_manager.wait(task_ids, timeout=timeout)
-        # 自管预算（ToolResultManager 对本工具豁免）：与 batch_delegate 同口径，
-        # 总额按任务数均摊、截断附 trace 指针。
+        # 自管预算：与 batch_delegate 同口径，总额按任务数均摊、截断附 trace 指针。
         entries = data.get("results", [])
         per_cap = max(MIN_TASK_RESULT_CAP, BATCH_RESULT_BUDGET // max(len(entries), 1))
         for entry in entries:

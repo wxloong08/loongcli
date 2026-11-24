@@ -124,6 +124,72 @@ class TestPasteCollapse:
         assert self.tui._paste_images["[Image #1]"] == str(p)
 
 
+class TestDropManyFiles:
+    """一次拖进多个文件：终端粘贴过来的是一串路径（真机：两张图一起拖，变成两段裸路径）。
+    各种来源的格式都要认：空格分隔、带引号含空格、每行一个、file:/// URI、/c/ 风格，图片和非图片混着。"""
+
+    def setup_method(self):
+        self.tui = TUI()
+
+    @staticmethod
+    def _img(d, name):
+        p = d / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"\x89PNG\r\n\x1a\ndata")
+        return p
+
+    def test_space_separated_unquoted(self, tmp_path):
+        a, b = self._img(tmp_path, "a.png"), self._img(tmp_path, "b.png")
+        out = self.tui._maybe_collapse_paste(f"{a} {b}")
+        assert out == "[Image #1][Image #2]"
+        assert self.tui._paste_images == {"[Image #1]": str(a), "[Image #2]": str(b)}
+
+    def test_quoted_with_spaces_mixed(self, tmp_path):
+        a, b = self._img(tmp_path, "my shots/a b.png"), self._img(tmp_path, "c.png")
+        out = self.tui._maybe_collapse_paste(f'"{a}" {b}')
+        assert out == "[Image #1][Image #2]"
+        assert self.tui._paste_images["[Image #1]"] == str(a)
+
+    def test_one_per_line(self, tmp_path):
+        a, b = self._img(tmp_path, "a.png"), self._img(tmp_path, "b.jpg")
+        out = self.tui._maybe_collapse_paste(f"{a}\r\n{b}\r\n")
+        assert out == "[Image #1][Image #2]"
+
+    def test_file_uri_and_percent_encoding(self, tmp_path):
+        a = self._img(tmp_path, "截图 1.png")
+        from urllib.parse import quote
+        uri = "file:///" + quote(str(a).replace("\\", "/"))
+        out = self.tui._maybe_collapse_paste(uri)
+        assert out == "[Image #1]" and self.tui._paste_images["[Image #1]"] == str(a)
+
+    def test_images_and_other_files_mixed(self, tmp_path):
+        a = self._img(tmp_path, "a.png")
+        py = tmp_path / "x y.py"
+        py.write_text("print(1)")
+        out = self.tui._maybe_collapse_paste(f'{a} "{py}"')
+        # 图片变占位符；非图片文件保留成路径（含空格的加引号），交给模型自己读
+        assert out == f'[Image #1] "{py}"'
+
+    def test_same_image_twice_reuses_placeholder(self, tmp_path):
+        a = self._img(tmp_path, "a.png")
+        assert self.tui._maybe_collapse_paste(str(a)) == "[Image #1]"
+        assert self.tui._maybe_collapse_paste(f'"{a}"') == "[Image #1]"
+        assert len(self.tui._paste_images) == 1
+
+    def test_unquoted_path_with_spaces_as_whole(self, tmp_path):
+        a = self._img(tmp_path, "my shots/a b.png")
+        assert self.tui._maybe_collapse_paste(str(a)) == "[Image #1]"
+
+    def test_text_mentioning_a_path_is_not_a_drop(self, tmp_path):
+        a = self._img(tmp_path, "a.png")
+        text = f"看看 {a} 这张"
+        assert self.tui._maybe_collapse_paste(text) == text      # 不是纯路径就不是拖文件，交给提交时的路径识别
+
+    def test_nonexistent_paths_untouched(self):
+        text = r"C:\nope\a.png C:\nope\b.png"
+        assert self.tui._maybe_collapse_paste(text) == text
+
+
 class TestResolveImages:
     def setup_method(self):
         self.tui = TUI()
@@ -271,13 +337,36 @@ def test_toggle_plan_mode_roundtrip():
 
     agent = MagicMock()
     agent.plan_mode = False
+    agent.llm = None                    # 状态行右半边（模型、上下文）不取，只看左边的说明
     tui._agent = agent
     tui._toggle_plan_mode()
     agent.enter_plan_mode.assert_called_once()
-    assert "已进入规划模式" in buf.getvalue()
+    assert buf.getvalue() == ""
 
     agent.plan_mode = True
+    assert "规划模式：先调研再出计划" in tui._status_line()[0]   # 含义写在状态行
     tui._toggle_plan_mode()
     assert agent._plan_mode is False
     agent._rebuild_system_prompt.assert_called_once()  # 退出必须重建系统提示
-    assert "已退出规划模式" in buf.getvalue()
+    assert buf.getvalue() == ""                         # 切换不往滚动区打字（真机：切三回打出 6 行）
+
+
+class TestCountImagesInInput:
+    """vision 关闭时用来决定要不要提示「图没发出去」（只数不改）。"""
+
+    def setup_method(self):
+        self.tui = TUI()
+
+    def test_counts_typed_path_and_placeholder(self, tmp_path):
+        a = tmp_path / "a.png"
+        a.write_bytes(b"\x89PNGd")
+        b = tmp_path / "b.png"
+        b.write_bytes(b"\x89PNGd")
+        self.tui._paste_images["[Image #1]"] = str(a)
+        assert self.tui._count_images_in_input(f"看 [Image #1] 和 {b}") == 2
+        # 只数不改：占位符表原样，后续 _resolve_images 仍能还原路径
+        assert self.tui._paste_images == {"[Image #1]": str(a)}
+
+    def test_zero_for_plain_text_or_missing_file(self, tmp_path):
+        assert self.tui._count_images_in_input("hello") == 0
+        assert self.tui._count_images_in_input(f"看 {tmp_path / 'nope.png'}") == 0

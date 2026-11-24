@@ -16,7 +16,7 @@ from loongcli.core.task import (
     trace_path_of,
 )
 from loongcli.core.agent import AgentLoop, AgentServices
-from loongcli.core.compact import Compactor
+from loongcli.core.compact import Compactor, model_context_window, SUMMARY_TOKEN_RESERVE
 from loongcli.core.events import BatchProgress
 from loongcli.security.permissions import PermissionChecker
 
@@ -112,7 +112,10 @@ class BatchDelegateTool(Tool):
         task_objs: list[tuple[int, object, str]] = []
         for i, t in enumerate(tasks):
             sub_registry = self._build_sub_registry(t.get("tools"))
-            compactor = Compactor(llm=self._sub_llm, threshold=16000)
+            # 与主 agent 同策略（模型窗口 − 摘要预留），不再硬编码 16k——理由见
+            # agent_tool.execute：16k 会让子代理中途反复压缩、摘掉父代理要的细节。
+            sub_threshold = max(0, model_context_window(self._sub_llm.model) - SUMMARY_TOKEN_RESERVE)
+            compactor = Compactor(llm=self._sub_llm, threshold=sub_threshold)
 
             # 继承父级 checker（而非一律 SKIP），并以非交互方式运行，
             # 使 CONFIRM 自动拒绝——详见 AgentTool.execute。
@@ -226,9 +229,8 @@ class BatchDelegateTool(Tool):
         n_completed = 0
         n_timed_out = 0
         n_failed = 0
-        # 结果自管预算：总额按任务数均摊、截断附 trace 指针。入口的 ToolResultManager
-        # 对本工具豁免（结果不可重放，一刀切 2000 预览曾把 7 路 37K 调研截到合成层近盲），
-        # 预算责任在这里。prompt 回显只留摘要——全文是主代理上一条消息里自己写的，纯重复。
+        # 结果自管预算：总额按任务数均摊、截断附 trace 指针（结果不可重放，预算责任在这里；
+        # 入口只是 60K 保险丝）。prompt 回显只留摘要——全文是主代理上一条消息里自己写的，纯重复。
         per_cap = max(MIN_TASK_RESULT_CAP, BATCH_RESULT_BUDGET // len(task_objs))
         for i, tobj, prompt in task_objs:
             if tobj.status == TaskStatus.COMPLETED:

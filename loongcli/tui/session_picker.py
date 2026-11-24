@@ -7,10 +7,10 @@ from typing import Any
 
 from rich.console import Console
 from rich.live import Live
-from rich.panel import Panel
 from rich.text import Text
 
 from loongcli.memory.conversation import ConversationStore
+from loongcli.tui.cards import Section, section
 
 
 def _relative_time(iso_str: str) -> str:
@@ -89,7 +89,7 @@ class PickerState:
         self.preview_lines = []
 
 
-def render_picker(state: PickerState) -> Panel:
+def render_picker(state: PickerState) -> Section:
     items = state.filtered
     total = len(state.sessions)
     showing = len(items)
@@ -143,14 +143,8 @@ def render_picker(state: PickerState) -> Panel:
     title = f"恢复会话 ({showing}/{total})" if state.search else f"恢复会话 ({total})"
     footer = "↑↓ 导航 · Enter 选择 · Space 预览 · Esc 取消 · 输入搜索"
 
-    return Panel(
-        lines,
-        title=title,
-        subtitle=footer,
-        subtitle_align="center",
-        border_style="cyan",
-        padding=(0, 1),
-    )
+    # 标题 + 缩进内容，不画框：选完后最后一帧留在滚动区，满宽四边框在窗口拉窄时会被终端折碎
+    return section(lines, title=title, footer=footer)
 
 
 async def _read_key() -> str:

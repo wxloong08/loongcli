@@ -115,6 +115,20 @@ class TestOnboarding:
         assert "deepseek" in data["providers"]
 
 
+def test_auto_permissions_flag_parsed(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["loongcli", "--auto-permissions"])
+    args = _parse_args()
+    assert args.auto_permissions is True
+    assert args.dangerously_skip_permissions is False
+
+
+def test_auto_and_skip_permissions_mutually_exclusive(monkeypatch):
+    # 两档语义相反（审核 vs 全放行），同时给是用户误操作，直接报错退出而不是悄悄选一个
+    monkeypatch.setattr(sys, "argv", ["loongcli", "--auto-permissions", "--dangerously-skip-permissions"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
 def test_setup_flag_parsed(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["loongcli", "--setup"])
     args = _parse_args()

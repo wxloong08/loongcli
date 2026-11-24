@@ -12,10 +12,13 @@ import difflib
 import re
 from pathlib import Path
 
+from rich.cells import cell_len
 from rich.text import Text
 
 # 展示上限
 DIFF_MAX_LINES = 12
+DIFF_ADD_STYLE = "#33ff33"   # 新增行：亮绿字，无底色
+DIFF_DEL_STYLE = "#ff3333"   # 删除行：亮红字，无底色
 ERROR_MAX_LINES = 5
 DEFAULT_MAX_CHARS = 100
 _ERROR_PREFIXES = ("错误：", "⚠", "MCP tool error")
@@ -33,7 +36,20 @@ def relpath(path: str) -> str:
 
 
 def _clip(s: str, limit: int) -> str:
-    return s if len(s) <= limit else s[:limit] + "…"
+    # 先压成一行：带换行的参数（heredoc 命令、多行 pattern）原样进摘要，● 工具行会断成好几行——
+    # 执行中转圈行忽高忽低，输入框跟着跳（真机：执行工具时 ❯ 闪）
+    s = " ".join(s.split())
+    # 按显示宽度截：中文占两列，按字数截 60 个字最多 120 列，● 工具行照样折成两行（真机）
+    if cell_len(s) <= limit:
+        return s
+    out, used = [], 0
+    for ch in s:
+        w = cell_len(ch)
+        if used + w > limit:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out) + "…"
 
 
 def arg_summary(tool_name: str, args: dict) -> str:
@@ -77,14 +93,13 @@ def _edit_diff_lines(args: dict) -> list[Text]:
     ]
     out: list[Text] = []
     for l in raw[:DIFF_MAX_LINES]:
-        # 增删行用背景色高亮（Claude Code 式）——diff 是折叠输出里唯一需要用户
-        # 认真审阅的内容，纯前景色在一屏工具块里没有视觉权重
-        # 显式十六进制：调色板名（white/bright_white/dark_*）经终端主题映射后
-        # 亮度不可控（真机反馈两轮都发灰）。truecolor 直接钉死纯白字 + 深色底。
+        # 增删行只用字色、不铺底色（2026-11-20 用户从 4 种方案里选了这种：此前加粗白字 + 饱和底色太冲）。
+        # 显式十六进制：调色板名（green/red/bright_*）经终端主题映射后亮度不可控（真机反馈两轮都发灰）；
+        # 用接近纯色的亮红/亮绿——纯 #00ff00 在深色背景上发荧光刺眼。
         if l.startswith("+"):
-            out.append(Text(l, style="bold #ffffff on #1d5f2d"))
+            out.append(Text(l, style=DIFF_ADD_STYLE))
         elif l.startswith("-"):
-            out.append(Text(l, style="bold #ffffff on #6e1e1e"))
+            out.append(Text(l, style=DIFF_DEL_STYLE))
         else:
             out.append(Text(l, style="dim"))
     if len(raw) > DIFF_MAX_LINES:
@@ -92,19 +107,29 @@ def _edit_diff_lines(args: dict) -> list[Text]:
     return out
 
 
-def _shell_key_line(result: str) -> str:
-    """挑 shell 输出的关键行：测试统计行优先，其次最后一行非空。"""
-    lines = [l for l in result.strip().splitlines() if l.strip()]
-    if not lines:
-        return ""
-    for line in reversed(lines):
-        stripped = line.strip().strip("=").strip("-").strip()
-        if any(kw in stripped for kw in ("passed", "failed", "error")):
-            return _clip(stripped, 120)
-    last = lines[-1].strip()
-    if last.startswith("[exit code:") and len(lines) >= 2:
-        last = f"{lines[-2].strip()}  {last}"
-    return _clip(last, 120)
+SHELL_HEAD_LINES = 3
+_TEST_SUMMARY = re.compile(r"\b\d+ (passed|failed)\b")
+
+
+def _shell_lines(result: str) -> tuple[bool, list[Text]]:
+    """shell 结果的 ⎿ 块：测试统计行优先；否则输出的前几行 + 「… +N 行」；非零退出码另起一行标红。
+
+    原先只给「最后一行非空」：多段命令（echo …; wc -l …; grep -c …）的最后一行往往是个孤零零的数字或
+    模型自己补的 echo "exit: $?"，成功的命令还会配上一句 stderr 报错（真机：「⎿ 14」「⎿ exit: 0」「● … ⎿ fatal: not a git repository」）。"""
+    lines = [l.rstrip() for l in result.strip().splitlines() if l.strip()]
+    exit_line = next((l.strip() for l in reversed(lines) if l.strip().startswith("[exit code:")), "")
+    body = [l for l in lines if not l.strip().startswith("[exit code:")]
+    out: list[Text] = []
+    summary = next((l for l in reversed(body) if _TEST_SUMMARY.search(l)), "")
+    if summary:
+        out.append(Text(_clip(summary.strip().strip("=").strip("-").strip(), 120), style="dim"))
+    else:
+        out += [Text(_clip(l.strip(), 120), style="dim") for l in body[:SHELL_HEAD_LINES]]
+        if len(body) > SHELL_HEAD_LINES:
+            out.append(Text(f"… +{len(body) - SHELL_HEAD_LINES} 行", style="dim"))
+    if exit_line:
+        out.append(Text(_clip(exit_line, 120), style="red"))
+    return not exit_line, out
 
 
 def result_lines(tool_name: str, args: dict, result: str) -> tuple[bool, list[Text]]:
@@ -160,9 +185,7 @@ def result_lines(tool_name: str, args: dict, result: str) -> tuple[bool, list[Te
         return True, [Text(f"写入 {n} 行", style="dim")]
 
     if tool_name == "shell":
-        failed = "[exit code:" in result
-        key = _shell_key_line(result)
-        return not failed, [Text(key, style="red" if failed else "dim")]
+        return _shell_lines(result)
 
     # 默认 / MCP 工具：首行截断
     first = result.splitlines()[0].strip() if result.strip() else ""

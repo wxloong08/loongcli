@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import NamedTuple
 from loongcli.tools.base import Tool
 from loongcli.core.events import ShellOutput
+from loongcli.core.subproc import isolated_console_kwargs
 
 _GRACEFUL_WAIT = 3  # seconds to wait between terminate and kill
 # 单条流的内存上限：超限后仍持续读取（让子进程别因管道满而阻塞），但不再累积进
@@ -157,6 +158,25 @@ def _venv_env() -> dict | None:
     return env
 
 
+def _child_env() -> dict:
+    """shell 子进程的环境：.venv 前置（若有）+ 非交互默认值。
+
+    GIT_EDITOR=true（仅当环境里没设时）：agent 的 shell 没有人坐在键盘前，git 一旦拉起
+    编辑器（裸 `git commit`、`git rebase --continue`、非 ff 的 `git merge`）就只能等满
+    超时才被整树杀掉——控制台隔离后 vim 抢不到 TUI 的键盘了，但它仍会对着自己的隐藏
+    控制台干等（实测 25s 超时用满）。`true` 是「什么都不改、立即成功」的编辑器：
+    裸 commit 因提交信息为空被 git 立即中止并报错，rebase/merge 接受默认信息继续。
+    与 Claude Code 的做法一致。
+
+    用 setdefault 而不是覆盖：用户在自己 shell 里显式设了 GIT_EDITOR 的，尊重；
+    命令里内联的 `GIT_EDITOR=x git …` 本来就优先于环境，不受影响。GIT_SEQUENCE_EDITOR
+    不单独设——它未设时回落到 GIT_EDITOR，一处管两处。
+    """
+    env = _venv_env() or os.environ.copy()
+    env.setdefault("GIT_EDITOR", "true")
+    return env
+
+
 @functools.lru_cache(maxsize=1)
 def resolve_shell() -> ShellSpec:
     """Pick the shell for the current OS (stable for the process lifetime).
@@ -180,7 +200,12 @@ def resolve_shell() -> ShellSpec:
 
 class ShellTool(Tool):
     name = "shell"
-    description = "Execute a shell command and return its output. Uses git bash on Windows (falls back to PowerShell if Git is not installed), bash on Linux/Mac."
+    description = (
+        "Execute a shell command and return its output. Uses git bash on Windows (falls back to PowerShell "
+        "if Git is not installed), bash on Linux/Mac. Long output is trimmed automatically to its beginning "
+        "and end, and the full text is saved to a file you can read — so do not pipe commands into `head` or "
+        "`tail` just to shorten output: a pipe replaces the command's exit code with that of `tail`."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -233,20 +258,27 @@ class ShellTool(Tool):
         process = None
         job = None
         try:
-            env = _venv_env()
+            env = _child_env()
             if platform.system() == "Windows":
                 full_cmd = [self._shell_cmd] + self._shell_args + [command]
+                # stdin=DEVNULL + 独立隐藏控制台：子进程树不得附着在 TUI 的控制台上
+                # （共享控制台 = 共享输入缓冲与模式，见 core/subproc.py 的事故记录）。
+                # 副带效果：要键盘输入的命令（编辑器、密码提示）读到 EOF 立即失败，
+                # 而不是抢走 TUI 的按键挂到超时。
                 process = await asyncio.create_subprocess_exec(
                     *full_cmd,
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     env=env,
+                    **isolated_console_kwargs(),
                 )
                 # 立刻圈进 Job（后代自动继承成员资格）；失败退化为直接终止
                 job = _WindowsJob.create_and_assign(process.pid)
             else:
                 process = await asyncio.create_subprocess_shell(
                     command,
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     executable=self._shell_cmd,
@@ -335,13 +367,9 @@ def _build_result(stdout_lines: list[str], stderr_lines: list[str], returncode: 
         else:
             output = f"[exit code: {returncode}]\n{output}"
 
-    if len(output) > 10000:
-        # 留头+尾：测试/编译的关键信息（assertion、summary、报错）常在尾部，
-        # 只留头会把最有用的部分丢掉。
-        head = output[:7000]
-        tail = output[-3000:]
-        output = f"{head}\n... (中间 {len(output) - 10000} 字符已省略) ...\n{tail}"
-
+    # 不在此处自截：全文（≤ _MAX_STREAM_CHARS/流）交给入口 ToolResultManager——超过 60K 时
+    # 它把完整结果落盘、上下文留头尾预览 + read_file 指针。入口要落「完整」必须拿到截断前的
+    # 真全文，故落盘点必须在入口、shell 不能先截（此前这里先截 10000 再被入口砍成 2000 = 双重截断且尾丢）。
     return output if output else "(no output)"
 
 

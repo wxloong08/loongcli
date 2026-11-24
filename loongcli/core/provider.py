@@ -128,6 +128,13 @@ class ModelRouter:
         self._clients[role] = client
         return client
 
+    def context_window_for_model(self, model: str, role: str = "main") -> int:
+        """某个模型的上下文窗口。角色配置里的 context_window 只对该角色绑定的那个模型生效——
+        会话中换成别的模型，就按别的模型算（否则压缩线还停在原模型的窗口上）。"""
+        binding = self._roles.get(role) or DEFAULT_ROLES.get("main")
+        override = binding.context_window if binding and binding.model == model else 0
+        return context_window(model, override)
+
     def context_window_for(self, role: str = "main") -> int:
         binding = self._roles.get(role) or DEFAULT_ROLES.get("main")
         if not binding:

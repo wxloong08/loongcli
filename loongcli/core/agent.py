@@ -7,6 +7,7 @@ import os
 import re
 import time
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable
@@ -21,18 +22,26 @@ from loongcli.core.messages import (
 from loongcli.core.circuit_breaker import CompactCircuitBreaker
 from loongcli.core.telemetry import EventLogger, NULL_TELEMETRY
 from loongcli.core.tool_result_manager import ToolResultManager
+from loongcli.core.resume_gap import date_rollover_messages
 from loongcli.tools.base import ToolRegistry
 from loongcli.tools.routing import AgentRole
-from loongcli.security.permissions import PermissionChecker, Decision
-from loongcli.memory.conversation import ConversationStore
+from loongcli.security.permissions import PermissionChecker, Decision, PermissionMode
+from loongcli.security.auto_review import referenced_scripts
+from loongcli.memory.conversation import ConversationStore, project_tool_results_dir
 from loongcli.hooks.manager import HookManager, HookEvent
 from loongcli.skills.registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
 # 整次 run_stream（一条用户消息的完整执行）的工具调用总额，不是迭代轮级——
-# 曾名 PER_TURN 与 reset_turn() 的迭代级 turn 撞名误导，2026-07-21 改名。
+# 曾名 PER_TURN，与当时结果截断器的迭代级 reset_turn() 撞名误导，2026-07-21 改名。
 MAX_TOOL_CALLS_PER_RUN = 200
+# 主代理的迭代兜底，与工具预算对齐。此前是 50：一轮迭代≈一次工具调用，50 轮永远先于
+# 200 次工具预算触发，后者那条「收走工具 → 文字总结」的优雅收场通道形同虚设。真机
+# dogfooding（2026-11，jobhunter 四个会话）首轮 4/4 撞 50，被截停 4 次之后用户的下一句
+# 全是「继续」——100% 误杀。对齐后工具预算是先触发的成本闸，迭代上限退为纯兜底
+# （只在「大量迭代不调工具」这种异常形态下才轮得到它）。子代理 30 / 协调者 80 不变。
+DEFAULT_MAX_ITERATIONS = MAX_TOOL_CALLS_PER_RUN
 LOOP_DETECT_THRESHOLD = 3
 # 循环检测的最大周期：1=同参连打（AAA），2/3=交替模式（ABAB…/ABCABC…）。
 # 仍是精确签名匹配——整周期原样重复满 THRESHOLD 遍才触发，合法的
@@ -40,61 +49,112 @@ LOOP_DETECT_THRESHOLD = 3
 LOOP_DETECT_MAX_PERIOD = 3
 _MIN_RECALL_LENGTH = 4
 
+# 两条提示的措辞要点：归因必须落在「loongcli 的配置开关」上。旧措辞「当前模型未开启
+# 视觉能力」被模型转述成「当前模型没有视觉能力」（2026-11-09 真机：deepseek-flash 明明
+# 支持视觉，只是 roles.main.vision=false，模型却让用户手贴邮件正文）。门控是 harness
+# 按配置做的，harness 并不知道模型支不支持——那就别替模型下结论。
 NO_VISION_MSG = (
-    "⚠ 当前模型未开启视觉能力，无法处理图片。"
-    "请在 roles 配置 vision: true 并使用支持图片的模型。"
+    "⚠ 图片未发送：loongcli 配置里当前角色的 vision 开关是关闭的（roles.<角色>.vision=false）。"
+    "这只是配置开关，不代表模型不支持图片——若所用模型支持视觉，"
+    "在 ~/.loongcli/config.json 把该角色的 vision 设为 true 后重启即可。"
 )
 
 # read_file 读到图片但模型无视觉时喂给模型的工具结果（明确失败，不静默注入垃圾）
 NO_VISION_READ_MSG = (
-    "该文件是图片，但当前模型未开启视觉能力，无法查看图片内容。"
-    "如需看图，请让用户在 roles 配置 vision: true 并使用支持图片的模型。"
+    "该文件是图片，但没有发给你：loongcli 配置里当前角色的 vision 开关是关闭的"
+    "（roles.<角色>.vision=false）。这是 harness 的配置开关，不代表模型不支持图片——"
+    "向用户转述时请如实说「loongcli 的 vision 配置未开启」，不要说成模型没有视觉能力。"
+    "开启方法：在 ~/.loongcli/config.json 把该角色的 vision 设为 true 后重启。"
 )
 
 # 图片 sentinel 被拦截后，tool 消息里的占位文本（图片走下一条 user 消息）
 IMAGE_READ_PLACEHOLDER = "[图片已读取（{n} 张），内容见下一条消息]"
 
 PLAN_MODE_TOOLS = frozenset({
-    "read_file", "glob", "grep",
+    "read_file",
+    "shell",  # 只读：执行层按 PermissionChecker.is_read_only_command 拦，见 _shell_read_only
     "recall", "search_history",  # 规划期查记忆/翻历史，通用任务的调研通道
     "plan", "exit_plan_mode",
-    "lsp_goto_definition", "lsp_find_references",
-    "lsp_symbol_search", "lsp_hover", "lsp_diagnostics",
 })
+
+# 写文件的工具。一个回合的允许工具集里一个都没有 = 只读回合，shell 也必须只读——
+# 否则 shell 就是绕过「不给写工具」的后门（规划阶段在用户批准计划之前）。
+WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+
+READ_ONLY_SHELL_REJECTION = (
+    "⚠ 规划阶段 shell 只能跑只读命令：git status/log/diff/show/grep/ls-files、ls、cat、head、tail、grep、"
+    "pip show/list、python --version 等，不能带重定向（>）或命令替换（$(...)）。这条命令可能会写东西，"
+    "等计划批准后再执行；核实环境请换成上面的只读命令。"
+)
 
 PLAN_MODE_SYSTEM_INJECTION = """\
 
 ## 规划模式
 
-你已进入规划模式，只能使用只读调研工具（read_file/glob/grep/recall/search_history/lsp_*）
+你已进入规划模式，只能使用只读调研工具（read_file / recall / search_history，以及只能跑只读命令的
+shell：git log/status/diff/grep/ls-files、ls、cat、grep、pip show、python --version 等）
 和已配置的 MCP 工具（每个 MCP 工具首次调用需用户确认）。
 
 工作流程：
 1. **调研** — 收集规划所需的事实：代码任务读代码；其他任务查记忆（recall）、
    用 MCP 工具（如搜索）查外部资料、翻已有材料。
-   调研的唯一目的是让计划具体可判——**够用就停**，简单任务一两次调用足矣。
+   调研深度随任务：改一处已知问题，一两次调用就够；要做设计决定的任务（选技术路线、定架构、划范围），
+   要把需求、约束、现有代码和环境查到能为每个决定说出理由为止。
    数据收集、批量统计是执行期的活（审批后一条 shell 解决），不要在规划期硬凑
    （反例：为统计行数逐文件 read——这是把执行搬进调研）
-2. **规划** — 用 plan 工具创建结构化计划。每一步必须写明**改动内容 + 完成判据**
-   （做什么、怎么算这步做完——跑什么/看到什么算过；编码任务具体到文件/函数）
-3. **提交** — 调用 exit_plan_mode 提交计划等待用户审批
+2. **规划** — 用 plan 工具创建计划。approach（方案）写四块：背景与范围（做什么、不做什么）；
+   关键决定（每条写选了什么、放弃了什么、为什么）；风险与先验证什么；需要用户拍板的问题（单列，带你的推荐）。
+   每一步写 description（改动内容，编码任务具体到文件/函数）和 1-5 条 criteria
+   （怎么算这步做完——跑什么/看到什么算过；执行期标完成时每条都要交证据）。取舍和理由写在 approach，步骤只写怎么执行
+3. **提交** — 调用 exit_plan_mode 提交计划等待用户审批。界面会把完整计划展示给用户，不要再复述步骤；
+   只说需要用户拍板或特别注意的地方，没有就不说
 
 原则：
 - 不要猜测，先看事实再规划
+- 规划期 shell 只做只读查询：不带重定向（>）和命令替换（$(...)），不跑脚本或 python -c；
+  运行时行为要实测的，写进计划的步骤，批准后再跑
 - 「运行脚本」「验证正确性」这类没有判据的空步骤不合格——判据是防执行期跑偏的锚
+- 判据查内容不查格式：章节数、行数、表格行数不能当判据——格式全对、内容全错也能过。
+  产出是文档或设计时，判据写「文档里写明了哪些决定、覆盖了哪些风险、回答了哪些问题」
 - 步骤是给执行期的自己看的路标：宁可 5 步具体，不要 2 步空话；控制在 10 步以内
 - 领域性任务（求职、调研报告等）若已加载对应 skill，按该 skill 的章法规划
 - 有不确定的地方直接问用户\
 """
 
+# 刻意不含计划全文——这段拼在 messages[0] 末尾，而 _rebuild_system_prompt 在计划
+# 执行期每轮触发。塞进随进度变化的 format_summary()，就等于每完成一步改写一次
+# messages[0]，前缀缓存连同其后的全部对话历史一起作废。计划全貌改由 plan update_step
+# 的返回值携带（工具结果天然落在对话尾部、走缓存、零额外代价），compact 后则由
+# build_attachments 重新挂载。这里只留「有计划在跑 + 去哪儿看」这两条恒定信息。
 ACTIVE_PLAN_INJECTION_TEMPLATE = """\
 
 ## 活跃计划
 
-{plan_summary}
+计划 {plan_id} 执行中。按步骤执行；每完成一步用 plan update_step 更新状态，
+evidence 里逐条判据交证据（返回值会带上最新的完整计划）；完成所有步骤后用 plan complete 关闭计划，
+收尾最后给 1-2 条具体的下一步建议（能直接拿去做的，不是核对表）。
+需要当前全貌时用 plan get 查询。\
+"""
 
-按步骤执行。每完成一步，用 plan update_step 更新状态。
-完成所有步骤后，用 plan complete 关闭计划。\
+# /goal 执行期常驻系统提示：目标原话 + 完成审计规则。放系统提示而不是 compact 后重挂——系统消息不参与压缩，
+# 目标始终在场。Codex issue #19910 的失败模式正是 compact 摘要丢了「全局目标 + 完成审计要求」，
+# 新上下文把局部验证当成整体完成、过早收尾。整个目标期间内容恒定（不含进度），只在目标开始/结束时各改一次。
+GOAL_INJECTION_TEMPLATE = """\
+
+## 目标模式
+
+当前目标（用户原话）：
+{goal}
+
+计划 {plan_id} 是这个目标的执行计划。规则：
+- 每完成一步用 plan update_step 标 completed，evidence 里逐条判据交证据；缺证据会被拒绝
+- 局部验证通过不等于目标完成：plan complete 前，对照上面的目标原话和全部判据审计一遍
+  （审计结论交在 evidence 里，不要把审计过程写给用户）
+- 目标完成后给用户的收尾只说三件事：做了什么、产出在哪、需要用户注意或决定什么，几行即可；
+  证据都在计划里，用户没要的话不再列核对表、自查清单、验收清单。
+  最后给 1-2 条具体的下一步建议（例：「拿这份架构稿写实施计划」「先确认这 3 个决定」）——能直接拿去做的，不是核对表
+- 做不了的步骤标 skipped 并写理由；需要用户操作或决策时说清楚要什么，然后停下等回复
+- 需要计划全貌用 plan get\
 """
 
 
@@ -122,7 +182,7 @@ class AgentLoop:
         tool_registry: ToolRegistry,
         permission_checker: PermissionChecker,
         system_prompt: str = "",
-        max_iterations: int = 50,
+        max_iterations: int = DEFAULT_MAX_ITERATIONS,
         max_tool_calls: int = MAX_TOOL_CALLS_PER_RUN,
         task=None,
         role: AgentRole = AgentRole.MAIN,
@@ -157,6 +217,7 @@ class AgentLoop:
         self.lsp_manager = None
         self._plan_mode: bool = False
         self._active_plan_id: str | None = None
+        self._goal_description: str = ""  # /goal 执行期的目标原话（常驻系统提示），见 set_goal
         self._last_checkpoint: str | None = None
         self._files_modified_this_turn: list[str] = []
         # 读后写硬闸的状态表：normcase(resolve(path)) → (mtime_ns, size)。
@@ -164,9 +225,8 @@ class AgentLoop:
         # 退化的）记忆整篇重写」这一事故根因。每个 AgentLoop 实例独立，子代理同样约束。
         self._file_read_state: dict[str, tuple[int, int]] = {}
         self._test_ran_this_turn: bool = False
-        from loongcli.core.verify_loop import VerifyState, MAX_VERIFY_ROUNDS
-        self._verify_state = VerifyState()
-        self._max_verify_rounds = MAX_VERIFY_ROUNDS
+        # 本回合是否已发过验证提醒：一回合最多一次，提醒之后模型再改代码也不再追问（只提醒、不重试）
+        self._verify_nudged: bool = False
         self._turn_tools: list[dict] | None = None
         self._last_prompt_tokens = 0
         self.token_usage = {
@@ -184,14 +244,20 @@ class AgentLoop:
         self.memory_notices: list[dict] = []
         # 本轮允许调用的工具名集合；None = 无限制（派发层硬闸用，区别于 _turn_tools 的 API 参数语义）
         self._turn_tool_names: set[str] | None = None
+        self._turn_read_only: bool = False  # 本回合工具集不含写工具（/goal 规划），shell 只读，见 _shell_read_only
         # 撞单轮工具上限后置位：收走工具只留文字总结；模型仍硬发调用则计振出局
         self._tools_exhausted: bool = False
         self._exhausted_strikes: int = 0
-        self._result_manager = ToolResultManager()
+        # 任何工具结果超过 HARD_CAP 时全量落盘、上下文留头尾预览 + 指针；主/子代理各自
+        # manager 共用项目级目录（uuid 文件名无碰撞）。懒建目录，构造期无副作用。
+        self._result_manager = ToolResultManager(spill_dir=project_tool_results_dir())
         self._compact_breaker = CompactCircuitBreaker()
         # 执行中排队的用户插话：TUI key listener 在轮次运行时 queue_user_input()，
         # run_stream 在迭代边界 drain 注入。单事件循环内同步操作，无需锁。
         self._queued_user_inputs: list[str] = []
+        # 上一回合开始时的本地日期：会话开过午夜时据此插「日期变更」标记（见 resume_gap）。
+        # None = 本进程还没跑过回合，系统提示里的日期是新鲜的，不需要标记。
+        self._last_turn_date = None
         self.messages: list[dict] = []
         if system_prompt:
             self.messages.append({"role": "system", "content": system_prompt})
@@ -199,6 +265,16 @@ class AgentLoop:
     def _persist(self):
         if self.conversation_store:
             self.conversation_store.save(self.messages)
+
+    def _persist_checkpoint(self):
+        """回合内的尽力落盘：失败只记日志，不打断正在进行的回合。
+
+        回合收尾的 _persist 失败会如实抛出（那是最后一次机会）；中途这次只是保险，
+        磁盘暂时写不进去不该让一个本来能跑完的回合夭折。"""
+        try:
+            self._persist()
+        except Exception:
+            logger.warning("回合内落盘失败（不影响本回合继续）", exc_info=True)
 
     def _effective_prompt_tokens(self) -> int:
         """自动压缩的触发依据。优先用 API 报的真实 prompt_tokens；provider 不
@@ -258,14 +334,50 @@ class AgentLoop:
     def plan_mode(self) -> bool:
         return self._plan_mode
 
+    @property
+    def turn_tool_calls(self) -> int:
+        """最近一个回合实际执行的工具调用数（回合开始清零）。/goal 用它判断这轮有没有进展。"""
+        return self._tool_call_count
+
+    def set_goal(self, description: str, plan_id: str) -> None:
+        """进入 /goal 执行：目标原话与审计规则常驻系统提示，计划设为活跃（草稿覆盖保护也认它）。"""
+        self._goal_description = description
+        self._active_plan_id = plan_id
+        self._rebuild_system_prompt()
+
+    def clear_goal(self) -> None:
+        self._goal_description = ""
+        self._active_plan_id = None
+        self._rebuild_system_prompt()
+
+    def _review_context(self) -> tuple[str, str]:
+        """自动审核用的上下文：(目标, 计划当前步骤)。审核器据此判断命令是否超出当前步骤范围。
+
+        目标优先取 /goal 描述；没有（普通对话、子代理）就取第一条用户消息——子代理的第一条就是委派给它的任务。"""
+        goal = self._goal_description or ""
+        if not goal:
+            first = next((m for m in self.messages if m.get("role") == "user"), None)
+            if first:
+                goal = str(first.get("content") or "")[:500]
+        step = ""
+        if self._active_plan_id and self.plan_store:
+            plan = self.plan_store.load(self._active_plan_id)
+            if plan:
+                cur = next((s for s in plan.steps if s.status in ("in_progress", "pending")), None)
+                if cur:
+                    step = f"{cur.number}. {cur.description}"[:500]
+        return goal, step
+
     def _build_plan_injection(self) -> str:
         if self._plan_mode:
             return PLAN_MODE_SYSTEM_INJECTION
+        if self._goal_description and self._active_plan_id:
+            return GOAL_INJECTION_TEMPLATE.format(goal=self._goal_description, plan_id=self._active_plan_id)
         if self._active_plan_id and self.plan_store:
             plan = self.plan_store.load(self._active_plan_id)
             if plan and plan.status == "active":
                 return ACTIVE_PLAN_INJECTION_TEMPLATE.format(
-                    plan_summary=plan.format_summary(),
+                    plan_id=self._active_plan_id,
                 )
         return ""
 
@@ -356,11 +468,12 @@ class AgentLoop:
             logger.debug("checkpoint save failed", exc_info=True)
 
     def _release_checkpoint(self) -> None:
-        """成功路径：保留快照供 /rollback 会话内随时恢复，仅解除当前引用。
+        """成功路径：只解除当前引用，快照本身留着，供 /rollback 会话内随时恢复。
 
-        旧行为是成功即 discard——只防执行中抛异常，防不了「几轮之后用户才发现
-        内容被改坏」。留存由 CheckpointManager 自身封顶（MAX_CHECKPOINTS 淘汰
-        最旧 + 启动时清理 7 天孤儿），不会无界增长。"""
+        不在成功时 discard，是因为要防的不是「执行中抛异常」（那条路径由
+        _restore_checkpoint 兜），而是「几轮之后用户才发现内容被改坏」。留存量由
+        CheckpointManager 封顶（MAX_CHECKPOINTS 淘汰最旧），不会无界增长。
+        注意快照索引只在内存里、不跨会话——进程退出后旧快照即不可恢复。"""
         self._last_checkpoint = None
 
     def _restore_checkpoint(self) -> None:
@@ -538,7 +651,7 @@ class AgentLoop:
                 if self._plan_mode:
                     result = (
                         f"⚠ 规划模式下工具 {tool_name} 不可用，只能用只读调研工具"
-                        "（read_file/glob/grep/recall/search_history/lsp_*）。请完成调研后用"
+                        "（read_file/recall/search_history，shell 只能跑只读命令）。请完成调研后用"
                         " plan 工具制定计划，再调用 exit_plan_mode 提交用户审批——审批通过后所有工具自动恢复。"
                     )
                 elif self._tools_exhausted:
@@ -552,6 +665,18 @@ class AgentLoop:
                     "content": result,
                 })
                 return
+
+        # 只读回合的 shell 闸：确定性白名单判定，不赌模型自觉，也不用小模型猜（误放行 = 批准前就执行了写操作）
+        if tool_name == "shell" and self._shell_read_only() and not self.permission_checker.is_read_only_command(
+            args.get("command", "")
+        ):
+            yield ToolCallResult(tool_name=tool_name, result=READ_ONLY_SHELL_REJECTION)
+            self.messages.append({
+                "role": "tool",
+                "tool_call_id": tc["id"],
+                "content": READ_ONLY_SHELL_REJECTION,
+            })
+            return
 
         if self._tool_call_count > self.max_tool_calls:
             # 标记撞限：run_stream 下一迭代会收走全部工具（不带 tools 参数），只留
@@ -606,19 +731,45 @@ class AgentLoop:
         )
         tool_errored = False
 
+        reviewer = getattr(self.permission_checker, "auto_reviewer", None)
+        if (decision == Decision.CONFIRM and reviewer is not None
+                and self.permission_checker.mode == PermissionMode.AUTO):
+            # AUTO 档：本该弹确认的调用交给审核器（主代理与子代理同一路径）。放行 → 按 ALLOW 往下走；
+            # 拦下（含审核失败）→ 不执行，理由回给模型，让它停下来问人
+            goal, step = self._review_context()
+            review_t0 = time.monotonic()
+            review = await reviewer.review(
+                tool_name, args, goal=goal, step=step, cwd=os.getcwd(),
+                files=referenced_scripts(tool_name, args, self.permission_checker.project_root),
+            )
+            self.telemetry.emit(
+                "auto_review", role=self.role.value, tool_call_id=tc.get("id", ""), name=tool_name,
+                verdict="allow" if review.allowed else "block", category=review.category,
+                cached=review.cached, failed=review.failed,
+                duration_ms=int((time.monotonic() - review_t0) * 1000),
+            )
+            if review.allowed:
+                decision = Decision.ALLOW
+            else:
+                decision = Decision.DENY
+                reason = (f"自动审核拦下（{review.category}）：{review.reason}。"
+                          "需要这么做就停下来向用户说明要做什么、为什么，由用户决定")
+
         if decision == Decision.DENY:
             result = f"⚠ 操作被禁止: {reason}"
         elif decision == Decision.CONFIRM and not self.interactive:
             result = f"⚠ 需用户确认的操作在子代理/非交互上下文中自动拒绝（{reason}）"
         elif decision == Decision.CONFIRM:
-            future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+            # 结果：True = 批准；False = 拒绝；字符串 = 拒绝并附用户给模型的说明
+            future: asyncio.Future[bool | str] = asyncio.get_running_loop().create_future()
             yield ConfirmRequest(
                 tool_name=tool_name,
                 arguments=args,
                 risk_reason=reason,
                 future=future,
             )
-            approved = await future
+            answer = await future
+            approved = answer is True
             if approved:
                 self.permission_checker.record_approval(tool_name, args, is_mcp=is_mcp_tool)
                 result = None
@@ -630,6 +781,8 @@ class AgentLoop:
                         tool_errored = kind == "__error__"
             else:
                 result = f"⚠ 用户拒绝了此操作（{reason}）"
+                if isinstance(answer, str) and answer.strip():
+                    result += f"。用户说明：{answer.strip()}"
         else:
             result = None
             async for kind, data in self._exec_tool_stream(tool_name, args):
@@ -651,7 +804,11 @@ class AgentLoop:
                 await self.lsp_manager.invalidate_doc(fp)
 
         if tool_name in ("edit_file", "write_file"):
-            self._test_ran_this_turn = False
+            from loongcli.core.verify_loop import filter_code_files
+            # 只有改了代码才作废「已测过」：测完把证据写进 todo.md/README 不该再招来一次验证提醒
+            # （dogfood exec-2/3：测试通过 → 写 todo.md → 收尾，旧逻辑因此多提醒一轮）
+            if filter_code_files(self._extract_file_args(tool_name, args)):
+                self._test_ran_this_turn = False
 
         # 读后写闸门状态更新：读过的文件记录 (mtime_ns, size)；写/改成功视同已知
         # 最新内容，后续连续修改无需重读。工具级错误（"错误："）与拒绝（"⚠"）不记录。
@@ -663,10 +820,8 @@ class AgentLoop:
 
         if tool_name == "shell" and isinstance(result, str):
             from loongcli.core.verify_loop import detect_test_failure, is_test_command
-            if self._verify_state.is_active and detect_test_failure(result):
-                self._verify_state.test_failed = True
-            cmd = args.get("command", "")
-            if is_test_command(cmd) and not detect_test_failure(result):
+            # 最后一次改动之后跑过「通过的」测试，收尾时就不用提醒验证；改文件会把它清回 False
+            if is_test_command(args.get("command", "")) and not detect_test_failure(result):
                 self._test_ran_this_turn = True
 
         approval_data = None
@@ -746,16 +901,21 @@ class AgentLoop:
 
         yield ToolCallResult(tool_name=tool_name, result=result)
 
-        stored = self._result_manager.process(tool_name, result) if isinstance(result, str) else result
+        stored = (
+            self._result_manager.process(tool_name, result)
+            if isinstance(result, str) else result
+        )
         self.messages.append({
             "role": "tool",
             "tool_call_id": tc["id"],
             "content": stored,
         })
-        # 截断判定用长度对比（truncated_calls 是按迭代 clear 的共享状态，不碰）。
+        # 截断判定用长度对比（只有超过 HARD_CAP 落盘时才会变短）。
         # 早退路径（非法 JSON/硬闸/上限/循环/hook 拦截）不经此处，v1 不覆盖。
+        # tool_call_id：事件和会话里的工具调用按 id 对上，不靠顺序——早退路径不发本事件、上下文压缩又会删掉前段消息，
+        # 按顺序对齐会错位（dogfood 补人工判断时，压缩过的 p4-2 算不出时间线）
         self.telemetry.emit(
-            "tool_exec", name=tool_name, role=self.role.value,
+            "tool_exec", name=tool_name, role=self.role.value, tool_call_id=tc.get("id", ""),
             duration_ms=int((time.monotonic() - exec_t0) * 1000),
             result_chars=len(result) if isinstance(result, str) else 0,
             truncated=isinstance(result, str) and isinstance(stored, str) and len(stored) < len(result),
@@ -813,6 +973,9 @@ class AgentLoop:
             )
             self._compact_breaker.record_success()
             self._rebuild_system_prompt()
+            # 触发依据是「上一次请求的 prompt_tokens」——压完到下一次请求之前它还是旧的大数，不清零的话
+            # 下一迭代会拿它再压一次。清零后退回按当前消息估算，下一次请求回报真实值再接管。
+            self._last_prompt_tokens = 0
             compact_ok = True
         except Exception as e:
             logger.warning("Compact failed: %s", e)
@@ -841,6 +1004,13 @@ class AgentLoop:
             schemas = [s for s in schemas if s["function"]["name"] in allowed_tools]
         self._turn_tools = schemas or None
         self._turn_tool_names = {s["function"]["name"] for s in schemas}
+        # 调用方（/goal 规划）给的工具集里没有写工具 → 本回合只读
+        self._turn_read_only = allowed_tools is not None and not (allowed_tools & WRITE_TOOLS)
+
+    def _shell_read_only(self) -> bool:
+        """shell 此刻是否只能跑只读命令：规划模式、/goal 规划回合、协调者角色（只读角色，没有写工具）。
+        现算而非存标志：规划获批（_plan_mode 清零）后自然恢复。"""
+        return self._plan_mode or self._turn_read_only or self.role == AgentRole.COORDINATOR
 
     async def run_stream(
         self,
@@ -881,9 +1051,6 @@ class AgentLoop:
         allowed_tools: set[str] | None = None,
         images: list[str] | None = None,
     ) -> AsyncIterator:
-        if self.skill_registry:
-            user_input = self.skill_registry.enrich_prompt(user_input)
-
         # 带图但模型未开视觉 → 立刻拒绝，连文件都不读（首要配置错误，早失败）。
         if images and not getattr(self.llm, "vision", False):
             yield AgentDone(content=NO_VISION_MSG)
@@ -897,6 +1064,11 @@ class AgentLoop:
                 return
         else:
             content = user_input
+        # 会话开过了午夜：系统提示里的「今天日期」已过期，在用户消息之前追加一对标记
+        # （append-only，不动 messages[0]，不破前缀缓存）。
+        now = datetime.now()
+        self.messages.extend(date_rollover_messages(self._last_turn_date, now))
+        self._last_turn_date = now.date()
         self.messages.append({"role": "user", "content": content})
         # 旧图回收：全局只保留最近 N 张，更旧的替换为占位文本。图片每轮全量重发
         # 且无法被文本摘要，不回收会撑爆 context/成本；原图仍在本地图片库。
@@ -910,7 +1082,7 @@ class AgentLoop:
         self._pending_images = []  # 防上一轮异常中断的残留
         self._files_modified_this_turn = []
         self._test_ran_this_turn = False
-        self._verify_state.reset()
+        self._verify_nudged = False
 
         # 视觉门控兜底：消息里含图片（含未来 read_file 等其他来源）但模型未开视觉
         # → 明确拒绝，不发任何请求（放在 recall/compact 之前，别把图喂给瞎的模型）。
@@ -920,9 +1092,6 @@ class AgentLoop:
 
         await self._inject_recall(user_input)
 
-        async for ev in self._maybe_auto_compact():
-            yield ev
-
         self._prepare_turn_tools(disable_tools, allowed_tools)
 
         if self._plan_mode or self._active_plan_id:
@@ -930,13 +1099,17 @@ class AgentLoop:
 
         empty_retries = 0  # 空响应（只思考不作答）本轮已重试次数，上限 1 防打摆子烧钱
         for iteration in range(self.max_iterations):
-            self._result_manager.reset_turn()
             # 执行中插话在迭代顶部注入：上一迭代的 assistant(tool_calls)→tool×N 序列
             # 已完整落库，此刻插 user 消息 API 合法（与 mailbox 注入同一时间点）；
             # 排在 verify/mailbox 注入之后 = 离模型注意力最近。
             for queued_text in self.take_queued_inputs():
                 self.messages.append({"role": "user", "content": queued_text})
                 yield QueuedInputInjected(text=queued_text)
+            # 压缩检查放在每次调模型之前，而不是只在回合开头：goal 的一次执行迭代就是一个回合，可有上百次工具调用，
+            # 只在开头查的话回合内上下文再大也不会压（2026-11-19 p4-1：236K、57 次超阈值、0 次压缩）。
+            # 此刻上一迭代的 assistant(tool_calls)→tool×N 已完整落库，按段截取不会留下孤儿 tool 消息。
+            async for ev in self._maybe_auto_compact():
+                yield ev
             # 撞限后收走全部工具（请求不带 tools），只留文字总结一条路
             if self._tools_exhausted:
                 self._turn_tools = None
@@ -1018,63 +1191,29 @@ class AgentLoop:
 
                 self.messages.append({"role": "assistant", "content": response.content})
 
-                # Verify loop: if code files were modified, kick off verification
-                if self._files_modified_this_turn and not self._verify_state.is_active and not self._test_ran_this_turn:
+                # 验证提醒：改了代码、最后一次改动之后没有通过的测试 → 提醒一次再收尾。
+                # 一回合最多一次，提醒后的那一轮无论结果如何都直接收尾（只提醒、不重试，见 verify_loop 模块说明）。
+                if self._files_modified_this_turn and not self._verify_nudged and not self._test_ran_this_turn:
                     from loongcli.core.verify_loop import build_verify_prompt, filter_code_files
                     from loongcli.core.test_discovery import discover_test_command
 
-                    code_files = filter_code_files(self._files_modified_this_turn)
-                    if not code_files:
-                        self._files_modified_this_turn = []
-                        self._persist()
-                        yield AgentDone(content=response.content, displayed=True)
-                        return
-
-                    test_cmd = discover_test_command(changed_files=code_files)
-                    self._verify_state.start(code_files, test_cmd)
-                    self.telemetry.emit(
-                        "verify", phase="start",
-                        test_command=test_cmd, changed_files=len(code_files),
-                    )
-                    prompt = build_verify_prompt(
-                        changed_files=self._files_modified_this_turn,
-                        test_command=test_cmd,
-                        round_number=1,
-                    )
-                    self.messages.append({"role": "user", "content": prompt})
-                    self._files_modified_this_turn = []
-                    continue  # Let LLM process the verify prompt
-
-                # Verify loop: check if we need to retry or report exhaustion
-                if self._verify_state.round > 0:
-                    is_failure = self._verify_state.test_failed
-                    self._verify_state.test_failed = False
-
-                    if is_failure and self._verify_state.is_active:
-                        self._verify_state.last_error = response.content
-                        self._verify_state.round += 1
+                    code_files = list(dict.fromkeys(filter_code_files(self._files_modified_this_turn)))
+                    if code_files:
+                        test_cmd = discover_test_command(changed_files=code_files)
+                        self._verify_nudged = True
                         self.telemetry.emit(
-                            "verify", phase="retry", round=self._verify_state.round,
+                            "verify", phase="start",
+                            test_command=test_cmd, changed_files=len(code_files),
                         )
                         prompt = build_verify_prompt(
-                            changed_files=self._verify_state.changed_files,
-                            test_command=self._verify_state.test_command,
-                            round_number=self._verify_state.round,
-                            last_error=self._verify_state.last_error,
+                            # 去重保序：同一文件本回合改 N 次只列一次（真机：setup_env.py 列了 3 遍）
+                            changed_files=list(dict.fromkeys(self._files_modified_this_turn)),
+                            test_command=test_cmd,
                         )
                         self.messages.append({"role": "user", "content": prompt})
-                        continue  # Retry verification
-
-                    if is_failure and self._verify_state.is_exhausted:
-                        response.content = (
-                            f"⚠ 验证失败：已重试 {self._max_verify_rounds} 轮仍未通过。\n\n"
-                            f"{response.content}"
-                        )
-                    self.telemetry.emit(
-                        "verify", phase="end", rounds=self._verify_state.round,
-                        exhausted=is_failure and self._verify_state.is_exhausted,
-                    )
-                    self._verify_state.reset()
+                        self._files_modified_this_turn = []
+                        continue  # 让模型处理验证提醒
+                    self._files_modified_this_turn = []
 
                 self._persist()
                 yield AgentDone(content=response.content, displayed=True)
@@ -1122,6 +1261,19 @@ class AgentLoop:
                         result=notif["result"],
                     )
 
-        msg = f"⚠ 已达到迭代上限（{self.max_iterations}轮），自动停止。"
+            # 逐迭代落盘：此刻 assistant(tool_calls) → tool×N（及随后的图片/mailbox 注入）
+            # 已完整入列，序列对 API 合法，从这里 resume 可以直接续。此前只在回合收尾
+            # 落盘——进程中途冻结/崩溃/被杀就丢整个回合，而工具的副作用（写文件、git、
+            # 外部写入）已经发生，resume 后模型对它们一无所知（2026-11-13 事故：丢了
+            # 含 stash + rebase 的一回合）。实测 1.4MB/878 条消息的会话单次 save 17ms。
+            self._persist_checkpoint()
+
+        # 说明写进历史：此前只 yield 给界面、不入 messages——历史停在一条 tool 结果上，
+        # 用户说「继续」后模型不知道上一回合是被截停的（会当成自己说完了）。
+        msg = (
+            f"⚠ 已达到迭代上限（{self.max_iterations}轮），自动停止。"
+            "任务可能尚未完成——输入「继续」可接着做。"
+        )
+        self.messages.append({"role": "assistant", "content": msg})
         self._persist()
         yield AgentDone(content=msg)

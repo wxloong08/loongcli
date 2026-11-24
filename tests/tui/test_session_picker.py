@@ -159,7 +159,7 @@ class TestRenderPicker:
         )
         state.search = "zzz"
         panel = render_picker(state)
-        text = str(panel.renderable)
+        text = str(panel.body)
         assert "没有匹配" in text
 
     def test_render_selected_marker(self):
@@ -170,13 +170,13 @@ class TestRenderPicker:
             ],
         )
         state.cursor = 1
-        text = str(render_picker(state).renderable)
+        text = str(render_picker(state).body)
         assert ">" in text
 
     def test_render_more_indicator(self):
         sessions = [_make_session(f"s{i}", f"S{i}") for i in range(20)]
         state = PickerState(sessions=sessions, page_size=3)
-        text = str(render_picker(state).renderable)
+        text = str(render_picker(state).body)
         assert "更多" in text
 
     def test_render_search_display(self):
@@ -184,7 +184,7 @@ class TestRenderPicker:
             sessions=[_make_session("a", "Hello world")],
         )
         state.search = "hello"
-        text = str(render_picker(state).renderable)
+        text = str(render_picker(state).body)
         assert "hello" in text
 
     def test_render_count_with_filter(self):
@@ -202,6 +202,6 @@ class TestRenderPicker:
         state = PickerState(
             sessions=[_make_session("a", "Line1\nLine2\nLine3")],
         )
-        text = str(render_picker(state).renderable)
+        text = str(render_picker(state).body)
         assert "\nLine2" not in text
         assert "Line1 Line2 Line3" in text

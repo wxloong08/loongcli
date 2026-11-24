@@ -30,6 +30,20 @@ def test_build_recall_prompt(store, mock_llm):
     assert "How should I push my code?" in prompt
 
 
+def test_memory_list_precedes_user_input(store, mock_llm):
+    """记忆清单必须排在用户消息之前——顺序反了会让清单每轮出缓存、全价重算。
+
+    这段 prompt 里记忆清单是最大且最稳定的一块，用户消息每轮必变。稳定在前
+    才能进硬盘缓存的前缀。约束不写进测试就会被后来的改动无声改回去。
+    """
+    user_input = "How should I push my code?"
+    prompt = RecallEngine(memory=store, llm=mock_llm)._build_prompt(user_input)
+    last_memory_pos = max(prompt.index(n) for n in ("git-workflow", "user-role", "api-docs"))
+    assert last_memory_pos < prompt.index(user_input), (
+        "记忆清单必须完全排在用户消息之前，否则清单进不了可缓存前缀"
+    )
+
+
 @pytest.mark.asyncio
 async def test_recall_returns_relevant_memories(store, mock_llm):
     mock_llm.chat.return_value = "git-workflow"

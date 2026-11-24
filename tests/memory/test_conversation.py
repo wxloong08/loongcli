@@ -1,4 +1,10 @@
-from loongcli.memory.conversation import ConversationStore, _project_sessions_dir, _path_to_slug
+from loongcli.memory.conversation import (
+    ConversationStore,
+    _project_sessions_dir,
+    _path_to_slug,
+    project_tasks_dir,
+    project_tool_results_dir,
+)
 
 
 def test_path_to_slug(tmp_path):
@@ -8,6 +14,19 @@ def test_path_to_slug(tmp_path):
     assert "myproject" in slug
     assert ":" not in slug
     assert "\\" not in slug
+
+
+def test_project_tool_results_dir(tmp_path):
+    """工具落盘目录：cwd 派生、与 sessions/tasks 平级隔离，只算路径不建目录。"""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    d = project_tool_results_dir(proj)
+    assert d.name == "tool_results"
+    # 与 tasks 同一 project slug 目录下、互不覆盖
+    assert d.parent == project_tasks_dir(proj).parent
+    assert d != project_tasks_dir(proj)
+    # 只算路径，不产生副作用（不建目录）
+    assert not d.exists()
 
 
 def test_project_isolation(tmp_path, monkeypatch):

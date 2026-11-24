@@ -85,7 +85,7 @@ class TestSkillTool:
 
     async def test_big_skill_under_cap_returned_intact(self, tmp_path):
         # 技能是指令：>8K 的技能（现存 8 个）必须完整送达，不许被入口截成 2000 预览
-        # ——入口豁免（SELF_BUDGETED_TOOLS 含 skill）配合本工具 50K 自管上限
+        # ——本工具 50K 自管上限，入口保险丝（HARD_CAP 60K）在其上
         from loongcli.tools.skill import SKILL_CONTENT_CAP
 
         body = "## 步骤\n" + "- 关键规则一行\n" * 3000  # ~27K，介于 8K 与 50K 之间

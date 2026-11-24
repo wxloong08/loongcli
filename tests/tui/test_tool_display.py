@@ -80,9 +80,9 @@ class TestResultLines:
         assert any(l.startswith("+B") for l in plain)
         minus = next(t for t in lines if t.plain.startswith("-"))
         plus = next(t for t in lines if t.plain.startswith("+"))
-        # 显式十六进制纯白字 + 深色底——调色板名经主题映射后亮度不可控（真机两轮发灰）
-        assert "#ffffff" in str(minus.style) and "on #6e1e1e" in str(minus.style)
-        assert "#ffffff" in str(plus.style) and "on #1d5f2d" in str(plus.style)
+        # 显式十六进制亮红/亮绿字、无底色（2026-11-20 用户选定）——调色板名经主题映射后亮度不可控（真机两轮发灰）
+        assert str(minus.style) == "#ff3333" and " on " not in str(minus.style)
+        assert str(plus.style) == "#33ff33" and " on " not in str(plus.style)
 
     def test_edit_diff_capped(self):
         old = "\n".join(f"l{i}" for i in range(40))
@@ -109,7 +109,14 @@ class TestResultLines:
     def test_shell_nonzero_exit_marks_failed(self):
         ok, lines = result_lines("shell", {}, "boom\n[exit code: 1]")
         assert not ok
-        assert "boom" in _plain(lines)[0]
+        assert _plain(lines) == ["boom", "[exit code: 1]"]
+        assert str(lines[-1].style) == "red" and str(lines[0].style) == "dim"   # 只有退出码那行标红
+
+    def test_shell_shows_head_lines_not_last_line(self):
+        """多段命令显示前几行 + 剩余行数，不再只给最后一行（真机：「⎿ 14」、成功命令配一句 fatal 报错）。"""
+        result = "wc -l:\n3 notes.md\nlist items:\n3\nbackticks:\n14\nfatal: not a git repository"
+        ok, lines = result_lines("shell", {}, result)
+        assert ok and _plain(lines) == ["wc -l:", "3 notes.md", "list items:", "… +4 行"]
 
     def test_error_result_red_lines(self):
         ok, lines = result_lines("read_file", {}, "错误：文件不存在 'x.py'")

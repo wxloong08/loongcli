@@ -244,6 +244,35 @@ async def test_agent_confirm_denied():
 
 
 @pytest.mark.asyncio
+async def test_confirm_rejected_with_feedback_reaches_model():
+    """确认框选「不执行，告诉模型怎么改」：future 给字符串 = 拒绝 + 说明，说明要进工具结果；不执行命令。"""
+    llm = LLMClient(api_key="test")
+    tool_chunks = _make_tool_call_chunks("call_1", "shell", {"command": "rm -rf /tmp/test"})
+    text_chunks = _make_text_chunks(["OK"])
+    call_count = 0
+
+    async def mock_stream(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        for c in (tool_chunks if call_count == 1 else text_chunks):
+            yield c
+
+    llm.chat_stream = mock_stream
+    registry = ToolRegistry()
+    registry.register(ShellTool())
+    agent = AgentLoop(llm=llm, tool_registry=registry, permission_checker=PermissionChecker())
+
+    events = []
+    async for event in agent.run_stream("delete stuff"):
+        if isinstance(event, ConfirmRequest):
+            event.future.set_result("别删，移到回收站")
+        events.append(event)
+
+    result = [e for e in events if isinstance(e, ToolCallResult)][0].result
+    assert "拒绝" in result and "用户说明：别删，移到回收站" in result
+
+
+@pytest.mark.asyncio
 async def test_invalid_tool_args_json_does_not_crash():
     """Malformed tool-argument JSON must become a tool error fed back to the
     model, never an exception that escapes run_stream and kills the TUI."""
@@ -1412,3 +1441,160 @@ async def test_agent_empty_response_then_success():
     done = [e for e in events if isinstance(e, AgentDone)][-1]
     assert done.displayed is True  # 正文已流式上屏，TUI 不重复打印
     assert done.content == "好的"
+
+
+# ── 只读回合的 shell 闸（2026-11-19：规划阶段放行 shell，但只放行白名单内的只读命令）──
+
+class _SpyShell(Tool):
+    name = "shell"
+    description = "run"
+    parameters = {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}
+
+    def __init__(self):
+        self.ran: list[str] = []
+
+    async def execute(self, command: str) -> str:
+        self.ran.append(command)
+        return "[exit code: 0]\nok"
+
+
+async def _run_shell_once(command: str, *, plan_mode=False, allowed_tools=None, role=None):
+    from loongcli.security.permissions import PermissionMode
+    from loongcli.tools.routing import AgentRole
+    llm = LLMClient(api_key="test")
+    chunks = [_make_tool_call_chunks("c1", "shell", {"command": command}), _make_text_chunks(["好"])]
+    state = {"n": 0}
+
+    async def mock_stream(**kwargs):
+        state["n"] += 1
+        for c in chunks[min(state["n"], 2) - 1]:
+            yield c
+
+    llm.chat_stream = mock_stream
+    registry = ToolRegistry()
+    shell = _SpyShell()
+    registry.register(shell)
+    agent = AgentLoop(
+        llm=llm, tool_registry=registry, permission_checker=PermissionChecker(PermissionMode.SKIP),
+        **({"role": role} if role else {}),
+    )
+    if plan_mode:
+        agent.enter_plan_mode()
+    results = [e.result async for e in agent.run_stream("查一下", allowed_tools=allowed_tools)
+               if isinstance(e, ToolCallResult)]
+    return shell.ran, results
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_rejects_writing_shell_command():
+    ran, results = await _run_shell_once('python -c "open(\'x\',\'w\')"', plan_mode=True)
+    assert ran == []                                  # 没执行（即便权限是 SKIP 模式）
+    assert "只读命令" in results[0]
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_allows_read_only_shell_command():
+    ran, _ = await _run_shell_once("git log -1 --oneline", plan_mode=True)
+    assert ran == ["git log -1 --oneline"]
+
+
+@pytest.mark.asyncio
+async def test_goal_planning_turn_without_write_tools_is_read_only():
+    """/goal 规划传入的工具集没有写工具 → shell 只读。"""
+    ran, results = await _run_shell_once("pip install requests", allowed_tools={"read_file", "shell", "plan"})
+    assert ran == [] and "只读命令" in results[0]
+    ran, _ = await _run_shell_once("pip show requests", allowed_tools={"read_file", "shell", "plan"})
+    assert ran == ["pip show requests"]
+
+
+@pytest.mark.asyncio
+async def test_normal_turn_shell_unrestricted():
+    ran, _ = await _run_shell_once('python -c "print(1)"')
+    assert ran == ['python -c "print(1)"']
+
+
+@pytest.mark.asyncio
+async def test_coordinator_shell_is_read_only():
+    from loongcli.tools.routing import AgentRole
+    ran, results = await _run_shell_once("pip install x", role=AgentRole.COORDINATOR)
+    assert ran == [] and "只读命令" in results[0]
+
+
+# ── 长回合中途压缩（2026-11-19 p4-1：236K、57 次超阈值、0 次压缩——压缩只在回合开头查一次）──
+
+def _summary_llm():
+    from loongcli.core.compact import Compactor  # noqa: F401
+    llm = MagicMock()
+    chunk = MagicMock()
+    chunk.choices = [MagicMock()]
+    chunk.choices[0].delta.content = "<summary>" + "已完成前面若干步工具调用，正在按计划继续实施，关键结论都已记录。" * 3 + "</summary>"
+    chunk.choices[0].delta.tool_calls = None
+    chunk.choices[0].finish_reason = "stop"
+    chunk.usage = None
+
+    async def stream(**kwargs):
+        yield chunk
+    llm.chat_stream = stream
+    return llm
+
+
+class _BigResultTool(Tool):
+    name = "big"
+    description = "returns a big result"
+    parameters = {"type": "object", "properties": {"i": {"type": "integer"}}, "required": ["i"]}
+
+    async def execute(self, i: int) -> str:
+        return f"result-{i} " + "x" * 3000
+
+
+@pytest.mark.asyncio
+async def test_long_single_turn_compacts_mid_turn():
+    from loongcli.core.compact import Compactor
+    from loongcli.core.events import CompactStart
+    llm = LLMClient(api_key="test")
+    state = {"n": 0}
+
+    async def mock_stream(**kwargs):
+        state["n"] += 1
+        chunks = (_make_tool_call_chunks(f"c{state['n']}", "big", {"i": state["n"]})
+                  if state["n"] <= 20 else _make_text_chunks(["全部完成"]))
+        for c in chunks:
+            yield c
+
+    llm.chat_stream = mock_stream
+    registry = ToolRegistry()
+    registry.register(_BigResultTool())
+    # usage 为 None → 按消息字符估算（3000 字符/次 ≈ 1500 token），阈值 8000 约第 6 次越过
+    agent = AgentLoop(llm=llm, tool_registry=registry, permission_checker=PermissionChecker(),
+                      system_prompt="sys",
+                      services=AgentServices(compactor=Compactor(llm=_summary_llm(), threshold=8000)))
+    events = [e async for e in agent.run_stream("实施 P4")]
+    starts = [e for e in events if isinstance(e, CompactStart)]
+    assert starts, "单个长回合里应在中途触发压缩"
+    assert any(isinstance(e, AgentDone) for e in events)
+    # 压缩后消息顺序合法：每个 tool 都有发起者
+    ids = set()
+    for m in agent.messages:
+        for tc in m.get("tool_calls") or []:
+            ids.add(tc["id"])
+        if m["role"] == "tool":
+            assert m["tool_call_id"] in ids
+
+
+@pytest.mark.asyncio
+async def test_no_immediate_recompaction_after_compact():
+    """压完立刻再查一次：上一次请求的 prompt_tokens 已清零，不会拿旧的大数再压。"""
+    from loongcli.core.compact import Compactor
+    agent = AgentLoop(llm=LLMClient(api_key="test"), tool_registry=ToolRegistry(),
+                      permission_checker=PermissionChecker(), system_prompt="sys",
+                      services=AgentServices(compactor=Compactor(llm=_summary_llm(), threshold=8000)))
+    agent.messages.append({"role": "user", "content": "实施 P4"})
+    for i in range(30):
+        agent.messages.append({"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"t{i}", "type": "function", "function": {"name": "big", "arguments": "{}"}}]})
+        agent.messages.append({"role": "tool", "tool_call_id": f"t{i}", "content": "x" * 3000})
+    agent._last_prompt_tokens = 200000
+    first = [e async for e in agent._maybe_auto_compact()]
+    second = [e async for e in agent._maybe_auto_compact()]
+    assert first and not second
+    assert agent._last_prompt_tokens == 0

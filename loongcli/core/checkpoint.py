@@ -128,7 +128,11 @@ class CheckpointManager:
             self.discard(oldest_id)
 
     def _cleanup_orphans(self, max_age_days: int = 7) -> None:
-        """Remove orphaned backup dirs older than max_age_days on startup."""
+        """启动时清掉上次会话残留的备份目录（超过 max_age_days 的）。
+
+        纯磁盘垃圾回收，与「能恢复多久」无关：_snapshots 只在内存里，
+        进程退出后「哪个 ckpt_id 对应哪些文件」的映射就没了，这些目录
+        已不可恢复。宽限 7 天只是避免误删同时在跑的另一个实例的快照。"""
         if not self._backup_dir.exists():
             return
         cutoff = datetime.now().timestamp() - max_age_days * 86400

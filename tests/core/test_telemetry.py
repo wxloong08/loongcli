@@ -217,6 +217,8 @@ class TestAgentTelemetry:
         assert tool_events[0]["error"] is False
         assert tool_events[0]["truncated"] is False
         assert tool_events[0]["result_chars"] == len("echo: world")
+        # 带工具调用 id：和会话里的调用按 id 对上，压缩删掉前段消息、早退路径不发事件时也不会错位
+        assert tool_events[0]["tool_call_id"] == "c1"
         # turn end 记录本轮工具调用数
         turn_end = next(e for e in events if e["type"] == "turn" and e["phase"] == "end")
         assert turn_end["tool_calls"] == 1

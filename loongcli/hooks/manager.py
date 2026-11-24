@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from loongcli.core.subproc import isolated_console_kwargs
+
 logger = logging.getLogger(__name__)
 
 EXIT_CODE_BLOCK = 2
@@ -108,11 +110,14 @@ class HookManager:
 
     async def _exec(self, hook: HookConfig, stdin_data: str) -> HookResult:
         try:
+            # 独立隐藏控制台：hook 是用户写的任意 shell 命令，同样不得附着在 TUI 的
+            # 控制台上（见 core/subproc.py）。stdin 本来就是 PIPE，不继承。
             proc = await asyncio.create_subprocess_shell(
                 hook.command,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **isolated_console_kwargs(),
             )
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(stdin_data.encode("utf-8")),

@@ -38,6 +38,7 @@ COORDINATOR_ALLOWED: frozenset[str] = frozenset({
     "send_message",
     "task_status",
     "read_file",
+    "shell",  # 协调者没有写工具：shell 只读，执行层按 is_read_only_command 拦（替代不再注册的 glob/grep）
     "glob",
     "grep",
     "lsp_goto_definition",

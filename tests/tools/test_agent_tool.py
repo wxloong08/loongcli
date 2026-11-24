@@ -135,6 +135,41 @@ class TestAgentTool:
         assert schemas[0]["function"]["name"] == "delegate"
         assert "prompt" in schemas[0]["function"]["parameters"]["properties"]
 
+    @pytest.mark.asyncio
+    async def test_subagent_compact_threshold_tracks_model_window(self):
+        """子代理压缩阈值 = 模型窗口 − 摘要预留，不再硬编码 16k。
+
+        16k（≈1M 模型的 1.6%）会让子代理在子任务中途反复压缩，把父代理依赖的
+        细节摘掉——与域 3 扇入精度直接冲突。子代理用同一个模型，阈值应与主 agent
+        同策略，实际效果是子代理跑完整个子任务而不中途压缩。
+        """
+        from loongcli.core.compact import model_context_window, SUMMARY_TOKEN_RESERVE
+
+        tm = TaskManager()
+        llm = MagicMock()
+        llm.model = "deepseek-v4-flash"
+        tool = AgentTool(
+            task_manager=tm, llm=llm,
+            parent_registry=ToolRegistry(), security=MagicMock(),
+        )
+        captured = {}
+
+        class FakeLoop:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        async def fake_create_and_run(prompt, agent_loop, depth, parent_id=None):
+            return Task(prompt=prompt)
+
+        with patch("loongcli.tools.agent_tool.AgentLoop", FakeLoop):
+            tm.create_and_run = fake_create_and_run
+            await tool.execute(prompt="do it", mode="background")
+
+        expected = max(0, model_context_window("deepseek-v4-flash") - SUMMARY_TOKEN_RESERVE)
+        assert captured["services"].compactor.threshold == expected
+        assert captured["services"].compactor.threshold != 16000
+        assert captured["services"].compactor.threshold > 16000
+
 
 class TestSendMessageTool:
     @pytest.mark.asyncio

@@ -50,13 +50,9 @@ async def _run_skill_test(prompt: str, expect_skill: str | None):
         services=AgentServices(skill_registry=skill_reg),
     )
 
-    matched = skill_reg.match(prompt)
-    matched_names = [m.name for m in matched]
-    print(f"  Trigger matched: {matched_names}")
-
-    if expect_skill:
-        assert expect_skill in matched_names, f"Expected {expect_skill} in {matched_names}"
-
+    # triggers 子串自动触发机制已移除（0/N skill 使用、opt-in 死路）——skill 现在
+    # 全走「LLM 从系统提示清单里自己选并调 skill 工具」这一条路。此 e2e 验证的就是
+    # 那条路：给 prompt，看模型是否自己 skill(expect_skill) 加载并按流程执行。
     buffer = ""
     tools_used = []
 

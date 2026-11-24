@@ -12,7 +12,7 @@ from rich.panel import Panel
 
 from loongcli.core.config import Config
 from loongcli.core.agent import AgentLoop, AgentServices
-from loongcli.core.compact import Compactor, model_context_window, SUMMARY_TOKEN_RESERVE
+from loongcli.core.compact import Compactor
 from loongcli.core.prompts import get_system_prompt
 from loongcli.core.git_context import collect_git_context
 from loongcli.core.project_context import find_project_context_files
@@ -21,19 +21,15 @@ from loongcli.tools.read_file import ReadFileTool
 from loongcli.tools.write_file import WriteFileTool
 from loongcli.tools.edit_file import EditFileTool
 from loongcli.tools.shell import ShellTool
-from loongcli.tools.glob_tool import GlobTool
-from loongcli.tools.grep_tool import GrepTool
 from loongcli.tools.recall import RecallTool
 from loongcli.tools.memorize import MemorizeTool
 from loongcli.tools.plan_tool import PlanTool
 from loongcli.plan.store import PlanStore
 from loongcli.tools.agent_tool import AgentTool
 from loongcli.tools.batch_delegate import BatchDelegateTool
-from loongcli.tools.send_message import SendMessageTool
 from loongcli.tools.task_status import TaskStatusTool
 from loongcli.tools.wait_tasks import WaitTasksTool
 from loongcli.tools.stop_task import StopTaskTool
-from loongcli.tools.enter_plan_mode import EnterPlanModeTool
 from loongcli.tools.exit_plan_mode import ExitPlanModeTool
 from loongcli.core.task import TaskManager
 from loongcli.memory.memory_router import MemoryRouter
@@ -50,7 +46,6 @@ from loongcli.skills.registry import SkillRegistry
 from loongcli.tools.skill import SkillTool
 from loongcli.core.cost import CostTracker
 from loongcli.lsp.server_manager import LSPServerManager
-from loongcli.lsp.tools import register_lsp_tools
 from loongcli.tui.app import TUI
 
 
@@ -98,9 +93,14 @@ def _parse_args() -> argparse.Namespace:
         "--resume", action="store_true",
         help="浏览历史会话并选择一个继续",
     )
-    parser.add_argument(
+    perm_group = parser.add_mutually_exclusive_group()
+    perm_group.add_argument(
         "--dangerously-skip-permissions", action="store_true",
         help="跳过所有权限确认（灾难性操作仍会拦截）",
+    )
+    perm_group.add_argument(
+        "--auto-permissions", action="store_true",
+        help="本该确认的操作交给小模型自动审核：普通开发操作放行，危险操作拦下并让模型停下来问人（适合 /goal 长跑）",
     )
     parser.add_argument(
         "--setup", action="store_true",
@@ -426,8 +426,8 @@ async def _async_main():
     registry.register(WriteFileTool())
     registry.register(EditFileTool())
     registry.register(ShellTool())
-    registry.register(GlobTool())
-    registry.register(GrepTool())
+    # grep/glob 不注册：shell 的 git grep / grep / git ls-files / ls 覆盖（只读白名单内免确认），
+    # 历史上模型已经更常在 shell 里直接搜（2026-11-19，见 tasks/todo.md 第 11 项）。
     registry.register(RecallTool(memory))
     registry.register(MemorizeTool(memory, session_provider=lambda: conversation.session_id))
     from loongcli.tools.search_history import SearchHistoryTool
@@ -453,7 +453,12 @@ async def _async_main():
     skill_tool = SkillTool(skill_registry)
     registry.register(skill_tool)
 
-    perm_mode = PermissionMode.SKIP if args.dangerously_skip_permissions else PermissionMode.DEFAULT
+    if args.dangerously_skip_permissions:
+        perm_mode = PermissionMode.SKIP
+    elif getattr(args, "auto_permissions", False):
+        perm_mode = PermissionMode.AUTO
+    else:
+        perm_mode = PermissionMode.DEFAULT
     # config.json 的 mcpServers.<name>.trusted: true → 该 server 全部工具免确认
     # （用户手写标记=信任声明；子代理共享同一 checker，信任集自动传播）
     trusted_mcp = {
@@ -487,33 +492,40 @@ async def _async_main():
         telemetry=telemetry,
         hook_manager=hook_manager,
     ))
-    registry.register(SendMessageTool(task_manager))
     registry.register(TaskStatusTool(task_manager))
     registry.register(WaitTasksTool(task_manager))
     registry.register(StopTaskTool(task_manager))
-    enter_plan_tool = EnterPlanModeTool()
     exit_plan_tool = ExitPlanModeTool()
     exit_plan_tool.bind_plan_store(plan_store)
-    registry.register(enter_plan_tool)
     registry.register(exit_plan_tool)
 
+    # lsp_* 工具不再注册（历史调用合计 2 次）；manager 保留——编辑文件时给已启动的语言服务器作废缓存，未启动则无开销。
     lsp_manager = LSPServerManager(workspace_root=Path.cwd())
-    register_lsp_tools(registry, lsp_manager)
+
+    # 会话级快照族：这三个源整个会话只采集一次，之后所有重建复用同一份。
+    # _rebuild_system_prompt 在计划执行期每轮触发且重拼整个提示词，不固定住的话
+    # git dirty 清单随每次改文件变、计划摘要随每步推进变、记忆索引随 memorize 变，
+    # messages[0] 就每轮都变，前缀缓存连同其后的全部对话历史一起作废。
+    # 三者的实时性都另有更便宜的通道：git 用 git status、计划看 update_step 返回值、
+    # 新记忆在 memorize 返回值里，故固定住不损失能力（提示词里各自标了快照）。
+    session_git_ctx = collect_git_context()
+    session_plan_text = plan_store.format_for_prompt()
+    session_memory_index = memory.get_index(max_bytes=25_000)
 
     # 系统提示词的模型身份必须用实际生效的 main client（roles.main），
     # 顶层 cfg.model 只是无 roles 配置时的回退字段——读它会把身份告诉错（如 qwen 被告知自己是 deepseek）。
     system_prompt = get_system_prompt(model=llm.model, memory=memory, mcp=mcp, plan_store=plan_store,
-                                      skills=skill_registry)
-    if cfg.compact_threshold:
-        threshold = cfg.compact_threshold
-    else:
-        max_tokens = router.context_window_for("main")
-        threshold = max(0, max_tokens - SUMMARY_TOKEN_RESERVE)
-
-    compactor = Compactor(llm=llm, threshold=threshold, plan_store=plan_store,
-                          task_manager=task_manager, skill_registry=skill_registry)
+                                      skills=skill_registry, git_ctx=session_git_ctx,
+                                      plan_text=session_plan_text, memory_index=session_memory_index)
+    # 压缩线：配置里写死了就用固定值；否则按当前模型的窗口实时算（/model 换模型后跟着变）
+    compactor = Compactor(llm=llm, plan_store=plan_store, task_manager=task_manager, skill_registry=skill_registry,
+                          **({"threshold": cfg.compact_threshold} if cfg.compact_threshold
+                             else {"window_for": router.context_window_for_model}))
 
     utility_llm = router.client("utility")
+    if perm_mode == PermissionMode.AUTO:
+        from loongcli.security.auto_review import AutoReviewer
+        perm_checker.auto_reviewer = AutoReviewer(utility_llm)
     recall_engine = RecallEngine(memory=memory, llm=utility_llm)
     auto_extractor = AutoExtractor(
         memory=memory, llm=utility_llm,
@@ -537,7 +549,8 @@ async def _async_main():
             skill_registry=skill_registry,
             system_prompt_builder=lambda: get_system_prompt(
                 model=llm.model, memory=memory, mcp=mcp, plan_store=plan_store,
-                skills=skill_registry,
+                skills=skill_registry, git_ctx=session_git_ctx,
+                plan_text=session_plan_text, memory_index=session_memory_index,
             ),
             recall_engine=recall_engine,
             auto_extractor=auto_extractor,
@@ -548,7 +561,6 @@ async def _async_main():
     agent.cost_tracker = cost_tracker
     agent.plan_store = plan_store
     agent.lsp_manager = lsp_manager
-    enter_plan_tool.bind_agent(agent)
     exit_plan_tool.bind_agent(agent)
     plan_tool.bind_agent(agent)  # 草稿覆盖需要知道当前活跃计划，防误删
 
@@ -590,6 +602,12 @@ async def _async_main():
         non_system = [m for m in restored_messages if m.get("role") != "system"]
         agent.messages = [agent.messages[0]] + non_system if agent.messages else non_system
 
+    if resumed:
+        # 时间跳跃标记：重建 system 修的是「现在几点」，这里补的是「过去几点」。
+        # 放在恢复的历史之后、用户新输入之前，两条恢复路径（structured / raw）共用。
+        from loongcli.core.resume_gap import resume_gap_messages
+        agent.messages.extend(resume_gap_messages(conversation.meta.get("updated_at", "")))
+
     await hook_manager.run(HookEvent.SESSION_START, {
         "session_id": conversation.session_id,
         "model": llm.model,
@@ -623,6 +641,8 @@ async def _async_main():
                 status_parts.append(mcp_status)
             if perm_mode == PermissionMode.SKIP:
                 status_parts.append("⚠ permissions: skip")
+            elif perm_mode == PermissionMode.AUTO:
+                status_parts.append("permissions: 自动审核")
             await tui.start(agent, resumed=resumed, status_items=status_parts)
     finally:
         from loongcli.core.compact import _segment_turns, KEEP_RECENT_TURNS

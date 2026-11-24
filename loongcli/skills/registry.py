@@ -13,9 +13,6 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 
 
-MAX_AUTO_SKILLS = 2
-MAX_SKILL_CHARS = 5000
-MAX_INPUT_FOR_TRIGGERS = 150
 # 清单里每条描述的截断上限：描述与名字同易变性（手动增删技能才变），进前缀不伤缓存
 # 稳定性，但要封顶防单个技能的长描述吃掉整段预算
 LISTING_DESC_CHARS = 80
@@ -28,7 +25,6 @@ class SkillMeta:
     path: Path
     disable_model_invocation: bool = False
     allowed_tools: list[str] = field(default_factory=list)
-    triggers: list[str] = field(default_factory=list)
 
 
 def _parse_frontmatter(text: str) -> dict[str, Any]:
@@ -76,19 +72,12 @@ def _parse_skill_file(path: Path) -> SkillMeta | None:
     tools_str = str(fm.get("allowed-tools", ""))
     allowed_tools = tools_str.split() if tools_str else []
 
-    triggers_raw = fm.get("triggers", [])
-    if isinstance(triggers_raw, list):
-        triggers = [str(t).strip().lower() for t in triggers_raw if str(t).strip()]
-    else:
-        triggers = []
-
     return SkillMeta(
         name=name,
         description=description,
         path=path,
         disable_model_invocation=disable_model,
         allowed_tools=allowed_tools,
-        triggers=triggers,
     )
 
 
@@ -179,34 +168,6 @@ class SkillRegistry:
         except (OSError, UnicodeDecodeError):
             return None
         return _extract_body(text)
-
-    def match(self, user_input: str) -> list[SkillMeta]:
-        if len(user_input) > MAX_INPUT_FOR_TRIGGERS:
-            return []
-        lower = user_input.lower()
-        matched: list[SkillMeta] = []
-        for meta in self._skills.values():
-            if not meta.triggers:
-                continue
-            if any(t in lower for t in meta.triggers):
-                matched.append(meta)
-                if len(matched) >= MAX_AUTO_SKILLS:
-                    break
-        return matched
-
-    def enrich_prompt(self, user_input: str) -> str:
-        matched = self.match(user_input)
-        if not matched:
-            return user_input
-        parts = [user_input]
-        for meta in matched:
-            content = self.load_content(meta.name)
-            if not content:
-                continue
-            if len(content) > MAX_SKILL_CHARS:
-                content = content[:MAX_SKILL_CHARS] + "\n...(截断)"
-            parts.append(f"\n---\n[自动加载 skill: {meta.name}]\n{content}")
-        return "".join(parts)
 
     def build_listing(self, include_model_disabled: bool = True, verbose: bool = False) -> str:
         skills = self.list_skills(include_model_disabled)

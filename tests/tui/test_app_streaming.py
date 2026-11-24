@@ -169,8 +169,8 @@ def test_memory_notices_shown_and_drained():
     assert agent.memory_notices == []  # 展示后清空，不重复提示
 
 
-def test_diff_text_not_dimmed_true_white():
-    """⎿ 前缀的 dim 不得污染 diff 文字（整行基础样式 dim 会把 #ffffff 压成灰——三轮发灰的真凶）。"""
+def test_diff_text_not_dimmed():
+    """⎿ 前缀的 dim 不得污染 diff 文字（整行基础样式 dim 会把颜色压成灰——三轮发灰的真凶）。"""
     events = (
         [ToolCallStart(tool_name="edit_file", arguments={
             "path": "x.py", "old_string": "def hello():", "new_string": "def greet():",
@@ -183,9 +183,10 @@ def test_diff_text_not_dimmed_true_white():
     tui.console = Console(file=buf, force_terminal=True, width=100, color_system="truecolor")
     asyncio.run(tui._handle_agent_response(_FakeAgent(events), "q"))
     raw = buf.getvalue()
-    # truecolor 纯白前景码必须出现在 diff 行（38;2;255;255;255），且带背景色块（48;2;）
-    assert "38;2;255;255;255" in raw
-    assert "48;2;" in raw
+    # diff 行的 SGR 只能是亮绿/亮红前景本身（2026-11-20 用户选定的无底色方案）——混进 dim（参数 2）就会是
+    # \x1b[2;38;2;… 而不是下面这样直接起头
+    assert "\x1b[38;2;51;255;51m+def greet" in raw
+    assert "\x1b[38;2;255;51;51m-def hello" in raw
 
 
 def test_block_spacing_at_most_one_blank_line():

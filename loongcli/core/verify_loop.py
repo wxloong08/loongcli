@@ -1,10 +1,13 @@
+"""验证提醒：改了代码、收尾前没有通过的测试，就提醒模型验证一次。
+
+只提醒、不重试。2026-11-15 复盘全部会话里的 5 次验证轮：「改了不测就收尾」真实出现过 1 次（提醒后模型补跑测试
+并加了回归断言）；「测试失败还报通过」0 次——5 次真实测试失败都是模型自己看到、自己修好的。原先「判定失败 →
+自动重试最多 3 轮」的机制没有一次真实收益，却靠启发式判失败，误判一次就多跑一轮并注入一条假的失败消息，故删除。
+"""
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
-
-MAX_VERIFY_ROUNDS = 3
 
 _CODE_EXTENSIONS = frozenset({
     ".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs",
@@ -19,125 +22,80 @@ def filter_code_files(files: list[str]) -> list[str]:
 
 
 _EXIT_CODE_RE = re.compile(r"\[exit code: (\d+)")
-_PYTEST_PASSED_RE = re.compile(r"(\d+) passed")
-_PYTEST_FAILED_RE = re.compile(r"(\d+) failed")
+# 测试命令识别。解释器部分不做要求：真机上常是带路径的 venv python.exe，甚至是 shell 变量
+# （`$VENV -m unittest discover`），所以按「-m pytest / -m unittest」认，不按 `python` 这个词认。
 _TEST_CMD_RE = re.compile(
-    r"(?:^|&&|\|\||[;|])\s*(?:python\s+-m\s+)?pytest\b|(?:npm|go|cargo|make)\s+test\b",
+    r"(?:^|&&|\|\||[;|])\s*pytest\b"
+    r"|(?:^|\s)-m\s+(?:pytest|unittest)\b"
+    r"|(?:npm|go|cargo|make)\s+test\b",
     re.IGNORECASE,
 )
 
+# 测试框架自己打印的总结行。测试命令常接 `| tail`，管道的退出码是 tail 的（恒为 0），只看退出码会把
+# 失败当成通过——2026-11-15 dogfooding 三轮里 33 次 unittest 调用有 26 次接了管道。
+_UNITTEST_FAILED_RE = re.compile(r"^FAILED \(", re.MULTILINE)
+_UNITTEST_RAN_RE = re.compile(r"^Ran \d+ tests? in ", re.MULTILINE)
+_UNITTEST_OK_RE = re.compile(r"^OK\b", re.MULTILINE)
+_NO_TESTS_RAN_RE = re.compile(r"\bno tests ran\b", re.IGNORECASE)
+# pytest 计数：`3 failed, 977 passed in 90.70s`、`1 error in 0.1s`；xfailed/xpassed 因前缀 x 不会命中
+_PYTEST_COUNT_RE = re.compile(r"(\d+) (passed|failed|errors?)\b")
+
 
 def is_test_command(command: str) -> bool:
+    """命令是否在跑测试。认不出的自定义测试脚本（如 `python test_matching.py`）最多多换来一次提醒。"""
     return bool(_TEST_CMD_RE.search(command))
 
 
+def _pytest_counts(output: str) -> dict[str, int] | None:
+    """取最后一行 pytest 计数总结；没有则返回 None。"""
+    for line in reversed(output.splitlines()):
+        found = _PYTEST_COUNT_RE.findall(line)
+        if found:
+            counts = {"passed": 0, "failed": 0, "error": 0}
+            for n, kind in found:
+                counts["error" if kind.startswith("error") else kind] += int(n)
+            return counts
+    return None
+
+
 def detect_test_failure(shell_output: str) -> bool:
-    """Determine if shell output indicates test failure.
+    """判断一次测试命令的输出是否表示失败。
 
-    Handles false positives: PowerShell returns exit code 1 when pytest
-    prints deprecation warnings to stderr, even when all tests pass.
+    先看测试框架自己的总结行——它不受管道退出码影响，也覆盖了 PowerShell 的误报（pytest 往 stderr
+    打弃用警告时退出码为 1，但总结行全通过）。找不到总结行（输出被 head 截掉、非 Python 测试）才看退出码。
     """
+    if _UNITTEST_FAILED_RE.search(shell_output) or _NO_TESTS_RAN_RE.search(shell_output):
+        return True
+    counts = _pytest_counts(shell_output)
+    if counts is not None:
+        return counts["failed"] > 0 or counts["error"] > 0
+    if _UNITTEST_RAN_RE.search(shell_output) and _UNITTEST_OK_RE.search(shell_output):
+        return False
     m = _EXIT_CODE_RE.search(shell_output)
-    if not m:
-        return False
-    exit_code = int(m.group(1))
-    if exit_code == 0:
-        return False
-
-    passed = _PYTEST_PASSED_RE.search(shell_output)
-    failed = _PYTEST_FAILED_RE.search(shell_output)
-    if passed and not failed:
-        return False
-    if passed and failed and int(failed.group(1)) == 0:
-        return False
-
-    return True
+    return bool(m) and int(m.group(1)) != 0
 
 
-@dataclass
-class VerifyState:
-    """Tracks verification progress within a single agent run."""
-    changed_files: list[str] = field(default_factory=list)
-    test_command: str | None = None
-    round: int = 0
-    last_error: str | None = None
-    test_failed: bool = False
-
-    @property
-    def is_active(self) -> bool:
-        return self.round > 0 and self.round <= MAX_VERIFY_ROUNDS
-
-    @property
-    def is_exhausted(self) -> bool:
-        return self.round > MAX_VERIFY_ROUNDS
-
-    def start(self, changed_files: list[str], test_command: str | None) -> None:
-        self.changed_files = list(changed_files)
-        self.test_command = test_command
-        self.round = 1
-        self.last_error = None
-        self.test_failed = False
-
-    def reset(self) -> None:
-        self.changed_files.clear()
-        self.test_command = None
-        self.round = 0
-        self.last_error = None
-        self.test_failed = False
-
-
-def build_verify_prompt(
-    changed_files: list[str],
-    test_command: str | None,
-    round_number: int,
-    last_error: str | None = None,
-) -> str:
-    """Build the verification prompt injected into the conversation.
-
-    Round 1: initial verification request
-    Round 2+: retry with previous error context
-    """
+def build_verify_prompt(changed_files: list[str], test_command: str | None) -> str:
+    """生成注入对话的验证提醒（`## 验证` 开头：TUI 按这个前缀把它渲染成系统提示，不当用户消息）。"""
     files_list = "\n".join(f"- {f}" for f in changed_files) if changed_files else "(unknown)"
-
-    if round_number == 1:
-        lines = [
-            "## 验证",
+    lines = [
+        "## 验证",
+        "",
+        f"本轮修改了 {len(changed_files)} 个文件，收尾前还没有通过的测试:",
+        files_list,
+        "",
+    ]
+    if test_command:
+        lines += [
+            f"项目测试命令: `{test_command}`",
             "",
-            f"本轮修改了 {len(changed_files)} 个文件:",
-            files_list,
+            "请用 Shell 工具运行它；失败就读报错、修复后再跑一次，然后报告结果。",
         ]
-        if test_command:
-            lines.extend([
-                "",
-                f"项目测试命令: `{test_command}`",
-                "",
-                f"请用 Shell 工具运行: `{test_command}`",
-                "如果测试失败，分析报错并修复代码，然后重新验证。",
-                f"最多 {MAX_VERIFY_ROUNDS} 轮，若仍失败则报告具体原因。",
-            ])
-        else:
-            lines.extend([
-                "",
-                "未检测到项目测试命令。请自行判断如何验证修改是否正确：",
-                "- 检查项目文档（LOONG.md）中是否有测试说明",
-                "- 用 Shell 工具运行你认为合适的验证命令",
-                "- 至少执行一次验证再报告完成",
-                f"最多 {MAX_VERIFY_ROUNDS} 轮，若仍失败则报告具体原因。",
-            ])
     else:
-        lines = [
-            f"## 验证 — 第 {round_number} 轮重试",
-            "",
-            f"上一轮验证{'失败' if last_error else '未通过'}。",
+        lines += [
+            "未检测到项目测试命令。请自行判断如何验证修改是否正确：",
+            "- 检查项目文档（LOONG.md）中是否有测试说明",
+            "- 用 Shell 工具运行你认为合适的验证命令",
+            "验证后报告结果；无法验证就明确说出来，不要假装成功。",
         ]
-        if last_error:
-            # Truncate long error messages
-            truncated = last_error[:3000] + ("..." if len(last_error) > 3000 else "")
-            lines.append(f"```\n{truncated}\n```")
-        lines.extend([
-            "",
-            "请分析失败原因，修复代码，然后重新运行验证。",
-            f"剩余尝试次数: {MAX_VERIFY_ROUNDS - round_number + 1}",
-        ])
-
     return "\n".join(lines)

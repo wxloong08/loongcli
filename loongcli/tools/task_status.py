@@ -32,8 +32,7 @@ class TaskStatusTool(Tool):
 
     async def execute(self, task_id: str) -> str:
         info = self._task_manager.get_status(task_id)
-        # 自管预算（ToolResultManager 对本工具豁免）：入口一刀切会让重调返回同样的
-        # 截断结果，"重新调用工具"的提示在这里是死循环——截断须附 trace 指针。
+        # 自管预算：重调返回的是同一份结果，「重新调用」在这里是死循环——截断须附 trace 指针。
         result = info.get("result")
         if isinstance(result, str) and result:
             info["result"] = cap_task_result(

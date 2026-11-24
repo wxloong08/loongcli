@@ -79,3 +79,5 @@ loong-bench 不只是跑分，目标是系统性回答一个问题：**loongcli 
 - **任务规模受 API 成本限**：长程记忆测到 51K 上下文 / 10 次压缩，**不是百万级真满载**——绝对规模是受成本约束的近似。
 - **样本仍偏小**：多数 cell n=3–5，方差大，结论是趋势性的而非统计严谨。完整化的第一步就是加大重复次数。
 - **缺强模型对照**：当前只有 DeepSeek，无法用"强模型过、弱模型不过"区分模型瓶颈 vs harness 瓶颈。补一个强模型 profile（或用同模型的能力消融）是 oracle 升级的关键。
+- **git 历史泄露未封死**：worktree 用 `--detach` 挂在 base（父 commit）上，默认 `git log` 视角干净；但 worktree 与主仓库共享同一 `.git` 对象库，agent 若跑 `git log --all` / `git show <fix-sha>` 仍能翻到 fix commit 抄答案。隔离 HOME 封的是记忆 recall 泄题，**不封 git 历史泄题**。要封死需改用 `git archive <parent>` 导出无历史的文件树、或浅克隆钉在 parent，代价是每题拷一份代码（换掉 worktree 共享对象库的建树速度）。这是「已知洞、评估后暂不补」——**补的前提是先测出 agent 真会这么做**，而这又卡在下一条。
+- **只存聚合指标、不存轨迹**：`results/*.jsonl` 只记 steps/usage/cost，**不记 agent 的完整 tool_calls**。后果：一道题失败了无法回溯它为什么失败（只知道「5 步、未解决」），评测能算分、不能 debug；也因此无法回答上一条「agent 有没有 `git log --all`」。**下一步（评测增强，不急）：run.py 落盘完整 tool_calls**，让评测从「打分器」升级成「可 debug 的诊断器」——这同时解锁「agent 是否偷看 git 历史」的测量。

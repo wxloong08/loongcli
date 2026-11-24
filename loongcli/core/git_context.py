@@ -3,6 +3,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from loongcli.core.subproc import isolated_console_kwargs
+
 
 @dataclass
 class GitContext:
@@ -65,6 +67,8 @@ def _run(cmd: str, cwd: Path) -> str | None:
         result = subprocess.run(
             cmd, shell=True, cwd=str(cwd),
             capture_output=True, text=True, timeout=5,
+            # 不继承 stdin、不附着 TUI 控制台（见 core/subproc.py）
+            stdin=subprocess.DEVNULL, **isolated_console_kwargs(),
         )
         if result.returncode == 0:
             return result.stdout.strip()

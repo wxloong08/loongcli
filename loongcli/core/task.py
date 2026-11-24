@@ -12,10 +12,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# delegate 类结果预算：这些结果不可重放（重跑子代理非确定且烧钱），不能交给
-# ToolResultManager 的一刀切截断——其"重新调用工具"提示对 delegate 前提失效，
-# 2000 字符预览曾把 7 路子代理 37K 调研截到合成层近盲（2026-07-20 真实会话事故）。
-# 由 batch_delegate/task_status/wait_tasks 按此预算自行截断，附 trace 指针可恢复。
+# delegate 类结果预算：这些结果不可重放（重跑子代理非确定且烧钱），由 batch_delegate/
+# task_status/wait_tasks 按此预算自行截断，附 trace 指针可恢复（入口 ToolResultManager 只是
+# 60K 保险丝，正常碰不到）。来由：旧入口截断 8000 → 2000 预览曾把 7 路子代理 37K 调研截到
+# 合成层近盲（2026-07-20 真实会话事故）。
 BATCH_RESULT_BUDGET = 36000     # 一批结果的总预算，按任务数均摊
 MIN_TASK_RESULT_CAP = 2000      # 均摊下限：任务再多也保住可用的最小结果
 SINGLE_TASK_RESULT_CAP = 16000  # 单任务查询（task_status）的上限

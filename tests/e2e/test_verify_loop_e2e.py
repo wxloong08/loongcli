@@ -57,17 +57,17 @@ async def test_verify_loop_not_triggered_without_file_changes():
 
     done_events = [e for e in events if isinstance(e, AgentDone)]
     assert len(done_events) == 1
-    assert not agent._verify_state.is_active
+    assert not agent._verify_nudged
 
 
 @pytest.mark.asyncio
 async def test_system_prompt_includes_verify_section():
-    """The system prompt includes the verify loop section."""
+    """系统提示含验证段；只提醒不重试后，不再承诺「最多 3 轮」。"""
     from loongcli.core.prompts import get_system_prompt
 
     prompt = get_system_prompt(model="deepseek-v4-flash")
-    assert "验证循环" in prompt
-    assert "3 轮" in prompt
+    assert "# 验证" in prompt
+    assert "3 轮" not in prompt
 
 
 @pytest.mark.asyncio
@@ -86,9 +86,7 @@ async def test_agent_has_checkpoint_and_verify():
     )
 
     assert agent.checkpoint_manager is ckpt
-    assert agent._verify_state is not None
-    assert agent._verify_state.round == 0
-    assert not agent._verify_state.is_active
+    assert agent._verify_nudged is False
 
 
 @pytest.mark.asyncio
@@ -97,9 +95,8 @@ async def test_checkpoint_manager_wired_in_main():
     from loongcli.main import _async_main
     # Just verify imports work — don't actually run
     from loongcli.core.checkpoint import CheckpointManager
-    from loongcli.core.verify_loop import VerifyState, build_verify_prompt
+    from loongcli.core.verify_loop import build_verify_prompt
     from loongcli.core.test_discovery import discover_test_command
     assert CheckpointManager is not None
-    assert VerifyState is not None
     assert build_verify_prompt is not None
     assert discover_test_command is not None

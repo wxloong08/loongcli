@@ -70,9 +70,11 @@ _EXTRACT_PROMPT = """\
 
 
 class AutoExtractor:
-    """Post-turn memory extraction using a lightweight LLM call.
+    """Session-exit memory extraction using a lightweight LLM call.
 
-    Fires asynchronously after each conversation turn completes.
+    Fires once when the session exits (see main.py), NOT per-turn: only with
+    the full history in hand can durable cross-session facts be cleanly told
+    apart from in-session process noise (skill output / intermediate judgments).
     Non-blocking — failures are logged and silently ignored.
     """
 

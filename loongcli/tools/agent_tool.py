@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 
 from loongcli.tools.base import Tool, ToolRegistry
 from loongcli.tools.routing import AgentRole, filter_tools, COORDINATOR_ALLOWED
-from loongcli.core.task import TaskManager, TaskStatus as TS
+from loongcli.core.task import TaskManager, TaskStatus as TS, BATCH_RESULT_BUDGET, cap_task_result, trace_path_of
 from loongcli.core.agent import AgentLoop, AgentServices
-from loongcli.core.compact import Compactor
+from loongcli.core.compact import Compactor, model_context_window, SUMMARY_TOKEN_RESERVE
 from loongcli.security.permissions import PermissionChecker
 
 if TYPE_CHECKING:
@@ -155,7 +155,14 @@ class AgentTool(Tool):
             role = AgentRole.SUBAGENT
             max_iter = 30
 
-        compactor = Compactor(llm=self._sub_llm, threshold=16000)
+        # 压缩阈值与主 agent 同策略：模型上下文窗口 − 摘要预留，而非硬编码 16k。
+        # 16k 是历史遗留的裸常量（≈1M 模型的 1.6%），会让子代理在子任务中途就
+        # 反复压缩、把父代理依赖的细节摘掉——正是域 3 扇入精度想保住的东西。子代理
+        # 用同一个模型（sub_llm or llm），没有「小模型小阈值」的理由。拉到与主 agent
+        # 一致后，30 轮迭代实际够不着阈值 = 子代理跑完整个子任务不中途压缩，只在
+        # 极端巨型子任务时留一个安全阀（那次压缩仍归档进 trace，父代理可捞回）。
+        sub_threshold = max(0, model_context_window(self._sub_llm.model) - SUMMARY_TOKEN_RESERVE)
+        compactor = Compactor(llm=self._sub_llm, threshold=sub_threshold)
 
         # 继承父级的权限检查器（同 mode + 会话学习到的白名单），而非一律 SKIP：
         # 子代理绝不能绕过主 agent 所受的确认层，否则 delegate/提示注入就成了提权路径。
@@ -213,10 +220,13 @@ class AgentTool(Tool):
                 f"用 wait_tasks 或 task_status 获取结果。"
             )
 
+        # 结果自管截断：快子任务（auto <30s 完成）或 sync 会内联返回 task.result。
+        # 与 batch_delegate 同策略：cap_task_result 按预算截断并附 trace 指针
+        # （n=1，用整份 BATCH_RESULT_BUDGET）——重调 delegate = 重跑整个子代理，不能指望重调恢复。
         return json.dumps({
             "status": task.status.value,
             "task_id": task.id,
-            "result": task.result,
+            "result": cap_task_result(task.result or "", BATCH_RESULT_BUDGET, trace_path_of(task)),
         }, ensure_ascii=False)
 
     def _build_sub_registry(self, allowed_tools: list[str] | None) -> ToolRegistry:

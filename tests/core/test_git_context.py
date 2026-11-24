@@ -121,3 +121,33 @@ class TestPromptIntegration:
         from loongcli.core.prompts import get_system_prompt
         prompt = get_system_prompt(model="deepseek-v4-flash")
         assert "Git 仓库: 否" in prompt
+
+    def test_pinned_git_ctx_keeps_prompt_byte_stable(self, monkeypatch):
+        """传入 git_ctx 后系统提示词字节稳定——前缀缓存的承重不变量。
+
+        _rebuild_system_prompt 在计划执行期每轮触发。若环境段每次现采 git status，
+        agent 每改一个文件 dirty 清单就变 → messages[0] 变 → 前缀缓存连同其后的
+        全部对话历史一起作废。固定快照后这条链才断开。
+        """
+        from loongcli.core.prompts import get_system_prompt
+
+        calls: list[int] = []
+
+        def drifting_collect(cwd=None):
+            calls.append(1)
+            return GitContext(is_repo=True, branch=f"branch-{len(calls)}", main_branch="main")
+
+        monkeypatch.setattr("loongcli.core.prompts.collect_git_context", drifting_collect)
+
+        pinned = GitContext(is_repo=True, branch="pinned", main_branch="main")
+        first = get_system_prompt(model="deepseek-v4-flash", git_ctx=pinned)
+        second = get_system_prompt(model="deepseek-v4-flash", git_ctx=pinned)
+        assert first == second, "固定 git_ctx 后两次渲染必须字节一致"
+        assert calls == [], "传了 git_ctx 就不该再跑 git status"
+        assert "当前分支: pinned" in first
+
+        # 不传则保持旧行为（现采）——供一次性构建与测试使用
+        assert get_system_prompt(model="deepseek-v4-flash") != get_system_prompt(
+            model="deepseek-v4-flash"
+        )
+        assert len(calls) == 2

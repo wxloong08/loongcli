@@ -193,7 +193,7 @@ class TestCoordinatorRouting:
         names = {s["function"]["name"] for s in reg.get_tool_schemas()}
         assert "write_file" not in names
         assert "edit_file" not in names
-        assert "shell" not in names
+        # shell 在协调者里只读（执行层闸），替代不再注册的 glob/grep——见 TestReadOnlyShellGate
         assert "memorize" not in names
         assert "plan" not in names
 

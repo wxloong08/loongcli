@@ -25,6 +25,7 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 # import 名 → 发行包名，只在两者不一致时才需要登记。
 IMPORT_TO_DIST = {
     "yaml": "pyyaml",
+    "PIL": "pillow",
 }
 
 
@@ -45,8 +46,33 @@ def _declared_distributions() -> set[str]:
     return declared
 
 
-def _third_party_imports() -> dict[str, set[str]]:
-    """包内所有顶层非标准库 import → 出现位置集合。"""
+def _declared_optional() -> set[str]:
+    """pyproject [project.optional-dependencies] 里各 extra 的发行包名（已归一化）。"""
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    declared: set[str] = set()
+    for specs in data.get("project", {}).get("optional-dependencies", {}).values():
+        for spec in specs:
+            name = re.split(r"[\s<>=!~\[;]", spec.strip(), maxsplit=1)[0]
+            if name:
+                declared.add(_normalize(name))
+    return declared
+
+
+def _catches_import_error(handler: ast.ExceptHandler) -> bool:
+    names = {"ImportError", "ModuleNotFoundError"}
+    t = handler.type
+    if isinstance(t, ast.Name):
+        return t.id in names
+    if isinstance(t, ast.Tuple):
+        return any(isinstance(e, ast.Name) and e.id in names for e in t.elts)
+    return False
+
+
+def _third_party_imports(optional: bool = False) -> dict[str, set[str]]:
+    """包内非标准库 import → 出现位置集合。
+
+    optional=False：必需的 import（没装就崩）；optional=True：包在 try/except ImportError 里的可选 import
+    （没装时走降级分支，如 Alt+V 贴图的 Pillow）——它们只需声明在 optional-dependencies。"""
     stdlib = set(sys.stdlib_module_names)
     found: dict[str, set[str]] = {}
     for path in PACKAGE_DIR.rglob("*.py"):
@@ -54,8 +80,15 @@ def _third_party_imports() -> dict[str, set[str]]:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
         except SyntaxError:
             continue
+        guarded: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Try) and any(_catches_import_error(h) for h in node.handlers):
+                for stmt in node.body:
+                    guarded.update(id(n) for n in ast.walk(stmt))
         names: list[str] = []
         for node in ast.walk(tree):
+            if (id(node) in guarded) != optional:
+                continue
             if isinstance(node, ast.Import):
                 names.extend(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
@@ -84,6 +117,18 @@ def test_all_direct_imports_are_declared():
         + "\n".join(f"  {m}  ({', '.join(sorted(f))})" for m, f in sorted(missing.items()))
         + "\n\n补法：在 [project].dependencies 里加一条（名字不是 import 名时同步更新 IMPORT_TO_DIST）。"
     )
+
+
+def test_optional_imports_are_declared_as_extras():
+    """try/except ImportError 里的可选 import：没装不崩，但也得在 optional-dependencies 里声明，装法有据可查。"""
+    declared = _declared_distributions() | _declared_optional()
+    missing = {m: f for m, f in _third_party_imports(optional=True).items()
+               if _normalize(IMPORT_TO_DIST.get(m, m)) not in declared}
+    assert not missing, (
+        "以下可选包（try/except ImportError 里 import）没写进 pyproject 的 optional-dependencies：\n"
+        + "\n".join(f"  {m}  ({', '.join(sorted(f))})" for m, f in sorted(missing.items()))
+    )
+    assert "PIL" in _third_party_imports(optional=True), "自检：扫描应能看到 clipboard_image.py 里可选的 PIL"
 
 
 def test_dependency_check_actually_detects_httpx():
