@@ -26,6 +26,14 @@ class TestBuildVerifyPrompt:
         assert "src/foo.py" in prompt
         assert "未检测到项目测试命令" in prompt
 
+    def test_lists_files_not_as_failing_tests(self):
+        """回归（Harbor 基线 cancel-async）：旧措辞「收尾前还没有通过的测试:」后面列的是改动文件，
+        模型把它读成这些测试没通过。"""
+        for cmd in ("pytest", None):
+            prompt = build_verify_prompt(changed_files=["a.py"], test_command=cmd)
+            assert "没有通过的测试" not in prompt
+            assert "改动的文件" in prompt
+
     def test_no_retry_wording(self):
         """只提醒一次：提示里不再有轮次、重试次数之类的说法。"""
         for cmd in ("pytest", None):
@@ -465,3 +473,19 @@ async def test_e2e_code_edit_after_passing_test_nudges():
         {unit: ["Ran 3 tests in 0.1s\n\nOK"]},
     )
     assert len(_verify_prompts(agent)) == 1
+
+    def test_scratch_files_in_temp_dir_excluded(self, tmp_path, monkeypatch):
+        """回归（Harbor 基线 protein-assembly）：临时目录里、工作目录外的草稿脚本不算交付物。"""
+        import tempfile
+        from pathlib import Path
+        project = tmp_path / "proj"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        scratch = str(Path(tempfile.gettempdir()) / "loongcli-scratch-probe" / "design.py")
+        assert filter_code_files([scratch, "src/main.py"]) == ["src/main.py"]
+
+    def test_project_inside_temp_dir_still_counted(self, tmp_path, monkeypatch):
+        """工作目录本身在临时目录里（如 tmp_path）时，项目里的文件照常算。"""
+        monkeypatch.chdir(tmp_path)
+        inside = str(tmp_path / "pkg" / "mod.py")
+        assert filter_code_files([inside, "rel.py"]) == [inside, "rel.py"]

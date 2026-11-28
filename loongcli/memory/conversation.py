@@ -11,8 +11,14 @@ from loongcli.core.messages import message_text
 
 
 def _path_to_slug(project_dir: Path) -> str:
-    raw = str(project_dir.resolve())
-    raw = re.sub(r'[:\\]', '-', raw)
+    return _slug_from_str(str(project_dir.resolve()))
+
+
+def _slug_from_str(raw: str) -> str:
+    """路径字符串 → 单段目录名。`/` 也要替换：曾只换 `:` 和 `\\`（Windows 分隔符），Linux/macOS 上 `/app`
+    原样留着开头的 `/`，`projects_root / "/app"` 按 pathlib 语义丢掉左边，会话和记忆直接写进了用户项目目录
+    （/app/sessions、/app/memory）。Windows 解析出的路径不含 `/`，已有的 slug 不变。"""
+    raw = re.sub(r'[:\\/]', '-', raw)
     raw = re.sub(r'-+', '-', raw)
     return raw.strip('-')
 

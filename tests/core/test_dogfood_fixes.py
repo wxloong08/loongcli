@@ -248,6 +248,6 @@ async def test_verify_prompt_lists_each_modified_file_once():
         if m["role"] == "user" and isinstance(m["content"], str) and m["content"].startswith("## 验证")
     ]
     assert len(prompts) == 1
-    assert "本轮修改了 2 个文件" in prompts[0]
+    assert "本轮改动了 2 个代码文件" in prompts[0]
     assert prompts[0].count("scripts/setup_env.py") == 1
     assert prompts[0].count("loongcli/core/agent.py") == 1

@@ -167,3 +167,18 @@ class TestFromConfig:
         router = ModelRouter.from_config(cfg)
         assert router.client("main").model == "deepseek-v4-pro"
         assert router.client("utility").model == "deepseek-v4-flash"
+
+
+def test_current_model_names_get_real_context_window():
+    # deepseek-flash 是现行正式名：曾查不到、落到默认 128K，压缩提前约 8 倍
+    from loongcli.core.provider import context_window
+    assert context_window("deepseek-flash") == 1_048_576
+    assert context_window("deepseek-v4-flash") == 1_048_576
+    assert context_window("gemini-4-neon") == 1_048_576
+    assert context_window("gemini-4-carbon") == 1_048_576
+
+
+def test_current_model_names_have_pricing():
+    from loongcli.core.cost import get_pricing
+    assert get_pricing("deepseek-flash") == get_pricing("deepseek-v4-flash")
+    assert get_pricing("gemini-4-neon") is not None

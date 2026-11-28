@@ -1053,14 +1053,14 @@ class AgentLoop:
     ) -> AsyncIterator:
         # 带图但模型未开视觉 → 立刻拒绝，连文件都不读（首要配置错误，早失败）。
         if images and not getattr(self.llm, "vision", False):
-            yield AgentDone(content=NO_VISION_MSG)
+            yield AgentDone(content=NO_VISION_MSG, failed=True)
             return
         # 有图则把 user 消息构造成多模态 list content；图片加载失败给明确错误。
         if images:
             try:
                 content = build_user_content(user_input, images)
             except (FileNotFoundError, ValueError, OSError) as e:
-                yield AgentDone(content=f"⚠ 图片加载失败：{e}")
+                yield AgentDone(content=f"⚠ 图片加载失败：{e}", failed=True)
                 return
         else:
             content = user_input
@@ -1087,7 +1087,7 @@ class AgentLoop:
         # 视觉门控兜底：消息里含图片（含未来 read_file 等其他来源）但模型未开视觉
         # → 明确拒绝，不发任何请求（放在 recall/compact 之前，别把图喂给瞎的模型）。
         if has_images(self.messages) and not getattr(self.llm, "vision", False):
-            yield AgentDone(content=NO_VISION_MSG)
+            yield AgentDone(content=NO_VISION_MSG, failed=True)
             return
 
         await self._inject_recall(user_input)
@@ -1136,7 +1136,7 @@ class AgentLoop:
                     iteration=iteration, error=str(e),
                     duration_ms=int((time.monotonic() - llm_t0) * 1000),
                 )
-                yield AgentDone(content=f"⚠ LLM 调用失败: {e}")
+                yield AgentDone(content=f"⚠ LLM 调用失败: {e}", failed=True)
                 return
 
             response = collector.response
@@ -1186,7 +1186,7 @@ class AgentLoop:
                         f"⚠ 模型连续两次只输出思考、未产生正文回复"
                         f"（finish_reason={response.finish_reason or '未知'}，"
                         f"thinking {response.reasoning_tokens} tokens）。请重试或换个问法。"
-                    ))
+                    ), failed=True)
                     return
 
                 self.messages.append({"role": "assistant", "content": response.content})
@@ -1206,8 +1206,8 @@ class AgentLoop:
                             test_command=test_cmd, changed_files=len(code_files),
                         )
                         prompt = build_verify_prompt(
-                            # 去重保序：同一文件本回合改 N 次只列一次（真机：setup_env.py 列了 3 遍）
-                            changed_files=list(dict.fromkeys(self._files_modified_this_turn)),
+                            # 只列代码文件（已去重保序：同一文件本回合改 N 次只列一次，真机 setup_env.py 列过 3 遍）
+                            changed_files=code_files,
                             test_command=test_cmd,
                         )
                         self.messages.append({"role": "user", "content": prompt})

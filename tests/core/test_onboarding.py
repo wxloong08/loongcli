@@ -39,30 +39,43 @@ class TestOnboarding:
 
         data = _config_data(fake_home)
         assert data["providers"]["deepseek"]["api_key"] == "sk-test123"
-        # 默认主力 deepseek-v4-pro（用户改定），utility 仍走便宜档 flash
+        # 默认主力 deepseek-flash（用户 11-23：比 v4-pro 好），原生支持看图 → 向导写上 vision
         assert data["roles"]["main"] == {
-            "provider": "deepseek", "model": "deepseek-v4-pro",
-            "thinking": True, "reasoning_effort": "max",
+            "provider": "deepseek", "model": "deepseek-flash",
+            "thinking": True, "reasoning_effort": "max", "vision": True,
         }
-        assert data["roles"]["utility"]["model"] == "deepseek-v4-flash"
+        assert data["roles"]["sub"]["vision"] is True
+        assert data["roles"]["utility"]["model"] == "deepseek-flash"
         # 遗留顶层字段同步写（无 roles 时的回退路径）
         assert data["api_key"] == "sk-test123"
         # 返回的 Config 已加载新结构
         assert "deepseek" in result.providers
-        assert result.role_bindings["main"].model == "deepseek-v4-pro"
+        assert result.role_bindings["main"].model == "deepseek-flash"
+        assert result.role_bindings["main"].vision is True
+
+    def test_deepseek_v4_pro_has_no_vision(self, fake_home):
+        """官方：deepseek-v4-pro 不支持 Vision，不能写 vision=true（否则发图会被拒）。"""
+        console = Console(quiet=True)
+        with patch("builtins.input", side_effect=["", "sk-p", "deepseek-v4-pro", ""]):
+            _onboarding(console, Config.load())
+        data = _config_data(fake_home)
+        assert data["roles"]["main"]["model"] == "deepseek-v4-pro"
+        assert "vision" not in data["roles"]["main"]
 
     def test_qwen_provider(self, fake_home):
         console = Console(quiet=True)
-        with patch("builtins.input", side_effect=["2", "sk-q", "", ""]):
+        # 顺序：供应商、key、模型、主力看图（y）、第二供应商
+        with patch("builtins.input", side_effect=["2", "sk-q", "", "y", ""]):
             _onboarding(console, Config.load())
         data = _config_data(fake_home)
         assert "dashscope" in data["providers"]["qwen"]["base_url"]
         assert data["roles"]["main"]["model"] == "qwen3.7-plus"
+        assert data["roles"]["main"]["vision"] is True
 
     def test_custom_provider_asks_name_url_model(self, fake_home):
         console = Console(quiet=True)
         with patch("builtins.input", side_effect=[
-            "3", "glm", "https://open.bigmodel.cn/api/paas/v4", "sk-glm", "glm-5", "",
+            "3", "glm", "https://open.bigmodel.cn/api/paas/v4", "sk-glm", "glm-5", "", "",  # 看图默认 N
         ]):
             _onboarding(console, Config.load())
         data = _config_data(fake_home)

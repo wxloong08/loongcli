@@ -144,7 +144,8 @@ def _build_prompt(args) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
-async def _run_noninteractive(agent: AgentLoop, prompt: str, args, mcp: MCPManager):
+async def _run_noninteractive(agent: AgentLoop, prompt: str, args, mcp: MCPManager) -> int:
+    """非交互执行一次任务，返回进程退出码：执行失败（见 AgentDone.failed）为 1，否则 0。"""
     from loongcli.core.events import TextDelta, ThinkingDelta, ToolCallStart, ToolCallResult, AgentDone, ConfirmRequest
 
     stderr = Console(stderr=True, no_color=True)
@@ -155,6 +156,7 @@ async def _run_noninteractive(agent: AgentLoop, prompt: str, args, mcp: MCPManag
     buffer = ""
     thinking_buffer = ""
     tool_log: list[dict] = []
+    done = None
 
     async for event in agent.run_stream(prompt, images=args.image):
         if isinstance(event, ThinkingDelta):
@@ -182,10 +184,23 @@ async def _run_noninteractive(agent: AgentLoop, prompt: str, args, mcp: MCPManag
             event.future.set_result(False)
 
         elif isinstance(event, AgentDone):
-            pass
+            done = event
+
+    # 没在流式阶段上过屏的终局消息（LLM 调用失败、达到迭代上限等）此前在这里被静默丢掉：
+    # 失败的写 stderr / JSON 的 error 字段；其余（上限提示）照常并入正文
+    note = done.content if done and not done.displayed else ""
+    failed = bool(done and done.failed)
+    if note and not failed:
+        note = ("\n" if buffer and not buffer.endswith("\n") else "") + note
+        buffer += note
+        if stream and not output_json:
+            sys.stdout.write(note)
+            sys.stdout.flush()
 
     if output_json:
         result = {"content": buffer}
+        if failed:
+            result["error"] = note or "执行失败"
         if thinking_buffer:
             result["reasoning_content"] = thinking_buffer
         if verbose:
@@ -201,8 +216,11 @@ async def _run_noninteractive(agent: AgentLoop, prompt: str, args, mcp: MCPManag
     else:
         if not buffer.endswith("\n"):
             sys.stdout.write("\n")
+    if failed and not output_json:
+        sys.stderr.write((note or "执行失败") + "\n")
 
     await mcp.disconnect_all()
+    return 1 if failed else 0
 
 
 def _brief(args: dict) -> str:
@@ -228,8 +246,9 @@ def _onboarding(console: Console, cfg: Config) -> Config:
     console.print()
 
     menu = {
+        # 默认 deepseek-flash：2026-11 起是 DeepSeek 最好的模型（用户 11-23 纠正，比 v4-pro 好），且原生支持看图
         "1": ("deepseek", "DeepSeek（推荐）", "https://api.deepseek.com",
-              "deepseek-v4-pro", "https://platform.deepseek.com/api_keys"),
+              "deepseek-flash", "https://platform.deepseek.com/api_keys"),
         "2": ("qwen", "Qwen / 阿里云百炼", "https://dashscope.aliyuncs.com/compatible-mode/v1",
               "qwen3.7-plus", "https://bailian.console.aliyun.com/"),
         "3": ("", "其他 OpenAI 兼容端点", "", "", ""),
@@ -257,12 +276,21 @@ def _onboarding(console: Console, cfg: Config) -> Config:
         else:
             model = input("主力模型: ").strip() or "deepseek-v4-pro"
 
+        # 主力能否看图。代码层只认显式配置、不按模型名猜（见 RoleBinding.vision），所以向导要替用户写上：
+        # DeepSeek 按官方 Models & Pricing 页（2026-11 核实）——deepseek-flash 支持 Vision、deepseek-v4-pro 不支持；
+        # 其他供应商问一句。此前向导从不写 vision，新用户默认就看不了图。
+        if name == "deepseek":
+            vision = model.startswith("deepseek-flash")
+        else:
+            vision = input("主力模型支持看图？[y/N]: ").strip().lower() in ("y", "yes")
+        vflag = {"vision": True} if vision else {}
+
         providers = {name: {"api_key": api_key, "base_url": base_url}}
-        # utility 走便宜档：DeepSeek 用 flash；其他供应商与主力同模型
-        utility_model = "deepseek-v4-flash" if name == "deepseek" else model
+        # utility 走便宜档：DeepSeek 用 flash（正式名；旧名 deepseek-v4-flash 已退役、仅转发）；其他供应商与主力同模型
+        utility_model = "deepseek-flash" if name == "deepseek" else model
         roles = {
-            "main": {"provider": name, "model": model, "thinking": True, "reasoning_effort": "max"},
-            "sub": {"provider": name, "model": model, "thinking": False},
+            "main": {"provider": name, "model": model, "thinking": True, "reasoning_effort": "max", **vflag},
+            "sub": {"provider": name, "model": model, "thinking": False, **vflag},
             "utility": {"provider": name, "model": utility_model, "thinking": False},
         }
 
@@ -270,7 +298,7 @@ def _onboarding(console: Console, cfg: Config) -> Config:
         if extra in ("y", "yes"):
             menu2 = {
                 "1": ("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.7-plus"),
-                "2": ("deepseek", "https://api.deepseek.com", "deepseek-v4-pro"),
+                "2": ("deepseek", "https://api.deepseek.com", "deepseek-flash"),  # v4-pro 不支持看图
                 "3": ("", "", ""),
             }
             console.print("  1. Qwen（视觉推荐）  2. DeepSeek  3. 自定义")
@@ -615,9 +643,10 @@ async def _async_main():
         "noninteractive": noninteractive,
     })
 
+    exit_code = 0
     try:
         if noninteractive:
-            await _run_noninteractive(agent, prompt, args, mcp)
+            exit_code = await _run_noninteractive(agent, prompt, args, mcp)
         else:
             tui = TUI(memory=memory, config=cfg, skill_registry=skill_registry, plan_store=plan_store)
             status_parts = [f"model: {llm.model}"]
@@ -713,6 +742,7 @@ async def _async_main():
         if not noninteractive:
             await mcp.disconnect_all()
         await lsp_manager.shutdown_all()
+    return exit_code
 
 
 def _run_web():
@@ -752,7 +782,7 @@ def main():
     if sys.argv[1:2] == ["web"]:
         _run_web()
         return
-    asyncio.run(_async_main())
+    sys.exit(asyncio.run(_async_main()) or 0)
 
 
 if __name__ == "__main__":

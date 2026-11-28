@@ -25,6 +25,12 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
+# 只打 loongcli 包：不限定时 tests/、docs/ 等目录也会被当成顶层包装进 site-packages
+include = ["loongcli*"]
+
+[tool.setuptools.package-data]
+# Web UI 静态资源：不声明时非 editable 安装缺这几个文件，/web 打不开
+loongcli = ["web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

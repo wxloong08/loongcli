@@ -131,3 +131,29 @@ def test_save_is_atomic_no_tmp_left(tmp_path):
     assert leftover == []
     # 内容仍可正常读回
     assert store.load(store.session_id)["messages"][-1]["content"] == "hi again"
+
+
+# ── slug 跨平台：Linux/macOS 路径的 `/` 也要替换 ──
+
+from loongcli.memory.conversation import _slug_from_str  # noqa: E402
+
+
+def test_slug_posix_path_is_single_segment():
+    # 曾经 "/app" 原样成了 slug，projects_root / "/app" 直接变成 /app，会话写进用户项目目录
+    assert _slug_from_str("/app") == "app"
+    assert _slug_from_str("/home/u/my-proj") == "home-u-my-proj"
+    assert "/" not in _slug_from_str("/a/b/c")
+
+
+def test_slug_windows_path_unchanged():
+    # Windows 上已有的会话目录名不能变（否则历史会话全部「找不到」）
+    assert _slug_from_str(r"D:\HKUDS\loongcli") == "D-HKUDS-loongcli"
+    assert _slug_from_str(r"D:\dogfood\voice-input\runs\p4-2") == "D-dogfood-voice-input-runs-p4-2"
+
+
+def test_posix_sessions_dir_stays_under_projects_root(monkeypatch, tmp_path):
+    from loongcli.memory import conversation as c
+    monkeypatch.setattr(c, "_projects_root", lambda: tmp_path / "projects")
+    monkeypatch.setattr(c, "_path_to_slug", lambda p: c._slug_from_str("/app"))
+    d = c._project_sessions_dir()
+    assert d == tmp_path / "projects" / "app" / "sessions"

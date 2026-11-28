@@ -10,8 +10,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # deepseek-flash 是 2026-09 起的正式名（由 V4.1-Flash 承接）；旧名 deepseek-v4-flash 仍可用、同一模型。
+    # 曾只登记旧名：配置写正式名时查不到、落到默认 128K，压缩提前约 8 倍触发
+    "deepseek-flash": 1_048_576,
     "deepseek-v4-flash": 1_048_576,
     "deepseek-v4-pro": 1_048_576,
+    # Gemini 4 全系（argon/carbon/hydrogen/neon）统一 1M 上下文，前缀匹配
+    "gemini-4": 1_048_576,
     "gpt-4o": 128_000,
     "gpt-4o-mini": 128_000,
     "gpt-4.1": 1_048_576,

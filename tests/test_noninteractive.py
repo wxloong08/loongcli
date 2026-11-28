@@ -305,3 +305,66 @@ async def test_noninteractive_disconnects_mcp():
         await _run_noninteractive(agent, "hi", args, mcp)
 
     mcp.disconnect_all.assert_called_once()
+
+
+def _agent_with_stream(mock_stream):
+    llm = LLMClient(api_key="test")
+    llm.chat_stream = mock_stream
+    return AgentLoop(llm=llm, tool_registry=ToolRegistry(), permission_checker=PermissionChecker())
+
+
+async def _run_capture(agent, args):
+    mcp = MagicMock()
+    mcp.disconnect_all = AsyncMock()
+    out, err = StringIO(), StringIO()
+    with patch("loongcli.main.sys") as mock_sys:
+        mock_sys.stdout = out
+        mock_sys.stderr = err
+        code = await _run_noninteractive(agent, "hi", args, mcp)
+    return code, out.getvalue(), err.getvalue()
+
+
+async def _failing_stream(**kwargs):
+    raise RuntimeError("Error code: 402 - Insufficient Balance")
+    yield  # 让它成为异步生成器
+
+
+@pytest.mark.asyncio
+async def test_noninteractive_success_exit_zero():
+    async def ok(**kwargs):
+        for c in _make_text_chunks(["Hello"]):
+            yield c
+    code, out, err = await _run_capture(_agent_with_stream(ok), _make_args())
+    assert code == 0 and "Hello" in out and err == ""
+
+
+@pytest.mark.asyncio
+async def test_noninteractive_llm_failure_exit_nonzero_text():
+    """模型调用失败（余额不足）→ 退出码 1，失败原因写 stderr，不混进 stdout 正文。"""
+    code, out, err = await _run_capture(_agent_with_stream(_failing_stream), _make_args())
+    assert code == 1
+    assert "402" in err and "402" not in out
+
+
+@pytest.mark.asyncio
+async def test_noninteractive_llm_failure_json_error_field():
+    code, out, err = await _run_capture(_agent_with_stream(_failing_stream), _make_args(output_format="json"))
+    data = json.loads(out)
+    assert code == 1
+    assert "402" in data["error"]
+
+
+@pytest.mark.asyncio
+async def test_noninteractive_iteration_cap_note_shown_exit_zero():
+    """达到迭代上限不算执行失败（退出 0），但上限提示要出现在输出里，此前被静默丢弃。"""
+    agent = _agent_with_stream(_failing_stream)
+
+    async def fake_run_stream(prompt, images=None):
+        yield TextDelta(text="partial")
+        yield AgentDone(content="⚠ 已达到迭代上限（30轮），自动停止。")
+
+    agent.run_stream = fake_run_stream
+    code, out, err = await _run_capture(agent, _make_args(output_format="json"))
+    data = json.loads(out)
+    assert code == 0 and "error" not in data
+    assert data["content"].startswith("partial\n") and "迭代上限" in data["content"]

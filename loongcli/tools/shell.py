@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 from pathlib import Path
 from typing import NamedTuple
 from loongcli.tools.base import Tool
@@ -15,6 +16,47 @@ _GRACEFUL_WAIT = 3  # seconds to wait between terminate and kill
 # 单条流的内存上限：超限后仍持续读取（让子进程别因管道满而阻塞），但不再累积进
 # lines，防 `yes` 这类无限输出在超时窗口内把内存吃满。
 _MAX_STREAM_CHARS = 5_000_000
+# 单条命令超时上限（与 Claude Code 的 10 分钟同）：Harbor 基线里模型给一条命令传过 920 秒，
+# 而整题时限才 900 秒——一条命令吃光全部预算。更长的任务应后台运行并重定向输出。
+_MAX_TIMEOUT = 600
+# shell 本身退出后，再等多久把管道里剩余输出读完。超过仍不 EOF，说明命令里 `cmd &` 起的后台进程
+# 继承了输出管道——不再等它（否则一直挂到超时），照常返回。
+_DRAIN_AFTER_EXIT = 1.0
+_POLL_INTERVAL = 0.05
+_BACKGROUND_NOTE = (
+    "[命令已结束；它启动的后台进程仍占用输出管道，之后的输出不再收集（后台进程照常运行）。"
+    "需要它的日志请重定向，如 `cmd > /tmp/cmd.log 2>&1 &`]"
+)
+# 后台进程占着管道时，继续把输出读走丢弃（防管道写满让它阻塞）；持有引用防任务被回收
+_detached_drains: set[asyncio.Task] = set()
+
+
+async def _wait_exit(process, timeout: float) -> bool:
+    """等 shell 进程本身退出（不等管道）。
+
+    不能用 process.wait()：实测 Python 3.12 的 asyncio 要等全部管道关闭才返回，
+    后台孙进程占着管道时会一直挂住。returncode 在进程退出时就有值。
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while process.returncode is None:
+        if loop.time() >= deadline:
+            return False
+        await asyncio.sleep(_POLL_INTERVAL)
+    return True
+
+
+async def _drain_detached(readers: asyncio.Future, process) -> None:
+    try:
+        await readers
+    except BaseException:  # noqa: BLE001 — 包括退出时 asyncio.run 的取消
+        pass
+    finally:
+        # 在事件循环关闭前关掉管道：否则 transport 在循环关闭后被回收，打出
+        # 「Event loop is closed」traceback（Harbor 基线 query-optimize 实例）
+        transport = getattr(process, "_transport", None)
+        if transport is not None:
+            transport.close()
 
 
 class _WindowsJob:
@@ -219,7 +261,11 @@ class ShellTool(Tool):
             },
             "timeout": {
                 "type": "integer",
-                "description": "Timeout in seconds. Default: 120",
+                "description": (
+                    f"Timeout in seconds. Default: 120, maximum: {_MAX_TIMEOUT}. For longer jobs (servers, "
+                    "big builds), run them in the background with output redirected "
+                    "(`cmd > /tmp/cmd.log 2>&1 &`) and check the log in later calls."
+                ),
             },
         },
         "required": ["command"],
@@ -234,10 +280,12 @@ class ShellTool(Tool):
         self.is_posix = spec.is_posix
         self._progress_callback = None
 
-    async def _read_stream(self, stream, stream_name: str, lines: list[str]):
+    async def _read_stream(self, stream, stream_name: str, lines: list[str], state: dict | None = None):
         total = 0
         capped = False
         async for raw in stream:
+            if state is not None and state.get("detached"):
+                continue  # 工具已返回：只读走丢弃，不再累积、不再推进度
             line = raw.decode("utf-8", errors="replace").rstrip("\n").rstrip("\r")
             if total < _MAX_STREAM_CHARS:
                 lines.append(line)
@@ -255,8 +303,14 @@ class ShellTool(Tool):
         # `cd /d <路径>` 两参形式无合法含义，确定性改写零误伤；提示层已拦不住。
         if self.is_posix:
             command = re.sub(r"(?<![\w-])cd\s+/[dD]\s+(?=\S)", "cd ", command)
+        clamp_note = ""
+        if timeout > _MAX_TIMEOUT:
+            clamp_note = (f"[timeout {timeout} 秒超过上限，已按 {_MAX_TIMEOUT} 秒执行；"
+                          "更长的任务请后台运行并重定向输出]\n")
+            timeout = _MAX_TIMEOUT
         process = None
         job = None
+        readers = None
         try:
             env = _child_env()
             if platform.system() == "Windows":
@@ -283,31 +337,57 @@ class ShellTool(Tool):
                     stderr=asyncio.subprocess.PIPE,
                     executable=self._shell_cmd,
                     env=env,
+                    # 自成进程组：超时/取消时 killpg 整组。只杀 bash 收不掉 `a & b` 里的后台进程
+                    start_new_session=True,
                 )
 
             stdout_lines: list[str] = []
             stderr_lines: list[str] = []
+            state = {"detached": False}
+            readers = asyncio.ensure_future(asyncio.gather(
+                self._read_stream(process.stdout, "stdout", stdout_lines, state),
+                self._read_stream(process.stderr, "stderr", stderr_lines, state),
+            ))
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout
 
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(
-                        self._read_stream(process.stdout, "stdout", stdout_lines),
-                        self._read_stream(process.stderr, "stderr", stderr_lines),
-                    ),
-                    timeout=timeout,
-                )
-                await process.wait()
+                # 读输出的同时盯 shell 本身是否退出：只等管道 EOF 的话，后台进程占着管道就挂到超时
+                while not readers.done():
+                    if process.returncode is not None:
+                        try:
+                            await asyncio.wait_for(asyncio.shield(readers), timeout=_DRAIN_AFTER_EXIT)
+                        except asyncio.TimeoutError:
+                            state["detached"] = True
+                        break
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    await asyncio.wait({readers}, timeout=min(_POLL_INTERVAL, remaining))
+                if not state["detached"]:
+                    readers.result()  # 读流本身出错时抛出，走下面的通用错误分支
+                    # 管道都关了但进程还在（命令关掉了自己的 stdout/stderr）：等它退出，仍受总超时约束
+                    if not await _wait_exit(process, max(0.0, deadline - loop.time())):
+                        raise asyncio.TimeoutError
             except asyncio.TimeoutError:
-                return await self._handle_timeout(
+                readers.cancel()
+                return clamp_note + await self._handle_timeout(
                     process, job, timeout, stdout_lines, stderr_lines,
                 )
 
             output = _build_result(stdout_lines, stderr_lines, process.returncode)
-            return output
+            if state["detached"]:
+                task = asyncio.ensure_future(_drain_detached(readers, process))
+                _detached_drains.add(task)
+                task.add_done_callback(_detached_drains.discard)
+                output = f"{output}\n{_BACKGROUND_NOTE}"
+            return clamp_note + output
 
         except asyncio.CancelledError:
             # stop_task 的取消只在 await 点生效，协程死了子进程不会跟着死——
             # 超时路径有 terminate→kill，取消路径此前没有，孤儿进程会一直跑
+            if readers is not None:
+                readers.cancel()
             if process is not None:
                 await self._shutdown_process(process, job)
             raise
@@ -323,19 +403,35 @@ class ShellTool(Tool):
         """按整树收尾（超时与取消两条路共用）。
 
         Windows 走 Job Object 内核级全灭（MSYS2 会打断父子链，见 _WindowsJob）；
-        POSIX 上 bash -c 单命令会 exec 替换自身，terminate 直接子进程即杀全树。
+        POSIX 上 shell 自成进程组（start_new_session），killpg 整组——只 terminate bash
+        收不掉 `a & b` 这类复合命令里的后台进程。等退出用 _wait_exit，不用 process.wait()
+        （后者要等管道关闭，有逃出进程组的孙进程占着管道就会永远挂住）。
         """
         if process.returncode is not None:
             return
         if job is not None:
             job.terminate()
         else:
-            process.terminate()
+            self._signal_group(process, signal.SIGTERM)
+        if not await _wait_exit(process, _GRACEFUL_WAIT):
+            self._signal_group(process, getattr(signal, "SIGKILL", signal.SIGTERM))
+            await _wait_exit(process, _GRACEFUL_WAIT)
+
+    @staticmethod
+    def _signal_group(process, sig) -> None:
+        if platform.system() == "Windows":  # 无 Job 时的退化路径
+            if sig == signal.SIGTERM:
+                process.terminate()
+            else:
+                process.kill()
+            return
         try:
-            await asyncio.wait_for(process.wait(), timeout=_GRACEFUL_WAIT)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+            os.killpg(process.pid, sig)  # start_new_session：pgid == shell 的 pid
+        except (ProcessLookupError, PermissionError):
+            try:
+                process.send_signal(sig)
+            except ProcessLookupError:
+                pass
 
     async def _handle_timeout(
         self, process, job, timeout: int,

@@ -6,7 +6,9 @@
 """
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from pathlib import Path
 
 _CODE_EXTENSIONS = frozenset({
@@ -17,8 +19,26 @@ _CODE_EXTENSIONS = frozenset({
 })
 
 
+def _norm(p: str | Path) -> str:
+    return os.path.normcase(os.path.abspath(os.path.expanduser(str(p))))
+
+
+def _is_scratch(f: str) -> bool:
+    """系统临时目录里、且不在工作目录内的文件：模型自己的草稿脚本，不是交付物。
+
+    Harbor 基线 protein-assembly：/tmp 下的探索脚本被当成改动文件写进验证提醒，模型为它们
+    多花约 20 次工具调用做「可复现」重建。工作目录本身在临时目录里（如测试的 tmp_path）时照常算。
+    """
+    p = _norm(f)
+    cwd = _norm(Path.cwd())
+    if p == cwd or p.startswith(cwd.rstrip(os.sep) + os.sep):
+        return False
+    roots = {_norm(r).rstrip(os.sep) + os.sep for r in (tempfile.gettempdir(), "/tmp", "/var/tmp")}
+    return any(p.startswith(r) for r in roots)
+
+
 def filter_code_files(files: list[str]) -> list[str]:
-    return [f for f in files if Path(f).suffix.lower() in _CODE_EXTENSIONS]
+    return [f for f in files if Path(f).suffix.lower() in _CODE_EXTENSIONS and not _is_scratch(f)]
 
 
 _EXIT_CODE_RE = re.compile(r"\[exit code: (\d+)")
@@ -81,7 +101,8 @@ def build_verify_prompt(changed_files: list[str], test_command: str | None) -> s
     lines = [
         "## 验证",
         "",
-        f"本轮修改了 {len(changed_files)} 个文件，收尾前还没有通过的测试:",
+        # 旧措辞「收尾前还没有通过的测试:」后面列的却是改动文件，模型读成这些测试没通过（Harbor 基线 cancel-async 实例）
+        f"本轮改动了 {len(changed_files)} 个代码文件，最后一次改动之后还没跑过测试。改动的文件：",
         files_list,
         "",
     ]

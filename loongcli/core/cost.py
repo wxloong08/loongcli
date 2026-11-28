@@ -14,6 +14,8 @@ class ModelPricing:
 
 PRICING: dict[str, ModelPricing] = {
     # DeepSeek (RMB) — https://api-docs.deepseek.com/zh-cn/quick_start/pricing
+    # 正式名 deepseek-flash 与旧名按同一 Flash 价计费（官方：旧名请求由 V4.1-Flash 承接、按 Flash 价）
+    "deepseek-flash": ModelPricing(1.0, 0.02, 2.0, "¥"),
     "deepseek-v4-flash": ModelPricing(1.0, 0.02, 2.0, "¥"),
     "deepseek-v4-pro": ModelPricing(3.0, 0.025, 6.0, "¥"),
     # OpenAI (USD)
@@ -25,6 +27,8 @@ PRICING: dict[str, ModelPricing] = {
     "o3": ModelPricing(10.00, 2.50, 40.00),
     "o3-mini": ModelPricing(1.10, 0.275, 4.40),
     "o4-mini": ModelPricing(1.10, 0.275, 4.40),
+    # Google (USD，Gemini API Standard 档)
+    "gemini-4-neon": ModelPricing(3.00, 0.15, 15.00),
     # Anthropic (USD)
     "claude-opus-4-6": ModelPricing(15.00, 3.75, 75.00),
     "claude-opus-4-7": ModelPricing(15.00, 3.75, 75.00),

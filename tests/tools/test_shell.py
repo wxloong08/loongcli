@@ -309,8 +309,7 @@ async def test_cancel_kills_process_tree():
     会让孙进程（sleep）孤儿续跑——取消后必须全树死透（taskkill /T）。"""
     tool = ShellTool()
     if platform.system() != "Windows" or not tool.is_posix:
-        # POSIX 上 bash -c 单命令 exec 替换自身，直接子进程即全树；
-        # 复合命令的树杀未做（诚实边界）。此测试只覆盖 Windows+git bash。
+        # POSIX 的复合命令整组终止见 test_timeout_kills_whole_process_group（killpg）。
         pytest.skip("仅 Windows + git bash 环境")
 
     collected = []
@@ -348,3 +347,97 @@ async def test_cancel_kills_process_tree():
             break
         await asyncio.sleep(0.2)
     assert not alive, f"孙进程 {winpid} 仍存活——树杀失效"
+
+
+# ── 后台进程占着输出管道（Harbor 基线 query-optimize：`cmd &` 让工具挂满 120 秒）──
+
+def _posix_only(tool):
+    if platform.system() == "Windows" or not tool.is_posix:
+        pytest.skip("仅 POSIX 环境（Windows 由 Job Object 收尾，另有测试）")
+
+
+def _pid_alive(pid: int) -> bool:
+    import os
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:  # 已退出但还没被收尸的僵尸也算死了
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().split(")")[-1].split()[0] != "Z"
+    except OSError:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_background_child_does_not_hang(tool):
+    """shell 已退出、后台进程还占着管道：工具应在排空窗口后返回，而不是挂到超时。"""
+    if not tool.is_posix:
+        pytest.skip("非 POSIX shell 环境")
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    result = await tool.execute(command="echo BG_HI; sleep 30 &", timeout=20)
+    assert loop.time() - t0 < 6, result
+    assert "BG_HI" in result
+    assert "超时" not in result
+    assert "后台进程" in result
+
+
+@pytest.mark.asyncio
+async def test_background_service_survives_return(tool):
+    """后台起服务是正当用法：命令返回后后台进程照常运行，不被杀。"""
+    _posix_only(tool)
+    import os
+    import re as _re
+    import signal as _signal
+    result = await tool.execute(command="sleep 30 & echo BG_PID:$!", timeout=20)
+    pid = int(_re.search(r"BG_PID:(\d+)", result).group(1))
+    try:
+        assert _pid_alive(pid), "后台进程在命令返回后被杀了"
+    finally:
+        os.kill(pid, _signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_timeout_kills_whole_process_group(tool):
+    """前台超时时整组终止：此前只 terminate bash，`a & b` 里的后台 a 会残留。"""
+    _posix_only(tool)
+    import re as _re
+    result = await tool.execute(command="sleep 300 & echo BG_PID:$!; sleep 60", timeout=1)
+    assert "超时" in result
+    pid = int(_re.search(r"BG_PID:(\d+)", result).group(1))
+    for _ in range(40):
+        if not _pid_alive(pid):
+            break
+        await asyncio.sleep(0.1)
+    assert not _pid_alive(pid), "超时后后台进程仍存活——没有按进程组终止"
+
+
+@pytest.mark.asyncio
+async def test_timeout_clamped_to_max(tool, monkeypatch):
+    monkeypatch.setattr(shell_mod, "_MAX_TIMEOUT", 1)
+    cmd = "sleep 5" if tool.is_posix else "Start-Sleep -Seconds 5"
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    result = await tool.execute(command=cmd, timeout=920)
+    assert loop.time() - t0 < 4.5
+    assert "超过上限" in result and "超时" in result
+
+
+def test_no_event_loop_closed_traceback_on_exit(tool):
+    """后台进程占着管道时进程退出，不应打出 transport 回收的「Event loop is closed」。"""
+    if not tool.is_posix:
+        pytest.skip("非 POSIX shell 环境")
+    import subprocess
+    import sys
+    code = (
+        "import asyncio\n"
+        "from loongcli.tools.shell import ShellTool\n"
+        "async def main():\n"
+        "    print(await ShellTool().execute(command='echo X; sleep 5 &', timeout=20))\n"
+        "asyncio.run(main())\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert "X" in r.stdout
+    assert "Event loop is closed" not in r.stderr, r.stderr
